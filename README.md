@@ -46,7 +46,13 @@ installs and removals take effect at the next head-unit restart.
 3. Run the install with root's key:
 
    ```sh
+   # macOS, Linux
    node mgu-install.js first-install --identity ~/.ssh/mgu_root_key
+   ```
+
+   ```powershell
+   # Windows PowerShell
+   node .\mgu-install.js first-install --identity $HOME\.ssh\mgu_root_key
    ```
 
    For an address other than the hotspot's, add `--host <address>` and, if
@@ -96,8 +102,8 @@ link, or the `https://` address of a `catalog.json`. For a GitHub
 repository, pick what to follow from what it has: **Releases**, **Tags** or
 one of its branches.
 
-On iDrive 8 the car has no keyboard for apps: add sources and tokens from
-the phone page.
+On iDrive 8, typing in the Store doesn't work yet: add sources and tokens
+from the phone page or the computer, or use **Sign in with GitHub**.
 
 ### Private repositories
 
@@ -128,7 +134,7 @@ someone else's account, use a classic token with the `repo` scope instead.
 
 ### Phone page
 
-Settings → **Phone access** shows a QR code. Scan it with a phone on the
+Settings → **Phone access** → **On** shows a QR code. Scan it with a phone on the
 car's hotspot to see sources, installs, errors and logs, and to add sources
 and accounts with the phone's keyboard. Turn it off when done.
 
@@ -140,7 +146,8 @@ through:
 - a USB Ethernet adapter;
 - an LTE stick (e.g. Huawei E3372h);
 - an Android phone with USB tethering;
-- an iPhone with Personal Hotspot on (tap **Trust** when asked).
+- an iPhone with Personal Hotspot on, kept unlocked (tap **Trust** when
+  asked); its USB music playback stops while it tethers.
 
 Phone tethering is not yet tested on a real car. The Store shows `Online`
 once connected.
@@ -159,11 +166,12 @@ into the car and use the **USB** page.
 
 ## Publishing your apps
 
-Any GitHub repository can be a source, in one of three layouts:
+Any GitHub repository or HTTPS address can be a source, in one of three
+layouts:
 
 | Layout | What the repository has |
 |---|---|
-| Releases | built `<id>@<version>.tgz` packages attached to GitHub releases |
+| Releases | built `<id>@<version>.tgz` (or `.mgu`) packages attached to GitHub releases |
 | Catalog | a `catalog.json` listing each package (in a release named `catalog`, or at any HTTPS address) |
 | Repo tree | an `mgu-repo.json`; the head unit builds the apps from source |
 
@@ -181,8 +189,9 @@ Every app needs:
 ## Development
 
 Each component's README covers its build and tests.
-[`deploy/README.md`](deploy/README.md) covers `deploy/hu`, which installs
-components from a checkout; [`release/README.md`](release/README.md)
+[`deploy/README.md`](deploy/README.md) has the full installer reference
+(every command, including `token --list`/`--remove`) and `deploy/hu`, which
+installs components from a checkout; [`release/README.md`](release/README.md)
 covers releases.
 
 ## License
