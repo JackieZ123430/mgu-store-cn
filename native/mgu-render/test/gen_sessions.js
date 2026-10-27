@@ -17,6 +17,8 @@
  *                           radius, under and over other ops, in a layer (not drawn there), DROP_VIDEO 14
  *   iterio-refused-path.bin, iterio-refused-dotdot.bin   a frame file outside /dev/shm/mgu-video-*: refused,
  *                           the frame still drawn
+ *   refused-owner.bin       as those, naming /dev/shm/mgu-video-replay-owner: replay.sh replays it as an app whose
+ *                           uid does not own the file (refused, drawn as iterio-refused-path) and as the owner
  *   native-video.bin / native-video-ref.bin   a video through js/mgu_render_client.js, and as iterio messages
  *
  *   node test/gen_sessions.js DIR
@@ -203,6 +205,7 @@ native('rgba', 'rgba');
         video(1, file), ops([OP.CLEAR, MAGENTA].concat(vop(1, 0, 0, 200, 100, 0)))]);
     fs.writeFileSync(path.join(dir, 'iterio-refused-path.bin'), refused('/etc/passwd'));
     fs.writeFileSync(path.join(dir, 'iterio-refused-dotdot.bin'), refused('/dev/shm/mgu-video-../../etc/passwd'));
+    fs.writeFileSync(path.join(dir, 'refused-owner.bin'), refused('/dev/shm/mgu-video-replay-owner'));
 
     const gpu = new RenderClient('native-video', { info() {}, warn() {} }, { file: path.join(dir, 'native-video.bin') });
     gpu.connect();

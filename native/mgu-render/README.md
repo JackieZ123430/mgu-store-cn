@@ -252,9 +252,12 @@ Video (`info.video`): a player process writes decoded frames (I420) to
 `/dev/shm/mgu-video-<name>` (PROTOCOL.md, "Video"); the app names the file
 with `gpu.video(1, '/dev/shm/mgu-video-<name>')` and puts
 `videoOp(1, x, y, w, h, r)` in its frames. Each new video frame draws the
-app's last frame again, so the app sends frames only when its own drawing
-changes. IterioDev's YouTube app (IterioDev/car-apps, with its player
-mgu-ytplay) uses it through IterioDev's kit.
+app's last frame again; the app still sends at least one message a second
+while it is shown (its frame again will do), since an app silent for 3 s is
+taken for hung and hidden. The frame file must be the app's (its uid), or a
+system player's (root, or `nobody`). IterioDev's YouTube app
+(IterioDev/car-apps, with its player mgu-ytplay) uses it through IterioDev's
+kit.
 
 The controller: read FrontCCU over SOME/IP in the app (display-bridge's
 `display_input.js` does) and keep the page's hidden focusable components for
@@ -267,7 +270,7 @@ HMI only where the HMI's controller gate is loaded (`info.controller`).
 |---|---|
 | `make target` | `build/target/mgu-render`: x86-64, glibc 2.27, loader `/lib/ld-linux-x86-64.so.2`, built in Ubuntu 18.04 (Docker, linux/amd64) |
 | `make check-target` | the binary's architecture, loader, libraries (`libwayland-client`, `libwayland-egl`, `libEGL`, `libGLESv2`, libc, libm) and glibc versions |
-| `make test` | in Ubuntu 24.04 with Mesa's llvmpipe (Docker): `test/test_dialect.c`, `test/test_touch.c` (routing; our table and ports only, in while claimed, out when not and when the renderer dies), `test/test_share.c` (the community socket beside a fake second renderer: handover, restart, take-back, the drop race, foreign sockets kept), and `test/replay.sh`: every session in `test/sessions/` (recorded from upstream's and IterioDev's kits, `test/sessions/README.md`) and the synthetic ones (`test/gen_sessions.js`) replayed through the original daemons (`test/reference/`) and mgu-render, every frame compared byte for byte; native pixmaps compared with the same pictures sent as IterioDev pictures; video sessions read frame files in `/dev/shm` and their last frame is checked for the videos' colours |
+| `make test` | in Ubuntu 24.04 with Mesa's llvmpipe (Docker): `test/test_dialect.c`, `test/test_touch.c` (routing; our table and ports only, in while claimed, out when not and when the renderer dies), `test/test_share.c` (the community socket beside a fake second renderer: handover, restart, take-back, the drop race, foreign sockets kept), `test/test_video.c` (a frame file shorter than its header, the frame file's owner, the video limits), and `test/replay.sh`: every session in `test/sessions/` (recorded from upstream's and IterioDev's kits, `test/sessions/README.md`) and the synthetic ones (`test/gen_sessions.js`) replayed through the original daemons (`test/reference/`) and mgu-render, every frame compared byte for byte; native pixmaps compared with the same pictures sent as IterioDev pictures; video sessions read frame files in `/dev/shm` and their last frame is checked for the videos' colours; a frame file of another uid is refused |
 | `deploy/hu install mgu-render` | build and install on a unit or the emulator (deploy/README.md) |
 
 `mgu-render --replay FILE --out F.pam [--raw F.rgba]` draws a recorded

@@ -14,12 +14,14 @@
 #include <GLES2/gl2.h>
 #include <fcntl.h>
 #include <math.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "gfx.h"
+#include "log.h"
 #include "proto.h"
 
 enum { K_BOX = 0, K_RRECT = 1, K_ARC = 3, K_LINE = 4, K_GLYPH = 5, K_TEX = 6, K_VCOL = 7, K_RAMPRECT = 8, K_QUAD = 9, K_IMG = 10, K_YUV = 11 };
@@ -252,6 +254,7 @@ void gfx_layer_drop(gfx_client *c, uint32_t id) {
 }
 
 static size_t images_all;                                /* picture bytes of all apps */
+static size_t videos_all;                                /* video bytes of all apps (GFX_VIDEO_ALL) */
 
 static gfx_image *find_image(gfx_client *c, uint32_t id) {
     for (gfx_image *m = c->images; m; m = m->next) if (m->id == id) return m;
@@ -454,15 +457,23 @@ void gfx_video_drop(gfx_client *c, uint32_t id) {
         if ((*pp)->id == id) {
             gfx_video *v = *pp; *pp = v->next;
             for (int k = 0; k < 3; k++) if (v->tex[k]) glDeleteTextures(1, &v->tex[k]);
+            c->nvideo--; c->video_bytes -= v->bytes; videos_all -= v->bytes;
             close(v->fd); free(v->buf); free(v);
-            c->nvideo--;
             return;
         }
     }
 }
 
-/* only /dev/shm/mgu-video-<letters, digits, - _ .>: the renderer runs as root, an app must not name other files */
-int gfx_video_def(gfx_client *c, uint32_t id, const char *path) {
+/* A player that runs as a system service writes as root, or as nobody: IterioDev's mgu-ytplay starts as root, gives
+   its frame file to nobody and drops to nobody. Its frames are for whichever app shows them. */
+static uid_t nobody_uid(void) {
+    struct passwd *pw = getpwnam("nobody");
+    return pw ? pw->pw_uid : (uid_t)-1;
+}
+
+/* only /dev/shm/mgu-video-<letters, digits, - _ .>, owned by the app (uid), root or nobody: the renderer runs as root,
+   an app must not name other files, nor another app's frames */
+int gfx_video_def(gfx_client *c, uint32_t id, const char *path, uint32_t uid) {
     static const char pfx[] = "/dev/shm/mgu-video-";
     gfx_video_drop(c, id);
     const char *n = path + sizeof pfx - 1;
@@ -476,6 +487,11 @@ int gfx_video_def(gfx_client *c, uint32_t id, const char *path) {
     if (fd < 0 || fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
         if (fd >= 0) close(fd);
         snprintf(err, sizeof err, "video %u: cannot open %.80s", id, path);
+        return -1;
+    }
+    if (uid != 0 && st.st_uid != uid && st.st_uid != 0 && st.st_uid != nobody_uid()) {
+        close(fd);
+        snprintf(err, sizeof err, "video %u: %.80s is not the app's (owner uid %u)", id, path, (unsigned)st.st_uid);
         return -1;
     }
     gfx_video *v = calloc(1, sizeof *v);
@@ -493,20 +509,37 @@ static int video_head(const gfx_video *v, struct mgu_video_head *h) {
 
 int gfx_video_pending(gfx_client *c) {
     struct mgu_video_head h;
-    for (gfx_video *v = c->videos; v; v = v->next) if (video_head(v, &h) && h.seq != v->seq) return 1;
+    for (gfx_video *v = c->videos; v; v = v->next) if (video_head(v, &h) && h.seq != v->seq && h.seq != v->bad_seq) return 1;
     return 0;
 }
 
 /* the newest frame to the GPU (pread, not mmap: a file the player shrinks can't crash the renderer).
    ponytail: a copy per frame (~1.4 MB at 720p); mmap or dmabuf if that ever shows */
-static void video_update(gfx_video *v) {
+static void video_update(gfx_client *c, gfx_video *v) {
     struct mgu_video_head h;
     if (!video_head(v, &h) || h.seq == v->seq) return;
     size_t ysz = (size_t)h.w * h.h, csz = (size_t)(h.w / 2) * (h.h / 2), fsz = ysz + 2 * csz;
-    if (fsz > v->cap) { uint8_t *b = realloc(v->buf, fsz); if (!b) return; v->buf = b; v->cap = fsz; }
-    if (pread(v->fd, v->buf, fsz, (off_t)sizeof h + (off_t)h.slot * (off_t)fsz) != (ssize_t)fsz) return;
+    if (fsz != v->cap) {             /* a new size: the frame's copy and its textures (fsz each) must fit the limits;
+                                        refused, the frame shown before stays */
+        size_t bytes = 2 * fsz;
+        int app = c->video_bytes - v->bytes + bytes > GFX_VIDEO_BYTES;
+        if (app || videos_all - v->bytes + bytes > GFX_VIDEO_ALL) {
+            if (h.w != v->refused_w || h.h != v->refused_h)
+                log_warn("%s: video %u: %ux%u frames not shown: %s %u MB of video", c->name ? c->name : "app", v->id, h.w,
+                         h.h, app ? "an app holds at most" : "all apps hold at most", (app ? GFX_VIDEO_BYTES : GFX_VIDEO_ALL) >> 20);
+            v->refused_w = h.w; v->refused_h = h.h; v->bad_seq = h.seq;
+            return;
+        }
+        uint8_t *b = realloc(v->buf, fsz);
+        if (!b) { v->bad_seq = h.seq; return; }
+        v->buf = b; v->cap = fsz;
+        c->video_bytes += bytes - v->bytes; videos_all += bytes - v->bytes; v->bytes = bytes;
+    }
+    v->refused_w = v->refused_h = 0;
+    /* short: the file is shorter than its header says (written in that order, or cut); not pending until seq moves on */
+    if (pread(v->fd, v->buf, fsz, (off_t)sizeof h + (off_t)h.slot * (off_t)fsz) != (ssize_t)fsz) { v->bad_seq = h.seq; return; }
     int resize = (int)h.w != v->w || (int)h.h != v->h;
-    v->seq = h.seq; v->w = (int)h.w; v->h = (int)h.h; v->matrix = h.matrix == 1; v->full = h.full == 1;
+    v->seq = v->bad_seq = h.seq; v->w = (int)h.w; v->h = (int)h.h; v->matrix = h.matrix == 1; v->full = h.full == 1;
     const uint8_t *pl[3] = { v->buf, v->buf + ysz, v->buf + ysz + csz };
     for (int k = 0; k < 3; k++) {
         int pw = k ? v->w / 2 : v->w, ph = k ? v->h / 2 : v->h;
@@ -988,7 +1021,7 @@ void gfx_draw(gfx_client *c, const gfx_xf *xf, int fbw, int fbh, const uint32_t 
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     if (clear_transparent) { glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT); }
     nv = 0;
-    for (gfx_video *v = c->videos; v; v = v->next) video_update(v);
+    for (gfx_video *v = c->videos; v; v = v->next) video_update(c, v);
     run(c, xf, cmd, n, 0);
     flush();
     glDisable(GL_SCISSOR_TEST);
