@@ -894,6 +894,24 @@ it is (said in the output); so does any error putting the copy in place,
 which never fails the install. The copy is bound until the next start of the
 head unit, and again at the next app install; `fallback off` removes it.
 
+**The certification service.** MainApp's install has the certification
+service (cadaemon) create the app's keychain, called as the app's uid; the
+car's SOME/IP security lets that call through only when the app's
+permissions, which MainApp makes from the proxies of its SOME/IP manifest
+(`package.json` `oapAppSettings.someipManifest`, `manifest.json` by
+default), name `de.bmw.infotainment.certification.Certification`. A
+package whose manifest lacks it is prepared with it added (`"*"`); without
+it no answer comes and the install fails at the keychain. A package with no
+manifest is left as it is.
+
+**Interrupted installs.** Each app install is recorded in `state.json`
+(`inflight`) until it finishes or is rolled back. Before an app install,
+an app listed in `custom_apps.json` without a registry entry is unlisted
+and its `preinstalled_apps` package removed when this tool put them there:
+its record names a run that is gone (or another boot), or else the newest
+install snapshot of that package shows the package absent and the app not
+listed before. Otherwise it stays, and the output says so.
+
 `uninstall <id>` removes the app from `custom_apps.json` first, so the
 manager does not install it again meanwhile, then asks the running manager
 to uninstall it in place (above), which takes its tile off the HMI at once,
