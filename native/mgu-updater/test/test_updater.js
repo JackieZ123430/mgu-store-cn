@@ -459,9 +459,10 @@ function testShipped() {
     ok('shipped: no catalog key and no signing settings',
         !shipped.some((f) => /\.pem$/.test(f)) && conf.public_key === undefined && conf.catalog === undefined &&
         !fs.readdirSync(ROOT).some((f) => /\.pem$/.test(f)));
-    ok('shipped: sources, credentials, the build uid and the secrets have their places',
+    ok('shipped: sources, credentials and the secrets have their places; the service uids are picked on the unit',
         conf.sources === '/var/opt/mgu-updater/sources.json' && conf.credentials_dir === '/var/opt/mgu-updater/credentials' &&
-        conf.build_uid === '12995' && conf.web_uid === '12996' && conf.web_gid === '12202' && conf.web_port === '8470' &&
+        ['build', 'fetch', 'web'].every((r) => conf[`${r}_uid`] === undefined && conf[`${r}_gid`] === undefined) &&
+        conf.socket_group === 'tm_oap_app' && conf.web_port === '8470' &&
         conf.web_iface === 'wlan_bridge' && conf.web_secret === '/run/mgu-updater/web-secret' &&
         conf.usb_roots === '/media' && conf.store_app === 'robertn_store' && 'github_client_id' in conf);
 }
@@ -659,6 +660,118 @@ function rebootRuns(dir) {
     return fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8').split('\n').filter(Boolean) : [];
 }
 
+/* The updater's own uids in a running Updater (uids.js): picked with no
+ * overrides, picked again only while nothing runs as them, downloads held
+ * until the uplink reads a new fetch uid, the phone page moved. */
+function testUidsDaemon() {
+    const updaterJs = require('../js/updater');
+    const { Updater } = updaterJs;
+    const dir = path.join(T, 'uids-daemon');
+    const p = (rel) => path.join(dir, rel);
+    const put = (rel, text) => {
+        mkdirp(path.dirname(p(rel)));
+        fs.writeFileSync(p(rel), text);
+    };
+    put('etc/passwd', 'root:x:0:0::/root:/bin/sh\ncns_12701:x:12701:12701::/:/bin/false\n');
+    put('etc/group', 'root:x:0:\ntm_oap_app:x:12202:\n');
+    mkdirp(p('proc'));
+    put('mainapp/config/base.json', JSON.stringify({ usableUidsAndGids: { min: 12203, max: 12450 },
+        usableUidsAndGidsRse: { right: { min: 12453, max: 12700 } }, mainAppUids: [12201, 12451] }));
+    put('oap/oap_12201/data/apps/store.json', JSON.stringify({ userId: 12205 }));
+    put('opt/mgu-uplink/versions/0.5.3/component.json', '{"version":"0.5.3"}');
+    fs.symlinkSync('versions/0.5.3', p('opt/mgu-uplink/current'));
+    mkdirp(p('run'));
+    const conf = { state_dir: p('state'), tool_root: p('opt'), oap_root: p('oap'), mainapp_uid: '12201', uplink_tool: 'mgu-uplink',
+        socket_group: 'tm_oap_app', etc_dir: p('etc'), proc_dir: p('proc'), mainapp_config: p('mainapp/config/base.json'),
+        web_secret: p('run/web-secret'), store_app: 'robertn_store' };
+    const calls = [];
+    const stub = { UNITS: [], setEnabled(c, on) { calls.push({ on, uid: c.web_uid, gid: c.web_gid }); return Promise.resolve(); },
+        state() { return { enabled: false, urls: [], error: null }; }, accessUrls() { return []; }, journal(u, l, cb) { cb(null, ''); } };
+    updaterJs._setWeb(stub);
+    const u = new Updater(conf);
+    u.secret = 'a'.repeat(64);
+    ok('uids: a start without overrides picks all three above MainApp\'s ranges',
+        conf.build_uid === '12702' && conf.fetch_uid === '12703' && conf.web_uid === '12704' && conf.web_gid === '12202' &&
+        !(u.fetcher.notBefore > Date.now()), JSON.stringify(conf));
+    // a tool installed since holds the fetch and web uids
+    put('opt/mgu-uplink/uids.d/net-tool', '12703\n12704\n');
+    u.webEnabled = true;
+    u.fetcher.active = 1;
+    return u.checkUids()
+        .then(() => {
+            ok('uids: not picked again while a download runs', conf.fetch_uid === '12703' && u.uidsPending === true);
+            u.fetcher.active = 0;
+            u.building = true;
+            return u.checkUids();
+        })
+        .then(() => {
+            ok('uids: nor while a build runs', conf.fetch_uid === '12703' && u.uidsPending === true);
+            u.building = false;
+            return u.checkUids();
+        })
+        .then(() => {
+            ok('uids: picked again once nothing runs as them', conf.fetch_uid === '12705' && conf.web_uid === '12706' &&
+                u.uidsPending === false && fs.readFileSync(p('opt/mgu-uplink/uids.d/mgu-updater'), 'utf8') === '12705\n',
+                JSON.stringify(conf));
+            ok('uids: downloads wait for the uplink to read the new fetch uid', u.fetcher.notBefore - Date.now() > 5000);
+            ok('uids: the phone page restarts as the new web uid', calls.length === 1 && calls[0].on && calls[0].uid === '12706');
+            if (process.getuid() === 0) {
+                ok('uids: its secret is the new web uid\'s', fs.statSync(p('run/web-secret')).uid === 12706);
+            }
+            // the wait itself
+            u.fetcher.notBefore = Date.now() + 400;
+            const t0 = Date.now();
+            return u.fetcher.request({ url: 'https://example.invalid/x', headers: {}, name: 'x', maxBytes: 10 })
+                .catch(() => null)
+                .then(() => ok('uids: a download waits until then', Date.now() - t0 >= 380 && u.fetcher.active === 0));
+        })
+        .then(() => {
+            // queue: what needs a newer updater waits for the updater's own update
+            const order = [];
+            u.src = new Map([['s', { components: [{ id: 'mgu-uplink', requires: { 'mgu-updater': '99.0.0' } },
+                { id: 'mgu-updater', requires: {} }, { id: 'other', requires: {} }] }]]);
+            u.install = (item) => {
+                order.push(item.id);
+                return Promise.resolve(item.id === 'mgu-updater');
+            };
+            u.queue = [{ op: 'install', id: 'mgu-uplink', source: 's' }, { op: 'install', id: 'other', source: 's' },
+                { op: 'install', id: 'mgu-updater', source: 's' }];
+            let handed = null;
+            u.handover = function () {
+                handed = this.queue.slice();
+            };
+            u.next();
+            return new Promise((r) => setTimeout(r, 50)).then(() => {
+                ok('queue: others first, then the updater before what needs it', order.join() === 'other,mgu-updater' &&
+                    handed && handed.map((q) => q.id).join() === 'mgu-uplink', order.join());
+            });
+        })
+        .then(() => {
+            // the queue across the restart: handover writes it, the kept version takes it up
+            const exit = process.exit;
+            let code = null;
+            process.exit = (c) => {
+                code = c;
+            };
+            const v = Object.create(Updater.prototype);
+            Object.assign(v, { conf, queue: [{ op: 'install', id: 'mgu-uplink', source: 's' }], clients: [], server: { close() {} } });
+            try {
+                Updater.prototype.handover.call(v);
+            } finally {
+                process.exit = exit;
+            }
+            const file = path.join(conf.state_dir, 'queue.json');
+            ok('queue: what is left is kept for the new version', code !== null && JSON.parse(fs.readFileSync(file, 'utf8'))[0].id === 'mgu-uplink');
+            u.queue = [];
+            u.errors = {};
+            u.busy = null;
+            u.takeQueue();
+            ok('queue: the kept new version queues it again', u.queue.map((q) => q.id).join() === 'mgu-uplink' && !fs.existsSync(file));
+            updaterJs._setWeb(fs.existsSync(path.join(ROOT, 'js', 'web.js')) ? require('../js/web') : null);
+        })
+        .catch((e) => ok('uids in the daemon', false, e.stack));
+}
+
 function testReboot() {
     const { Updater } = require('../js/updater');
     const dir = path.join(T, 'reboot');
@@ -798,6 +911,8 @@ function testDaemon(certs, pubDir) {
         `tool_root = ${opt}`, `oap_root = ${oap}`, `socket = ${sock}`, 'socket_group = staff',
         'first_check_s = 0', 'check_interval_s = 3600', `privacy_tool = ${privacyTool}`, 'default_sources =',
         `log_file = ${path.join(T, 'tmp', 'mgu-updater.log')}`, `reboot = ${rebootScript(path.join(T, 'daemon-reboot'))} reboot`,
+        // the unit's uids as overrides (picking them: testUidsDaemon)
+        `fetch_uid = ${FETCH_UID}`, 'build_uid = 12995', 'web_uid = 12996',
         extra || ''].join('\n');
     fs.writeFileSync(conf, confText());
     // a link where the log file goes: the daemon writes its own file, not through it
@@ -3748,6 +3863,7 @@ function main() {
     testFileLog();
     return testTar()
         .then(() => testReboot())
+        .then(() => testUidsDaemon())
         .then(() => Promise.all([startDns(), startHttps(certs, pubDir)]))
         .then(([dnsSrv, httpsSrv]) => testFetch(certs, pubDir)
             .then(() => testSources(certs).catch((e) => ok('sources scenario', false, e.stack)))

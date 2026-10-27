@@ -30,6 +30,7 @@ const sourcesLib = require('./sources');
 const { DeviceLogin } = require('./login');
 const { Tokens, TOKEN } = require('./tokens');
 const { runBuild, cleanBuilds } = require('./build');
+const { ServiceUids, retireOld } = require('./uids');
 const { UpdaterClient } = require('./client');
 
 const ID = catalogLib.ID;
@@ -43,6 +44,8 @@ const HANDOVER_EXIT = 75;
 const TRIAL_WAIT_MS = Number(process.env.MGU_UPDATER_TRIAL_WAIT_MS || 120000);
 // A restart the unit has not carried out by then is reported as failed.
 const REBOOT_WAIT_MS = Number(process.env.MGU_UPDATER_REBOOT_WAIT_MS || 180000);
+// The uplink takes up a new fetch uid within its 5 s rescan of uids.d.
+const UPLINK_RESCAN_MS = Number(process.env.MGU_UPDATER_UPLINK_RESCAN_MS || 6000);
 
 /* ---- configuration ------------------------------------------------------ */
 
@@ -403,12 +406,19 @@ class Fetcher {
     constructor(conf) {
         this.conf = conf;
         this.state = conf.state_dir;
-        this.uid = Number(conf.fetch_uid);
-        this.gid = Number(conf.fetch_gid);
         this.ca = conf.ca_file ? fs.readFileSync(conf.ca_file, 'utf8') : null;
         // url -> { etag, body }: the answers cached() asks for again, oldest first
         this.etags = new Map();
         this.etagBytes = 0;
+    }
+
+    // the conf's: a re-picked fetch uid applies to the next download
+    get uid() {
+        return Number(this.conf.fetch_uid);
+    }
+
+    get gid() {
+        return Number(this.conf.fetch_gid);
     }
 
     asFetchUid(opts) {
@@ -491,8 +501,29 @@ class Fetcher {
     /* Downloads url (method GET, or POST with body); resolves with its bytes,
      * the response headers named in job.keep as their .headers. A failure
      * carries the HTTP status as err.status when the server answered. */
+    /* Downloads wait for notBefore (a new fetch uid the uplink has not
+     * read yet); active counts those under way. */
     request(job) {
+        this.active = (this.active || 0) + 1;
+        const done = () => {
+            this.active--;
+        };
+        return new Promise((resolve) => setTimeout(resolve, Math.max(0, (this.notBefore || 0) - Date.now())))
+            .then(() => this.requestNow(job))
+            .then((bytes) => {
+                done();
+                return bytes;
+            }, (err) => {
+                done();
+                throw err;
+            });
+    }
+
+    requestNow(job) {
         const { url, headers, name, maxBytes, onProgress } = job;
+        if (process.getuid() === 0 && !(this.uid > 0)) {
+            return Promise.reject(new Error('no fetch uid (the log says why)'));
+        }
         const lease = readLease(this.conf);
         if (!lease.online) {
             return Promise.reject(new Error('no internet (the uplink is down)'));
@@ -620,7 +651,12 @@ class Updater {
     constructor(conf) {
         this.conf = conf;
         this.version = selfVersion();
+        this.uids = new ServiceUids(conf, (l) => console.log(l));
+        const picked = this.uids.ensure();
         this.fetcher = new Fetcher(conf);
+        if (picked.some((c) => c.role === 'fetch')) {
+            this.fetcher.notBefore = Date.now() + UPLINK_RESCAN_MS;
+        }
         this.tokens = new Tokens(conf.credentials_dir || path.join(conf.state_dir, 'credentials'));
         this.ctx = {
             net: this.fetcher,
@@ -1327,10 +1363,11 @@ class Updater {
         }
         this.changed();
         this.rebootError = null;
+        const uids = this.checkUids();
         this.scanUsb();
         this.scanTokens();
         this.validateTokens();
-        this.checking = Promise.all(this.defs().map((d) => this.checkSource(d.id)))
+        this.checking = uids.then(() => Promise.all(this.defs().map((d) => this.checkSource(d.id))))
             .then(() => this.pruneIcons())
             .then(() => this.refresh())
             .then(() => {
@@ -1472,13 +1509,6 @@ class Updater {
             this.changed();
             return null;
         }
-        // the updater installs last and restarts into its new version, which
-        // ends the queue: what needs it waits for that, asked for again
-        const self = steps.find((s) => s.id === SELF);
-        if (self && id !== SELF) {
-            steps = [self];
-            this.errors[id] = `needs a newer ${SELF}: it installs first, then ${id} can be installed`;
-        }
         const items = steps.map((s) => Object.assign({ op: 'install', id: s.id, source: s.source }, s.listed ? { listed: s.listed } : {},
             s.unit ? { unit: s.unit } : {}));
         const refused = items.map((i) => this.conflict(i)).filter(Boolean)[0];
@@ -1579,11 +1609,22 @@ class Updater {
         return null;
     }
 
-    /* Takes the next request; the updater's own update goes last, since it
-     * restarts the daemon and a queue does not survive that. */
+    /* Takes the next request: the first that does not need a newer updater
+     * than this one; the updater's own update when only those are left (the
+     * rest of the queue is kept for the new version, queue.json), else
+     * last, since it restarts the daemon. */
     next() {
-        const other = this.queue.findIndex((q) => q.id !== SELF);
-        const item = this.queue.splice(other >= 0 ? other : 0, 1)[0];
+        const needsSelf = (q) => {
+            const rt = q.op === 'install' && q.id !== SELF && this.src.get(q.source);
+            const own = rt && rt.components.find((c) => c.id === (q.listed || q.id));
+            const min = own && own.requires && own.requires[SELF];
+            return !!min && !this.requirementMet(SELF, min);
+        };
+        let i = this.queue.findIndex((q) => q.id !== SELF && !needsSelf(q));
+        if (i < 0) {
+            i = Math.max(0, this.queue.findIndex((q) => q.id === SELF));
+        }
+        const item = this.queue.splice(i, 1)[0];
         if (!item) {
             this.busy = null;
             this.changed();
@@ -1655,9 +1696,26 @@ class Updater {
             }
             this.busy.phase = 'build';
             this.changed();
+            this.building = true;
+            const built = () => {
+                this.building = false;
+                if (this.uidsPending) {
+                    this.checkUids();
+                }
+            };
             return this.sdkDonor()
+                // a network build's proxy runs as the fetch uid: once the uplink lets it out
+                .then((donor) => new Promise((resolve) => setTimeout(resolve, Math.max(0, (this.fetcher.notBefore || 0) - Date.now())))
+                    .then(() => donor))
                 .then((donor) => runBuild({ conf: this.conf, entry: made.entry, files: made.files, donor: donor.path, sdk: donor.module,
                     lease: readLease(this.conf), log: (l) => console.log(l) }))
+                .then((bytes) => {
+                    built();
+                    return bytes;
+                }, (err) => {
+                    built();
+                    throw err;
+                })
                 .then((bytes) => (own.id === entry.id ? bytes : sourcesLib.packageId(bytes, Number(this.conf.build_max_bytes) || 200 << 20)
                     .then((out) => {
                         if (out !== entry.id) {
@@ -2031,7 +2089,46 @@ class Updater {
     }
 
     deploy(file) {
-        return this.deployTool(['install', '--artifact', file, '--yes']);
+        return this.deployTool(['install', '--artifact', file, '--yes']).then((code) => this.checkUids().then(() => code));
+    }
+
+    /* Picks a uid again that something else holds now (an install, an
+     * account), and moves what used the one before: what it left in its
+     * download and build folders is removed as it, new downloads wait for
+     * the uplink to read the new fetch uid, the phone page restarts as the
+     * new web uid. Not while a download or a build runs as the old one:
+     * then it is done once they are over (pending). Resolves when done. */
+    checkUids() {
+        if (this.fetcher.active || this.building) {
+            this.uidsPending = true;
+            return Promise.resolve();
+        }
+        this.uidsPending = false;
+        let changed;
+        try {
+            changed = this.uids.ensure();
+        } catch (e) {
+            console.log(`uids: ${e.message}`);
+            return Promise.resolve();
+        }
+        const roles = changed.map((c) => c.role);
+        if (roles.indexOf('fetch') >= 0) {
+            this.fetcher.notBefore = Date.now() + UPLINK_RESCAN_MS;
+        }
+        if (roles.indexOf('web') >= 0) {
+            this.writeSecrets();
+            if (web && this.webEnabled) {
+                this.applyWeb();
+            }
+        }
+        return this.retireUids();
+    }
+
+    /* Removes what earlier build and fetch uids left (retireOld). */
+    retireUids() {
+        const free = (uid) => this.uids.free(uid);
+        return retireOld(this.conf, 'fetch', free).then(() => retireOld(this.conf, 'build', free))
+            .catch((e) => console.log(`uids: ${e.message}`));
     }
 
     /* Runs the deploy tool; resolves with its exit status. deployError keeps
@@ -2436,9 +2533,26 @@ class Updater {
         }
     }
 
+    /* Queues what the version before left queued (handover). */
+    takeQueue() {
+        const file = path.join(this.conf.state_dir, 'queue.json');
+        let items = [];
+        try {
+            items = readJson(file);
+        } catch (e) { /* none */ }
+        rmIfThere(file);
+        (Array.isArray(items) ? items : []).filter((q) => q && ID.test(String(q.id)) && ['install', 'uninstall', 'adopt'].indexOf(q.op) >= 0)
+            .forEach((q) => this.enqueue(q));
+    }
+
     /* The new version is in place: the supervisor starts it once we exit. */
     handover() {
         console.log('handing over to the new version');
+        // the new version takes up what is still queued once it is kept
+        if (this.queue.length) {
+            mkdirp(this.conf.state_dir, 0o755);
+            writeAtomic(path.join(this.conf.state_dir, 'queue.json'), JSON.stringify(this.queue));
+        }
         this.clients.forEach((s) => s.end());
         this.server.close();
         try {
@@ -2571,6 +2685,7 @@ class Updater {
                     console.log(`running ${this.version}: update committed`);
                     this.tokens.removeLegacy((l) => console.log(l));
                     this.busy = null;
+                    this.takeQueue();
                     this.next();
                     return;
                 }
@@ -2578,6 +2693,7 @@ class Updater {
                     !readLease(this.conf).online ? 'there was no internet to check it with' :
                         `it cannot fetch the catalog (${this.catalogError()})`;
                 console.log(`${this.version} not kept: ${reason}`);
+                rmIfThere(path.join(this.conf.state_dir, 'queue.json'));
                 writeAtomic(path.join(this.conf.tool_root, SELF, 'trial-reason'), `${reason}\n`);
                 process.exit(1);
             });
@@ -2585,8 +2701,11 @@ class Updater {
 
     run() {
         return this.serve().then(() => {
-            this.fetcher.clean();
-            cleanBuilds(this.conf);
+            // folders earlier uids of theirs left, then their own
+            this.retireUids().then(() => {
+                this.fetcher.clean();
+                cleanBuilds(this.conf);
+            });
             this.writeSecrets();
             if (web) {
                 // also with false: it removes a firewall rule an earlier run left
@@ -2597,6 +2716,8 @@ class Updater {
                 this.commitTrial(trial);
             } else {
                 rmIfThere(path.join(this.conf.tool_root, SELF, 'trial-local'));
+                // a queue a version that was not kept left
+                rmIfThere(path.join(this.conf.state_dir, 'queue.json'));
                 console.log(`running ${this.version}`);
                 // a version on trial keeps them for the one it may go back to
                 this.tokens.removeLegacy((l) => console.log(l));
@@ -2623,6 +2744,9 @@ class Updater {
             setInterval(() => {
                 this.scanUsb();
                 this.scanTokens();
+                if (this.uidsPending) {
+                    this.checkUids();
+                }
             }, (Number(this.conf.usb_poll_s) || 5) * 1000);
             // A version installed from outside (the deploy tool run from the
             // Mac) is taken up on trial too, with this one to return to; it
