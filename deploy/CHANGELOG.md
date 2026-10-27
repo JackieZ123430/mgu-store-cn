@@ -1,5 +1,12 @@
 # Deploy tool changelog
 
+## 0.5.7
+
+- Putting the copy of `CertificateManager.js` in place never fails an install: on any error the stock script stays, with a warning.
+- An install MainApp failed as already installed is waited for as before, and needs no bounce once the app is there.
+- Only MainApp's own rejection of an install or update ends it at once; a failure of its AppManagement child or channel goes through the bounce, which restarts the child.
+- The copy's keychain wait is 115 s, inside the 125 s MainApp gives it with app-privacy 1.5.0.
+
 ## 0.5.6
 
 - An app install or update that MainApp itself fails (for example, when the head unit's certificate service does not create the app's keychain) fails at once with MainApp's reason, in one line. MainApp is not restarted and no 10-minute wait follows: a restarted MainApp runs the same install, and restarting it stops every app, the Store included.
