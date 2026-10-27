@@ -20,6 +20,10 @@ func TestIPhethLegacy(t *testing.T) {
 	iphethUnpackLegacy([]byte{0, 0}, func(f []byte) { t.Fatal("emitted from a pad-only transfer") })
 }
 
+// iphethNCMHeader is the NTH16 and the fixed-size 96-byte NDP16 an iPhone
+// puts before its datagrams.
+const iphethNCMHeader = nth16Len + 96
+
 // iosNTB is a block as an iPhone sends it: NTH16, a 96-byte NDP16 right
 // after it, the datagrams after both.
 func iosNTB(datagrams ...[]byte) []byte {
@@ -53,13 +57,35 @@ func TestIPhethNCM(t *testing.T) {
 	}
 	le := binary.LittleEndian
 	for name, blk := range map[string][]byte{
-		"NDP elsewhere":  func() []byte { x := iosNTB(a); le.PutUint16(x[10:], 16); return x }(),
-		"bad NDP sign":   func() []byte { x := iosNTB(a); x[12] = 'X'; return x }(),
-		"inside headers": func() []byte { x := iosNTB(a); le.PutUint16(x[20:], 50); return x }(),
-		"past the end":   func() []byte { x := iosNTB(a); le.PutUint16(x[22:], 61); return x }(),
-		"too short":      iosNTB(a)[:100],
+		"NDP elsewhere": func() []byte { x := iosNTB(a); le.PutUint16(x[10:], 16); return x }(),
+		"bad NDP sign":  func() []byte { x := iosNTB(a); x[12] = 'X'; return x }(),
+		"past the end":  func() []byte { x := iosNTB(a); le.PutUint16(x[22:], 61); return x }(),
+		"empty entry":   func() []byte { x := iosNTB(a); le.PutUint16(x[22:], 0); return x }(),
+		"too short":     iosNTB(a)[:100],
 	} {
 		iphethUnpackNCM(blk, func(f []byte) { t.Errorf("%s: emitted %d bytes", name, len(f)) })
+	}
+	// An entry that does not fit is skipped, not the end of the list.
+	got = nil
+	skip := iosNTB(a, b)
+	le.PutUint16(skip[22:], uint16(len(skip)))
+	iphethUnpackNCM(skip, func(f []byte) { got = append(got, f) })
+	if len(got) != 1 || !bytes.Equal(got[0], b) {
+		t.Fatalf("after a bad entry: %d", len(got))
+	}
+	// A block shorter than the fixed 96-byte NDP: the datagram right after
+	// a two-entry NDP.
+	short := make([]byte, 28)
+	le.PutUint32(short, nth16Sign)
+	le.PutUint16(short[10:], 12)
+	le.PutUint32(short[12:], ndp16NoCRC)
+	le.PutUint16(short[20:], 28)
+	le.PutUint16(short[22:], uint16(len(a)))
+	short = append(short, a...)
+	got = nil
+	iphethUnpackNCM(short, func(f []byte) { got = append(got, f) })
+	if len(got) != 1 || !bytes.Equal(got[0], a) {
+		t.Fatalf("short block: %d", len(got))
 	}
 	// 22 entries without a terminator: all taken, nothing read beyond.
 	many := make([][]byte, 22)
