@@ -1,5 +1,9 @@
 # mgu-render changelog
 
+## 0.4.0
+
+- Video, from IterioDev mgu-renderd 1.2.0 protocol 4, for third-party apps in the iterio and native dialects: a player writes decoded frames (I420, up to 2048×2048, BT.601 or BT.709, limited or full range) to `/dev/shm/mgu-video-<name>` in up to four slots; the app names the file (VIDEO 13, DROP_VIDEO 14) and draws op 19 where the picture goes, fitted into the box with its aspect kept and a corner radius, under and over its other ops. Each new frame draws the app's last frame again without a message from the app. Only `/dev/shm/mgu-video-*` regular files are opened (no links); other paths get an ERROR. READY's version is 4, X_READY's caps have 16 (video), and `js/mgu_render_client.js` has `video()` and `videoOp()`. Video streams from IterioDev's kit, which its YouTube app (IterioDev/car-apps) draws with, replay unchanged (`make test`).
+
 ## 0.3.1
 
 - iDrive 8: an app's screens drawn by the renderer show there (the renderer finds which app is in front on its HMI).
