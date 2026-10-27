@@ -226,9 +226,10 @@ and where there is none (Windows) the downloaded file is run instead.
 which connection they used:
 
 1. the car's hotspot, `172.16.222.97:22`, when it serves an SSH banner;
-2. else ENET, on every interface with a `169.254.x.x` address: HSFZ
+2. else ENET, on each interface with a `169.254.x.x` address in turn: HSFZ
    gateway identification (UDP `00 00 00 00 00 11` to `:6811`, sent from
-   that address), then DID `22 17 2A` read from the head unit (`0x63`)
+   that address, answers heard there and on `:6811` on all addresses, so a
+   gateway that answers by broadcast is heard too), then DID `22 17 2A` read from the head unit (`0x63`)
    through the gateway's `:6801` — that request alone, no session change,
    no routine, nothing armed — and the last ENET address that answered
    (`~/.cache/mgu-store/last_hu_enet_ip`, which `deploy/transport` keeps
@@ -238,10 +239,15 @@ which connection they used:
    without a relay. The address that answered is remembered.
 
 When nothing answers it stops before downloading anything, naming the
-hotspot, the ENET cable and `--host`. `--host <address>`, `--port <n>`
-(22) or `--ssh-opt <option>` (repeatable, `ssh -o`, before the tool's own;
-e.g. `ProxyJump=<host>`) name the target or route themselves and skip the
-search (`--host` defaults to the hotspot's address). `--user <name>`
+hotspot, the ENET cable and `--host`; on Linux also how to give the ENET
+adapter a link-local address (`nmcli con mod <its connection>
+ipv4.method link-local`) when no interface has one, or, with several
+link-local interfaces (Linux routes them by destination only), their
+names and to unplug the others or give `--host`. `--host <address>` and
+`--port <n>` (22) name the target themselves and skip the search
+(`--host` defaults to the hotspot's address). `--ssh-opt <option>`
+(repeatable, `ssh -o`, before the tool's own; e.g. `ProxyJump=<host>`,
+`StrictHostKeyChecking=accept-new`) applies to whichever target is used. `--user <name>`
 (root) and `--identity <key file>` apply to either. With OpenSSH 8.8 or
 newer it adds `HostKeyAlgorithms=+ssh-rsa` and
 `PubkeyAcceptedAlgorithms=+ssh-rsa`, which the unit's sshd needs.

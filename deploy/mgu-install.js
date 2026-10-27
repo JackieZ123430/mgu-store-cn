@@ -33,12 +33,12 @@
  * *.mgu: apps, source packages, tool kits; together in mgu-repo/local/).
  * Without inputs: github:robertnisipeanu/mgu-store.
  *
- * Without --host, --port or --ssh-opt it finds the head unit itself: the
+ * Without --host or --port it finds the head unit itself: the
  * car's hotspot (172.16.222.97) when its SSH answers, else over ENET (an
  * interface with a 169.254.x.x address) the address the vehicle gateway
  * reports for the head unit (DID 22 17 2A, read without changing any
  * session), or the last ENET address that answered. ssh then binds to
- * that interface's address (ssh -b).
+ * that interface's address (ssh -b). --ssh-opt options apply either way.
  *
  * SSH options: --host <address>, --port <n> (22), --user <name> (root),
  * --identity <key file>, and --ssh-opt <option> (repeatable, passed as
@@ -576,41 +576,53 @@ function didAddress(uds) {
     return uds.length >= 8 && uds[0] === 0x62 && uds[1] === 0x17 && uds[2] === 0x2a ? Array.from(uds.slice(4, 8)).join('.') : null;
 }
 
-/* The ENET gateway's address: HSFZ identification broadcast from local
- * (from the gateway's own port when it is free), the first answer from
- * another address. null when nothing answers. */
-function hsfzGateway(local, { to = ['169.254.255.255', '255.255.255.255'], port = HSFZ_IDENT_PORT, from = HSFZ_IDENT_PORT, timeout = 6000 } = {}) {
-    return new Promise((resolve) => {
+/* The ENET gateway's address: HSFZ identification (00 00 00 00 00 11)
+ * broadcast from local (from the gateway's port when it is free), answers
+ * heard on that socket and on the gateway's port on all addresses (a
+ * gateway may answer by broadcast); the first answer that is not the
+ * request itself. null when nothing answers. */
+const IDENT = Buffer.from([0, 0, 0, 0, 0, 0x11]);
+
+function hsfzGateway(local, { to = ['169.254.255.255', '255.255.255.255'], port = HSFZ_IDENT_PORT, from = HSFZ_IDENT_PORT,
+    listen = HSFZ_IDENT_PORT, timeout = 6000 } = {}) {
+    const bind = (address, ports) => new Promise((resolve) => {
         const s = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-        let timer = null;
-        let tick = null;
-        let over = false;
-        const done = (v) => {
-            if (!over) {
-                over = true;
-                clearTimeout(timer);
-                clearInterval(tick);
-                s.close();
-                resolve(v);
-            }
-        };
-        s.on('error', () => {
-            if (timer) {
-                done(null);
-            } else {
-                s.close();
-                resolve(from ? hsfzGateway(local, { to, port, from: 0, timeout }) : null);
-            }
+        s.once('error', () => {
+            s.close();
+            resolve(ports.length > 1 ? bind(address, ports.slice(1)) : null);
         });
-        s.on('message', (m, r) => r.address !== local && done(r.address));
-        s.bind({ address: local, port: from }, () => {
-            const send = () => to.forEach((dst) => s.send(Buffer.from([0, 0, 0, 0, 0, 0x11]), port, dst, () => {}));
-            s.setBroadcast(true);
-            timer = setTimeout(() => done(null), timeout);
-            tick = setInterval(send, 1000);
-            send();
+        s.bind({ address, port: ports[0] }, () => {
+            s.removeAllListeners('error');
+            s.on('error', () => {});
+            resolve(s);
         });
     });
+    return Promise.all([bind(local, [from, 0]), bind('0.0.0.0', [listen])]).then(([send, all]) => new Promise((resolve) => {
+        const socks = [send, all].filter(Boolean);
+        let tick = null;
+        let timer = null;
+        const done = (v) => {
+            clearTimeout(timer);
+            clearInterval(tick);
+            socks.forEach((x) => x.close());
+            resolve(v);
+        };
+        if (!send) {
+            done(null);
+            return;
+        }
+        socks.forEach((x) => x.on('message', (m, r) => {
+            if (!m.equals(IDENT)) {
+                socks.forEach((y) => y.removeAllListeners('message'));
+                done(r.address);
+            }
+        }));
+        const out = () => to.forEach((dst) => send.send(IDENT, port, dst, () => {}));
+        send.setBroadcast(true);
+        timer = setTimeout(() => done(null), timeout);
+        tick = setInterval(out, 1000);
+        out();
+    }));
 }
 
 /* The head unit's address from the gateway: DID 22 17 2A, sent alone (no
@@ -662,7 +674,7 @@ function saveLast(ip) {
 }
 
 const NET = { banner: sshBanner, interfaces: () => enetInterfaces(), gateway: (local) => hsfzGateway(local),
-    huAddress: (gw, local) => hsfzHuAddress(gw, local), last: readLast, save: saveLast };
+    huAddress: (gw, local) => hsfzHuAddress(gw, local), last: readLast, save: saveLast, platform: process.platform };
 
 /* Where the head unit's sshd answers: the hotspot; else, on each ENET
  * interface, the address the gateway reports, then the last one that
@@ -673,26 +685,36 @@ async function findUnit(d = NET) {
         return { host: hhost, port: hport || '22', bind: null, via: `the car's hotspot (${hhost})` };
     }
     const last = d.last();
-    const found = await Promise.all(d.interfaces().map(async (i) => {
+    // one interface at a time: an answer on the gateway's port names the interface asked
+    for (const i of d.interfaces()) {
         const gw = await d.gateway(i.address);
         const ip = gw ? await d.huAddress(gw, i.address) : null;
         for (const c of [ip, last].filter((x, k, a) => x && a.indexOf(x) === k)) {
             if (await d.banner(c, '22', i.address)) {
+                d.save(c);
                 return { host: c, port: '22', bind: i.address, via: `ENET on ${i.name} (head unit ${c}${c === ip ? '' : ', the last that answered'})` };
             }
         }
-        return null;
-    }));
-    const hit = found.find(Boolean) || null;
-    if (hit && hit.bind) {
-        d.save(hit.host);
     }
-    return hit;
+    return null;
+}
+
+/* What to check when no head unit answered. */
+function notFound(d) {
+    const lines = ['no head unit answered SSH. Join the car\'s Wi-Fi hotspot or connect the ENET cable, with the car awake, ' +
+        'and run it again;', 'for another route, give --host (and --port).'];
+    const ifs = d.interfaces();
+    if (d.platform === 'linux' && !ifs.length) {
+        lines.push('On Linux the ENET adapter needs a link-local address: nmcli con mod <its connection> ipv4.method link-local, then reconnect it.');
+    } else if (d.platform === 'linux' && ifs.length > 1) {
+        lines.push(`Linux reaches only one of the link-local interfaces ${ifs.map((i) => i.name).join(', ')}: unplug the others, or give --host.`);
+    }
+    return lines.join('\n');
 }
 
 /* Sets the SSH target: as given, or the head unit findUnit finds; which
  * one on stderr (stdout may be token --list --json). */
-async function reach(o, d) {
+async function reach(o, d = NET) {
     if (o.given) {
         o.host = o.host || HOTSPOT_IP;
         process.stderr.write(`connecting to ${o.host}:${o.port} as given\n`);
@@ -700,8 +722,7 @@ async function reach(o, d) {
     }
     const u = await findUnit(d);
     if (!u) {
-        throw new Error('no head unit answered SSH. Join the car\'s Wi-Fi hotspot or connect the ENET cable, with the car awake, ' +
-            'and run it again;\nfor another route, give --host (and --port).');
+        throw new Error(notFound(d));
     }
     Object.assign(o, { host: u.host, port: u.port, bind: u.bind });
     process.stderr.write(`connecting over ${u.via}\n`);
@@ -1200,8 +1221,8 @@ function parse(argv) {
         else if (a.startsWith('--')) throw new Usage(`unknown option ${a} for ${o.command}\n${USAGE}`);
         else o.rest.push(a);
     }
-    // a target or route named: no detection
-    o.given = argv.slice(1).some((a) => ['--host', '--port', '--ssh-opt'].includes(a));
+    // a target named: no detection
+    o.given = argv.slice(1).some((a) => ['--host', '--port'].includes(a));
     if (!/^\d+$/.test(o.port)) {
         throw new Usage(`--port needs a number: ${o.port}`);
     }

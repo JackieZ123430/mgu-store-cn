@@ -47,10 +47,11 @@ function tcpServer(onConn) {
 }
 
 /* Stand-ins for the network: the answering addresses, a gateway and DID answer per interface address. */
-function fakeNet({ answering = [], gateways = {}, dids = {}, last = null, ifaces = [] }) {
+function fakeNet({ answering = [], gateways = {}, dids = {}, last = null, ifaces = [], platform = 'darwin' }) {
     const log = [];
     return {
         log,
+        platform,
         banner: async (host, port, local) => {
             log.push(`banner ${host}:${port}${local ? ` from ${local}` : ''}`);
             return answering.includes(host) ? 'SSH-2.0-fake' : null;
@@ -101,8 +102,9 @@ async function testOrder() {
     const other = { name: 'en9', address: '169.254.77.1' };
     d = fakeNet({ answering: ['169.254.1.2'], ifaces: [other, EN], gateways: { [EN.address]: '169.254.0.8' }, dids: { [EN.address]: '169.254.1.2' } });
     u = await mi.findUnit(d);
-    check('find: of several link-local interfaces, the one whose gateway answers', u && u.bind === EN.address &&
-        !d.log.some((l) => l.startsWith('banner') && l.endsWith(other.address)), `${JSON.stringify(u)} ${d.log}`);
+    check('find: of several link-local interfaces, one at a time, the one whose gateway answers', u && u.bind === EN.address &&
+        !d.log.some((l) => l.startsWith('banner') && l.endsWith(other.address)) &&
+        d.log.filter((l) => l.startsWith('gateway')).join('|') === `gateway ${other.address}|gateway ${EN.address}`, `${JSON.stringify(u)} ${d.log}`);
 
     d = fakeNet({ ifaces: [EN], gateways: { [EN.address]: '169.254.0.8' }, dids: { [EN.address]: '169.254.1.2' }, last: '169.254.9.9' });
     u = await mi.findUnit(d);
@@ -120,7 +122,28 @@ async function testOrder() {
     check('reach: nothing found says what to check', err && /hotspot/.test(err.message) && /ENET/.test(err.message) && /--host/.test(err.message),
         err && err.message);
 
-    for (const args of [['--host', '10.0.0.9'], ['--port', '2222'], ['--ssh-opt', 'ProxyJump=gw']]) {
+    d = fakeNet({ platform: 'linux' });
+    err = null;
+    await mi.reach(mi.parse(['first-install']), d).catch((e) => {
+        err = e;
+    });
+    check('reach: on Linux without a link-local interface, says how to give the ENET adapter one',
+        err && /nmcli con mod <its connection> ipv4\.method link-local/.test(err.message), err && err.message);
+    d = fakeNet({ platform: 'linux', ifaces: [EN, { name: 'eth2', address: '169.254.5.5' }] });
+    err = null;
+    await mi.reach(mi.parse(['first-install']), d).catch((e) => {
+        err = e;
+    });
+    check('reach: on Linux with several link-local interfaces, names them and says to unplug the others or give --host',
+        err && /en7, eth2: unplug the others, or give --host/.test(err.message) && !/nmcli/.test(err.message), err && err.message);
+    d = fakeNet({ platform: 'darwin', ifaces: [EN, { name: 'en9', address: '169.254.5.5' }] });
+    err = null;
+    await mi.reach(mi.parse(['first-install']), d).catch((e) => {
+        err = e;
+    });
+    check('reach: elsewhere neither Linux line', err && !/Linux/.test(err.message), err && err.message);
+
+    for (const args of [['--host', '10.0.0.9'], ['--port', '2222']]) {
         d = fakeNet({});
         const o = mi.parse(['first-install'].concat(args));
         await mi.reach(o, d);
@@ -129,11 +152,12 @@ async function testOrder() {
     }
 
     d = fakeNet({ answering: ['169.254.1.2'], ifaces: [EN], gateways: { [EN.address]: '169.254.0.8' }, dids: { [EN.address]: '169.254.1.2' } });
-    const o = mi.parse(['first-install', '--identity', 'k']);
+    const o = mi.parse(['first-install', '--identity', 'k', '--ssh-opt', 'StrictHostKeyChecking=accept-new']);
     await mi.reach(o, d);
     const a = mi.sshArgs(o, 'true');
-    check('reach: over ENET ssh binds to the interface\'s address (-b) and goes to the unit\'s :22',
-        a.slice(0, 4).join(' ') === `-p 22 -b ${EN.address}` && a[a.length - 2] === 'root@169.254.1.2', a.join(' '));
+    check('reach: --ssh-opt still finds the unit, and over ENET ssh binds to the interface\'s address (-b), with the option, to the unit\'s :22',
+        d.log.length > 1 && a.slice(0, 6).join(' ') === `-p 22 -b ${EN.address} -o StrictHostKeyChecking=accept-new` &&
+        a[a.length - 2] === 'root@169.254.1.2', a.join(' '));
 }
 
 function testInterfaces() {
@@ -209,18 +233,36 @@ async function testHsfzNetwork() {
     check('did read: a negative answer is none', await mi.hsfzHuAddress('127.0.0.1', null, { port }) === null);
     srv.close();
 
-    const udp = dgram.createSocket('udp4');
-    const got = [];
-    await new Promise((r) => udp.bind(0, '127.0.0.1', r));
-    udp.on('message', (m, r) => {
-        got.push(m.toString('hex'));
-        udp.send(Buffer.from('000000320004', 'hex'), r.port, r.address);
+    const freePort = () => new Promise((resolve) => {
+        const x = dgram.createSocket('udp4');
+        x.bind(0, '127.0.0.1', () => {
+            const p = x.address().port;
+            x.close(() => resolve(p));
+        });
     });
-    const gw = await mi.hsfzGateway(undefined, { to: ['127.0.0.1'], port: udp.address().port, from: 0, timeout: 2000 });
-    check('gateway: HSFZ identification (00 00 00 00 00 11) answered names the gateway', gw === '127.0.0.1' && got[0] === '000000000011',
-        `${gw} ${got}`);
-    udp.close();
-    const none = await mi.hsfzGateway(undefined, { to: ['127.0.0.1'], port: 9, from: 0, timeout: 300 });
+    const gateway = async (answer) => {
+        const udp = dgram.createSocket('udp4');
+        const got = [];
+        await new Promise((r) => udp.bind(0, '127.0.0.1', r));
+        const listen = await freePort();
+        udp.on('message', (m, r) => {
+            got.push({ data: m.toString('hex'), port: r.port });
+            answer(udp, r, listen);
+        });
+        const gw = await mi.hsfzGateway('127.0.0.1', { to: ['127.0.0.1'], port: udp.address().port, from: 0, listen, timeout: 1500 });
+        udp.close();
+        return { gw, got };
+    };
+    const reply = Buffer.from('000000320004', 'hex');
+    let g = await gateway((u, r) => u.send(reply, r.port, r.address));
+    check('gateway: HSFZ identification (00 00 00 00 00 11), sent from the interface\'s address, answered names the gateway',
+        g.gw === '127.0.0.1' && g.got[0] && g.got[0].data === '000000000011', JSON.stringify(g));
+    g = await gateway((u, r, listen) => u.send(reply, listen, '127.0.0.1'));
+    check('gateway: an answer to the gateway\'s port on all addresses (as a broadcast answer arrives) is heard',
+        g.gw === '127.0.0.1', JSON.stringify(g));
+    g = await gateway((u, r, listen) => u.send(Buffer.from('000000000011', 'hex'), listen, '127.0.0.1'));
+    check('gateway: the request itself coming back is no answer', g.gw === null, JSON.stringify(g));
+    const none = await mi.hsfzGateway('127.0.0.1', { to: ['127.0.0.1'], port: 9, from: 0, listen: await freePort(), timeout: 300 });
     check('gateway: no answer is none', none === null);
 }
 

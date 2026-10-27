@@ -1910,8 +1910,6 @@ function testHuToken() {
 
 const TRANSPORT = path.join(DEPLOY, 'transport');
 
-/* deploy/transport compiles on the system python3, and its own tests
- * (transport_test.py: selection, banner, relay, arming) all pass. */
 /* deploy/test/connect_test.js: how mgu-install.js finds the unit. */
 function testConnect() {
     const r = cp.spawnSync(process.execPath, [path.join(HERE, 'connect_test.js')], { encoding: 'utf8' });
@@ -1931,6 +1929,8 @@ function testConnect() {
     check('connect: connect_test.js ran to the end', r.status === 0 && seen > 20, `${r.status} ${r.stderr.slice(-2000)}`);
 }
 
+/* deploy/transport compiles on the system python3, and its own tests
+ * (transport_test.py: selection, banner, relay, arming) all pass. */
 function testTransport() {
     fs.readdirSync(TRANSPORT).filter((f) => f.endsWith('.py')).forEach((f) => {
         const r = cp.spawnSync('python3', ['-B', '-c', 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)',

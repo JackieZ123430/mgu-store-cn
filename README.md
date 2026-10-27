@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/depl
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js -OutFile mgu-install.js; node mgu-install.js first-install --identity $HOME\.ssh\mgu_root_key
+irm https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js -OutFile mgu-install.js; if ($?) { node mgu-install.js first-install --identity $HOME\.ssh\mgu_root_key }
 ```
 
 It needs Node 18 or newer, finds the head unit by itself and says which
@@ -72,7 +72,8 @@ comes through the Store.
 | Option | What it does |
 |---|---|
 | `--identity <file>` | root's private SSH key |
-| `--host <address>`, `--port <n>` | reach the head unit at this SSH address instead; an SSH config alias works too |
+| `--host <address>`, `--port <n>` | reach the head unit at this SSH address instead (port 22 unless given); for an SSH config alias, give its port with `--port` |
+| `--user <name>` | SSH user (default `root`) |
 | `--ssh-opt <option>` | an extra `ssh -o` option, e.g. `ProxyJump=<host>`; repeatable |
 | `--token` | asks for a GitHub token, for private repositories |
 | `--no-uplink` | leaves out the internet uplink |
