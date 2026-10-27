@@ -1,5 +1,10 @@
 # Updater changelog
 
+## 0.7.4
+
+- Requires `mgu-python` 1.0.2, and so does every app that builds with Python: `mgu-python` 1.0.1 and older cannot start on the head unit, so an updater update, or the install of such an app, updates it first.
+- A Python build whose interpreter cannot start fails with `Python (<path>) cannot start (<reason>): update mgu-python`.
+
 ## 0.7.3
 
 - An installed app's `icon` is the icon its installed package shows on the car's app list (its rhmiData's first entry point's, read through no link), kept in `state/icons/`; the row of the installed app has its source's icon fetched only once it has none, other sources' rows of that id show their own.
