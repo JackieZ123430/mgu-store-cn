@@ -390,7 +390,8 @@ eq([text(f, 'status'), f.values.list.items[3].sub, f.values.list.items[2].right]
 // unavailable: the reason shown, no Scan
 f = screen('wifi', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: { enabled: true, link: 'unavailable', networks: [], saved: [],
     scanning: false, error: 'wlan1 is in access point mode' } }) });
-eq([text(f, 'state'), text(f, 'note'), f.values.networks.empty, f.values.scan.disabled], ['Unavailable', 'wlan1 is in access point mode', 'Unavailable', true]);
+eq([text(f, 'state'), text(f, 'note'), f.values.networks.empty, f.values.scan.disabled, text(f, 'subtitle')],
+    ['Unavailable', 'wlan1 is in access point mode', 'Unavailable', true, '']);
 
 // sign-in, phone, no updater
 f = screen('login');

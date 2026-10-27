@@ -560,7 +560,7 @@ function wifiView(m) {
     const dbm = typeof w.signal === 'number' ? `${w.signal} dBm` : '';
     const preferred = (m.st && m.st.uplink && m.st.uplink.preferred) || '';
     return {
-        subtitle: { text: !w.enabled ? '' : scanning ? 'Scanning' : plural(nets.length, 'network') },
+        subtitle: { text: !w.enabled || w.link === 'unavailable' || w.link === 'failed' ? '' : scanning ? 'Scanning' : plural(nets.length, 'network') },
         networks: { items: nets.map((n) => netRow(w, n)),
             empty: waiting ? 'Waiting' : !w.enabled ? 'Not used' : w.link === 'unavailable' ? 'Unavailable' : scanning ? 'Scanning' : 'No networks' },
         icon: { vicon: 'wifi', kind: 'service', colors: LIT[s[1]] || '#7a808a,#3a3f47' },
