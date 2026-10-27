@@ -246,8 +246,10 @@ link-local interfaces (Linux routes them by destination only), their
 names and to unplug the others or give `--host`. `--host <address>` and
 `--port <n>` (22) name the target themselves and skip the search
 (`--host` defaults to the hotspot's address). `--ssh-opt <option>`
-(repeatable, `ssh -o`, before the tool's own; e.g. `ProxyJump=<host>`,
-`StrictHostKeyChecking=accept-new`) applies to whichever target is used. `--user <name>`
+(repeatable, `ssh -o`, before the tool's own; e.g.
+`StrictHostKeyChecking=accept-new`) applies to whichever target is used;
+through a jump host give `--host` as well (`--ssh-opt ProxyJump=<host>`),
+as the search runs from this computer. `--user <name>`
 (root) and `--identity <key file>` apply to either. With OpenSSH 8.8 or
 newer it adds `HostKeyAlgorithms=+ssh-rsa` and
 `PubkeyAcceptedAlgorithms=+ssh-rsa`, which the unit's sshd needs.
