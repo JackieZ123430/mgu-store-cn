@@ -11,9 +11,9 @@ state and signal; a press joins a saved or open network, or asks a
 secured one's password: on iDrive 8 the keyboard page with word keys
 and symbols, Connect from 8 to 63 characters; on iDrive 7 the HMI's
 speller. Forget (with a confirm step), Turn on / off, Scan (also when the
-page opens), and the preferred connection: Automatic or one of the
-uplink's kinds (USB Ethernet, LTE stick, Wi-Fi, Android phone, iPhone),
-tried first with the others as fallbacks. A password goes to the updater
+page opens), and the preferred connection: Automatic, Wi-Fi, USB or
+Phone, tried first with the others as fallbacks. Wi-Fi the car itself
+uses shows as Unavailable, with the reason. A password goes to the updater
 only and is not logged. The keyboard page's text box can have a caption,
 and its Enter key a minimum length.
 

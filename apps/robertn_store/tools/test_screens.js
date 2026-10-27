@@ -338,9 +338,10 @@ ok(screen('settings', {}, { uplink: { device: null, state: 'searching', error: n
     'nor with an uplink without Wi-Fi (before 0.7.0, or not on auto)');
 const wifiSub = (w) => screen('settings', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: Object.assign({}, fixture.state().uplink.wifi, w) }) })
     .values.access.items[0].sub;
-eq([{ link: 'connected' }, { link: 'connecting', ssid: 'Cafe' }, { enabled: false, link: 'off', ssid: '' }, { link: 'nohw', ssid: '' },
+eq([{ link: 'connected' }, { link: 'connecting', ssid: 'Cafe' }, { enabled: false, link: 'off', ssid: '' },
+    { link: 'unavailable', ssid: '', error: 'wlan1 is in access point mode' },
     { link: 'failed', ssid: '', error: 'wpa_supplicant did not start' }, { link: 'idle', ssid: '' }].map(wifiSub),
-['Connected · Mario iPhone', 'Connecting · Cafe', 'Off', 'No radio', 'Error', 'Not connected']);
+['Connected · Mario iPhone', 'Connecting · Cafe', 'Off', 'Unavailable', 'Error', 'Not connected']);
 // the page: the network joined first, then the scan's, then saved ones out of range; a tap joins a saved or open one and asks a
 // secured one's password; a saved one has Forget; Turn off, Scan, the preferred connection
 f = screen('wifi');
@@ -370,11 +371,17 @@ ok(typeOn('iDrive 8', pass, ['#+=', '!', 'Connect']) && pass.text === 'secret1!'
 // Forget asks first
 f = screen('confirm-wifi-forget');
 eq([f.labels, text(f, 'title'), text(f, 'text'), f.items[1].act], [['Cancel', 'Forget'], 'Forget network?', 'Home', { do: 'wifi-forget', ssid: 'Home' }]);
-// the preferred connection: every kind the uplink takes; the preferred one marked, the others a tap away
+// the preferred connection: Automatic and the uplink's three groups; the preferred one marked, the others a tap away
 f = screen('prefer');
-eq(own(f), ['Automatic', 'USB Ethernet', 'LTE stick', 'Android phone', 'Android phone (NCM)', 'iPhone', 'Back']);
-eq([text(f, 'status'), f.values.list.items[3].right, f.values.list.items[3].sub], ['Online through Wi-Fi', 'chip:Preferred', 'In use']);
-eq([f.items[0].act, f.items[5].act], [{ do: 'uplink-prefer', kind: '' }, { do: 'uplink-prefer', kind: 'iphone' }]);
+eq(own(f), ['Automatic', 'USB', 'Phone', 'Back']);
+eq([text(f, 'status'), f.values.list.items[1].right, f.values.list.items[1].sub], ['Online through Wi-Fi', 'chip:Preferred', 'In use']);
+eq([f.items[0].act, f.items[2].act], [{ do: 'uplink-prefer', kind: '' }, { do: 'uplink-prefer', kind: 'phone' }]);
+f = screen('prefer', {}, { uplink: Object.assign({}, fixture.state().uplink, { device: { kind: 'iphone', name: 'iPhone' }, preferred: 'usb' }) });
+eq([text(f, 'status'), f.values.list.items[3].sub, f.values.list.items[2].right], ['Online through Phone', 'In use', 'chip:Preferred']);
+// unavailable: the reason shown, no Scan
+f = screen('wifi', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: { enabled: true, link: 'unavailable', networks: [], saved: [],
+    scanning: false, error: 'wlan1 is in access point mode' } }) });
+eq([text(f, 'state'), text(f, 'note'), f.values.networks.empty, f.values.scan.disabled], ['Unavailable', 'wlan1 is in access point mode', 'Unavailable', true]);
 
 // sign-in, phone, no updater
 f = screen('login');

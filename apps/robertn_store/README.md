@@ -249,7 +249,7 @@ On the drawn screens, Settings has **Wi-Fi** while the uplink reports its
 Wi-Fi (`state.uplink.wifi`: mgu-uplink 0.7.0 or newer on `uplink = auto`,
 through an updater from 0.8.0; the Store requires both, `release.json`), with its state: `Online · <network>`,
 `Connected · <network>` (joined; the uplink uses another device or waits
-for DHCP), `Connecting · <network>`, `Not connected`, `Off`, `No radio`,
+for DHCP), `Connecting · <network>`, `Not connected`, `Off`, `Unavailable` (no radio, or the car uses it; the page says why),
 `Error`. Its page (from IterioDev App Manager 2.0.6's Wi-Fi page) lists,
 while Wi-Fi is on, the network joined first, then the latest scan's,
 strongest first, then saved ones out of range, each with `Online` /
@@ -264,10 +264,9 @@ step, `wifi-forget`). The panel shows the state, address and signal, the
 uplink's error (a join that failed) or the refusal of the last request,
 and **Turn on** / **Turn off** (`wifi-enable`), **Scan** (`wifi-scan`, also
 asked when the page opens) and **Preferred: <kind>**, which opens the
-preferred connection: Automatic, USB Ethernet, LTE stick, Wi-Fi, Android
-phone, Android phone (NCM), iPhone (the uplink's kinds `usb`, `usbecm`,
-`wifi`, `rndis`, `ncm`, `iphone`), the one preferred marked, the one in
-use said so; a press makes it the one the uplink tries first
+preferred connection: Automatic, Wi-Fi, USB (adapters and LTE sticks),
+Phone (Android and iPhone tethering): the uplink's `preferred` values
+`wifi`, `usb`, `phone`; the one preferred marked, the one in use said so; a press makes it the one the uplink tries first
 (`uplink-prefer`), the others staying fallbacks. The widget screens have
 none of this.
 

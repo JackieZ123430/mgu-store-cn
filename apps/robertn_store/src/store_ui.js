@@ -501,11 +501,14 @@ function wifiOf(m) {
 /* Its state line: [text, colour]. */
 function wifiState(w) {
     const at = w.ssid ? ` · ${w.ssid}` : '';
+    if (w.link === 'unavailable') {
+        return ['Unavailable', DIM];
+    }
     if (w.error && ['online', 'connected', 'connecting'].indexOf(w.link) < 0) {
         return ['Error', AMBER];
     }
     return { online: [`Online${at}`, GREEN], connected: [`Connected${at}`, BLUE], connecting: [`Connecting${at}`, BLUE],
-        off: ['Off', DIM], nohw: ['No radio', DIM], busy: ['Error', AMBER], failed: ['Error', AMBER] }[w.link] || ['Not connected', DIM];
+        off: ['Off', DIM], failed: ['Error', AMBER] }[w.link] || ['Not connected', DIM];
 }
 const strength = (dbm) => (typeof dbm !== 'number' ? null : dbm >= -60 ? ['Strong', GREEN] : dbm >= -72 ? ['Good', BLUE] : ['Weak', AMBER]);
 const scanningOf = (w) => !!(w.scanning || w.link === 'scanning');
@@ -535,10 +538,10 @@ function netRow(w, n) {
         chipAct: n.saved ? { do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: n.ssid } } : null };
 }
 
-/* The kinds the uplink takes (mgu-uplink's order), each one a preferred connection can be. */
-const KINDS = [['', 'Automatic'], ['usb', 'USB Ethernet'], ['usbecm', 'LTE stick'], ['wifi', 'Wi-Fi'], ['rndis', 'Android phone'],
-    ['ncm', 'Android phone (NCM)'], ['iphone', 'iPhone']];
-const kindLabel = (k) => (KINDS.find((x) => x[0] === k) || [k, k])[1];
+/* The preferred connection's choices (mgu-uplink's groups, in its order) and the device kinds each covers. */
+const GROUPS = [['', 'Automatic', []], ['wifi', 'Wi-Fi', ['wifi']], ['usb', 'USB', ['usb', 'usbecm']], ['phone', 'Phone', ['rndis', 'ncm', 'iphone']]];
+const groupLabel = (g) => (GROUPS.find((x) => x[0] === g) || [g, g])[1];
+const groupOf = (kind) => (GROUPS.find((x) => x[2].indexOf(kind) >= 0) || [kind])[0];
 // the Wi-Fi page's picture in its state's colour, grey otherwise
 const LIT = { [GREEN]: '#5be38e,#1f9a52', [BLUE]: '#5fb4ff,#1f5fd0', [AMBER]: '#ffc04d,#c98a12' };
 
@@ -552,7 +555,7 @@ function wifiView(m) {
     return {
         subtitle: { text: !w.enabled ? '' : scanning ? 'Scanning' : plural(nets.length, 'network') },
         networks: { items: nets.map((n) => netRow(w, n)),
-            empty: !w.enabled ? 'Off' : w.link === 'nohw' ? 'No radio' : scanning ? 'Scanning' : 'No networks' },
+            empty: !w.enabled ? 'Off' : w.link === 'unavailable' ? 'Unavailable' : scanning ? 'Scanning' : 'No networks' },
         icon: { vicon: 'wifi', kind: 'service', colors: LIT[s[1]] || '#7a808a,#3a3f47' },
         state: { text: s[0], color: s[1] },
         info: { text: [w.ip && `IP ${w.ip}`, dbm].filter(Boolean).join(' · ') },
@@ -560,8 +563,8 @@ function wifiView(m) {
         power: w.enabled ? button('Turn off', { do: 'wifi-power' }, { vicon: 'wifi', style: 'outline' })
             : button('Turn on', { do: 'wifi-power' }, { vicon: 'wifi', style: 'primary', color: GREEN }),
         scan: button(scanning ? 'Scanning' : 'Scan', { do: 'wifi-scan' }, { vicon: 'refresh', style: 'outline',
-            disabled: !w.enabled || scanning || w.link === 'nohw' }),
-        prefer: button(`Preferred: ${kindLabel(preferred)}`, { do: 'open', page: { name: 'prefer' } }, { vicon: 'route', style: 'outline' })
+            disabled: !w.enabled || scanning || w.link === 'unavailable' || w.link === 'failed' }),
+        prefer: button(`Preferred: ${groupLabel(preferred)}`, { do: 'open', page: { name: 'prefer' } }, { vicon: 'route', style: 'outline' })
     };
 }
 
@@ -569,14 +572,14 @@ function wifiView(m) {
 function preferView(m) {
     const u = (m.connected && m.st && m.st.uplink) || {};
     const preferred = u.preferred || '';
-    const using = u.device && u.device.kind;
+    const using = u.device && groupOf(u.device.kind);
     return {
-        status: { text: m.uplinkNote || (using ? `${u.state === 'online' ? 'Online' : 'Connecting'} through ${kindLabel(using)}` : 'Offline'),
+        status: { text: m.uplinkNote || (using ? `${u.state === 'online' ? 'Online' : 'Connecting'} through ${groupLabel(using)}` : 'Offline'),
             color: m.uplinkNote ? AMBER : DIM },
-        list: { items: KINDS.map(([kind, label]) => ({ id: kind || 'auto', title: label, sub: kind && kind === using ? 'In use' : '', plain: true,
-            vicon: { '': 'route', usb: 'usb', usbecm: 'usb', wifi: 'wifi' }[kind] || 'phone', iconColor: 'text',
-            right: kind === preferred ? 'chip:Preferred' : '', chipColor: GREEN,
-            act: kind === preferred ? null : { do: 'uplink-prefer', kind } })), empty: '' }
+        list: { items: GROUPS.map(([group, label]) => ({ id: group || 'auto', title: label, sub: group && group === using ? 'In use' : '', plain: true,
+            vicon: { '': 'route', usb: 'usb', wifi: 'wifi' }[group] || 'phone', iconColor: 'text',
+            right: group === preferred ? 'chip:Preferred' : '', chipColor: GREEN,
+            act: group === preferred ? null : { do: 'uplink-prefer', kind: group } })), empty: '' }
     };
 }
 

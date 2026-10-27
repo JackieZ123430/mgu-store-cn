@@ -1158,8 +1158,8 @@ function runDrawn() {
         tap('Preferred: Automatic');
         eq([states, drawn.top().name], [[`open ${host(3)}`], 'prefer']);
         app._states[host(3)].emit('visible', { visible: true });
-        tap('LTE stick');
-        eq(sent.map(secretless), [{ op: 'uplink-prefer', kind: 'usbecm' }]);
+        tap('USB');
+        eq(sent.map(secretless), [{ op: 'uplink-prefer', kind: 'usb' }]);
         // back to Settings
         drawn.pop();
         app._states[host(3)].emit('visible', { visible: false });
