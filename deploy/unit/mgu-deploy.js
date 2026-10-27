@@ -1931,17 +1931,29 @@ function managerStale() {
     var m = managerStart();
     return !!m && m.started !== null && bundlesWritten() > m.started;
 }
-/* A restarted manager's start-up runs a provisioning pass, whenever
- * provisioning reaches it, that updates an app marked PREINSTALLED from a
- * newer package while the app's tile may still be going in; it is over once
- * the manager has been up the bounce minimum. */
+/* A manager's start-up runs a provisioning pass once provisioning reaches
+ * it, which updates an app marked PREINSTALLED from a newer package while
+ * the app's tile may still be going in. MainApp runs it within seconds of
+ * its start; nothing on the unit says when it is done, so a manager
+ * younger than the bounce minimum (a bounce of this run, app-privacy's
+ * among them, or a boot just now) is given until then. */
 function waitStartedUp(what) {
-    var m = managerStart();
-    if (!m) return;
-    var left = m.started === null ? CFG.bounceMinUpS : m.started + CFG.bounceMinUpS - nowS();
-    if (left <= 0) return;
-    say('waiting ' + Math.ceil(left) + 's for the app manager (pid ' + m.pid + ') to finish starting before ' + what);
-    sleepMs(Math.ceil(left * 1000));
+    var m = managerStart(), told = 0;
+    for (;;) {
+        if (!m) return;
+        var left = m.started === null ? CFG.bounceMinUpS : m.started + CFG.bounceMinUpS - nowS();
+        if (left <= 0) return;
+        if (Date.now() - told >= CFG.inplaceReportMs) {
+            say('waiting ' + Math.ceil(left) + 's more for the app manager (pid ' + m.pid + '), up ' +
+                Math.max(0, Math.floor(CFG.bounceMinUpS - left)) + 's, to finish starting before ' + what +
+                ': its start-up provisioning pass would update the app while its tile goes in');
+            told = Date.now();
+        }
+        sleepMs(Math.min(1000, Math.ceil(left * 1000)));
+        var now = managerStart();
+        if (now && m && now.pid !== m.pid) told = 0;
+        m = now;
+    }
 }
 /* The running manager, when it runs the hook: it announced itself with its
  * pid and start, and started after the bundles were last written, so it
@@ -2088,8 +2100,9 @@ function installedAlready(a, why) {
  *
  * An update the running manager cannot make in place, as it runs older
  * bundles than the files hold, bounces the manager before the new package
- * is there: the restarted manager starts the app as it is, and once it has
- * finished starting, updates it in place. The manager's own update at its
+ * is there: the restarted manager starts the app as it is, and updates it
+ * in place. The package of an update waits while the manager is younger
+ * than the bounce minimum (waitStartedUp), whatever restarted it. The manager's own update at its
  * start removes and inserts the app's tile again while its start-up insert
  * of that tile may still be under way, which can leave the HMI without the
  * tile until the head unit restarts. */
@@ -2103,8 +2116,8 @@ function installApp(a, state, decision) {
         say('the app manager runs older code than its main.js or AppManagement.js: restarting it before the update, ' +
             'which it then makes in place');
         bounceManager();
-        waitStartedUp('placing ' + a.id + ' ' + a.version);
     }
+    if (existing) waitStartedUp('placing ' + a.id + ' ' + a.version);
     entry = existing ? readJsonOrNull(appEntryFile(a.id)) : null;
     var kc = existing ? lstatOrNull(keychainFile(existing.uid)) : null;
     a.noKeychain = existing && !(kc && kc.size > 0) ? existing.uid : null;
@@ -3073,11 +3086,14 @@ function preflightFallback() {
  * in-place install, go by that time).
  *
  * With keepRunning, a copy the running manager runs, with its in-place
- * hook announced, stays when the new build has the same hook: the manager
+ * hook announced (a young one given until the bounce minimum, while the
+ * copy is still bound), stays when the new build has the same hook: the manager
  * keeps installing in place, with no bounce, and the boot unit builds the
  * new copy at the next start. True when it stayed. */
 function rebuildFallback(keepRunning) {
     var wasBound = !FAKE && bindMounted(mainJs()), tmp, kept = false;
+    /* asked while main.js is still bound: the wait for a young manager never leaves the stock file exposed */
+    var running = keepRunning && (FAKE || wasBound) ? inplaceManager().pid || null : null;
     if (wasBound) runOk(CFG.umount, [mainJs()]);
     try {
         tmp = buildPatchedCopy();
@@ -3087,7 +3103,7 @@ function rebuildFallback(keepRunning) {
     }
     var built = fs.readFileSync(tmp);
     if (!bytesEqualFile(built, FALLBACK_COPY)) {
-        kept = !!keepRunning && (FAKE || wasBound) && runsCopyWithHook(built.toString('utf8'));
+        kept = !!running && managerPid() === running && sameHook(built.toString('utf8'));
         if (kept) say('the app manager keeps the provisioning fallback it runs; this version\'s takes effect at the next start');
         else copyFileMode(tmp, FALLBACK_COPY, 0o644);
     }
@@ -3096,12 +3112,9 @@ function rebuildFallback(keepRunning) {
     if (fs.existsSync(privacyTool())) privacyApplyQuiet(null);
     return kept;
 }
-/* Whether the running manager runs the fallback copy in place now, with
- * its in-place hook announced (a young one given until the bounce minimum),
- * and that hook is the one in built. */
-function runsCopyWithHook(built) {
+/* Whether the fallback copy's in-place hook is the one in built. */
+function sameHook(built) {
     var cur;
-    if (!inplaceManager().pid) return false;
     try { cur = fs.readFileSync(FALLBACK_COPY, 'utf8'); } catch (e) { return false; }
     var hook = inplaceHookOf(cur);
     return hook !== null && hook === inplaceHookOf(built);

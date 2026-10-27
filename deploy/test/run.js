@@ -1128,6 +1128,22 @@ function testInplaceKeepCopy() {
         y.status === 0 && young.root.kills().length === k1 && y.out.includes('keeps the provisioning fallback it runs') &&
         y.out.includes('updated in place') && fs.readFileSync(copyOf(young.root), 'utf8').startsWith('/* an earlier build */'),
     `${y.out}\n${young.root.managerLog().join('\n')}`);
+    const upd = y.out.indexOf('installing app fixture_app 1.1.0');
+    check('keep copy: the wait for its hook comes before the build, while main.js is still bound',
+        y.out.indexOf('to announce its in-place hook', upd) > upd &&
+        y.out.indexOf('to announce its in-place hook', upd) < y.out.indexOf('fallback copy built', upd), y.out);
+
+    // app-privacy's bounce in the same install: the package waits for the restarted manager's start-up too
+    const pv = inplaceRoot(undefined, { minUp: 1 });
+    const kp = pv.root.kills().length;
+    const p = pv.root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes'],
+        { FAKE_MGR_HOOK: '1', FAKE_PRIVACY_CHANGED_ONCE: `${pv.root.R}.privacy-changed` });
+    const plog = pv.root.managerLog();
+    check('keep copy: after app-privacy\'s bounce the package waits for the start-up; its pass does not update the app',
+        p.status === 0 && pv.root.kills().length === kp + 1 && p.out.includes('to finish starting before placing fixture_app 1.1.0') &&
+        p.out.includes('updated in place') && plog.includes('start-up pass') &&
+        !plog.some((l) => l.startsWith('update fixture_app') && l.endsWith(' at start')), `${p.out}\n${plog.join('\n')}`);
+    stopHooked(pv.root);
 }
 
 /* Uninstall through the running manager's own uninstall (its tile goes at

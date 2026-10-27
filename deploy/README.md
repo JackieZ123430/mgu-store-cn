@@ -751,10 +751,13 @@ The app manager installs our apps itself.
   provisioning cache kept) and one bounce lets the restarted manager update
   it. A running manager on older bundles than `main.js` (the copy, when
   bound) and `AppManagement.js` hold is bounced before the new package is
-  placed; once the restarted one has been up the bounce minimum (its
-  start-up provisioning pass, which updates an app marked `PREINSTALLED`
-  from a newer package, is over by then), the package is placed and the
-  app updated in place. An update the manager makes while it starts
+  placed, and the restarted one updates the app in place. The package of
+  an update is placed only once the manager has been up the bounce minimum,
+  whatever restarted it (this bounce, app-privacy's, a boot): its start-up
+  provisioning pass, which updates an app marked `PREINSTALLED` from a
+  newer package, runs once provisioning reaches it, normally within seconds
+  of its start, and nothing on the unit tells when it has run; the output
+  says why it waits. An update the manager makes while it starts
   removes and inserts the app's tile while its start-up insert of that tile
   may still run, which can leave the HMI without the tile until the head
   unit restarts. Only a higher version installs; the same version is
