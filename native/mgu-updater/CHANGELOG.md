@@ -1,5 +1,11 @@
 # Updater changelog
 
+## 0.7.2
+
+- Builds, downloads and the phone page run as uids the updater picks on the unit (README.md, "Its own uids"): free numbers above the app uid ranges of the running MainApp's config, kept in `state/uids.json` and picked again, once no download or build runs, when something else takes one; what the old uid left is removed as it, downloads wait for the uplink to read the new fetch uid, and the phone page restarts. Without MainApp's config nothing is picked. `build_uid`, `fetch_uid`, `web_uid` and their gids are overrides; `updater.conf` ships none. The fetch uid reaches the uplink as `uids.d/mgu-updater` (`component.json` `"internet": true`, `"uids": "state/internet-uids"`); while an uplink older than 0.4.0 runs, downloads run as 12990.
+- A queued component that needs a newer updater waits for the updater's own update, queued with it; what is still queued when the updater restarts into its new version is installed by that version once it is kept.
+- Requires `mgu-deploy` 0.5.3.
+
 ## 0.7.1
 
 - GitHub sources and the add-source check are read with a stored token when there is one, public repos too, and without one only where every token is refused; a source that hits GitHub's rate limit with no usable token says `GitHub rate limit reached`.

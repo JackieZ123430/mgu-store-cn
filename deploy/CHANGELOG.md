@@ -1,5 +1,9 @@
 # Deploy tool changelog
 
+## 0.5.3
+
+- A tool's `"internet": true` can name in `"uids"` a file under `/var/opt/<id>/` the tool keeps its uids in (the updater picks its own on the unit); its `uids.d/<id>` follows that file.
+
 ## 0.5.1
 
 - iDrive 8: apps get their tile there. Each app is given what MainApp-21 needs to install and show it: the permission tables it requires, and an appletId chosen on the car from the ids its apps and the HMI already use. An update keeps the app's id; a package's own id is kept when it is free; otherwise a free one is given and the output says so. If the ids in use cannot be read, the install stops rather than guess.

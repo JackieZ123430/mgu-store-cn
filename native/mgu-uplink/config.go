@@ -88,9 +88,8 @@ func (c *config) read(path string, top bool) error {
 			c.LocalConf = val
 			continue
 		}
-		// The shipped uids are the services the unit needs (the updater's
-		// fetcher); a local uids adds to them, so an override written for an
-		// older list can never take their egress away.
+		// A local uids adds to the shipped list, so an override written
+		// for an older list can never take a shipped uid's egress away.
 		if key == "uids" && !top {
 			shipped := c.UIDs
 			if err := c.set(key, val); err != nil {
