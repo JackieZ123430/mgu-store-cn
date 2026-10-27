@@ -27,7 +27,7 @@
  */
 const { PHASE, percent, rowAction, statusLine, sourceLabel, sourceState, sourceActions, sourceChannel, sourceAccount,
     tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress, hmiNames,
-    notForUnit, removable, pickOptions, probeStatus, withSources } = require('./store_view.js');
+    notForUnit, removable, pickOptions, probeStatus, withSources, listed } = require('./store_view.js');
 
 const GREEN = '#35d07f';
 const BLUE = '#3d9bff';
@@ -53,8 +53,10 @@ const isTool = (c) => c.kind !== 'app';
 /* The version a row would install: a branch's new commit, else its version. */
 const target = (c) => (c.revision && c.version === c.installed ? c.revision : c.version);
 
+const rawComps = (m) => (m.connected && m.st && Array.isArray(m.st.components) ? m.st.components : []);
+/* The components the Store lists (store_view.js listed). */
 function comps(m) {
-    return m.connected && m.st && Array.isArray(m.st.components) ? withSources(m.st.components, m.st.sources) : [];
+    return withSources(rawComps(m).filter(listed), m.st && m.st.sources);
 }
 /* A component's page: its row, else (its row's id changed with an install)
  * the row of the same source and listed id, else (its source turned to a
@@ -63,9 +65,11 @@ const pageOf = (c) => ({ name: 'app', id: c.id, source: c.source, listed: c.list
 function rowOf(m, page) {
     // a stick that copies a source offers its rows in turn with it
     const usb = (id) => (sources(m) || []).some((s) => s.id === id && s.usb);
-    return comps(m).find((c) => c.id === page.id && (!page.source || c.source === page.source)) ||
-        comps(m).find((c) => page.source && c.source === page.source && (c.listedId || c.id) === page.listed) ||
-        comps(m).find((c) => c.id === page.id && (usb(c.source) || usb(page.source))) || null;
+    // a component removed on its page stays there, though no longer listed
+    const all = comps(m).concat(rawComps(m).filter((c) => !listed(c)));
+    return all.find((c) => c.id === page.id && (!page.source || c.source === page.source)) ||
+        all.find((c) => page.source && c.source === page.source && (c.listedId || c.id) === page.listed) ||
+        all.find((c) => c.id === page.id && (usb(c.source) || usb(page.source))) || null;
 }
 function sources(m) {
     return m.connected && m.st && Array.isArray(m.st.sources) ? m.st.sources : null;

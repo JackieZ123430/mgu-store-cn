@@ -65,10 +65,11 @@ Object.keys(UNITS).forEach((unit) => fixture.screens().forEach(([name, over, stO
 // the Store tab: side menu, filters, a tile per component with its state
 let f = screen('store');
 eq(f.labels.slice(0, 7), ['Store', 'Installed', 'USB', 'Settings', 'All', 'Apps', 'Tools']);
-eq(f.labels.length, 7 + fixture.state().components.length, 'a tile per component');
+eq(f.labels.length, 7 + fixture.state().components.length - 1, 'a tile per component but the one for another head unit only');
+ok(f.labels.indexOf('Car Data') < 0, 'Car Data (iDrive 8 only, not installed) is not listed');
 eq(f.items[7].act, { do: 'open', page: { name: 'app', id: 'robertn_store', source: 'mgu-store', listed: 'robertn_store' } });
 const subs = f.values.grid.items.map((t) => t.sub);
-['Downloading 42 %', 'Not for this head unit', 'Update a1b2c3d', 'Waiting', 'Restart pending', 'Failed', 'Installed', '2.1.0 · 402 KB']
+['Downloading 42 %', 'Update a1b2c3d', 'Waiting', 'Restart pending', 'Failed', 'Installed', '2.1.0 · 402 KB']
     .forEach((s) => ok(subs.indexOf(s) >= 0, `a tile says ${s}`));
 eq(f.values.nav.items.map((i) => i.badge), ['', '3', '1', ''], 'badges: updates, new on the stick (not one for another head unit)');
 eq(f.values.online.items[0].text, 'Online');
@@ -105,6 +106,20 @@ eq([f.items.map((i) => i.label).slice(0, -4), text(f, 'note1')], [['Remove', 'Ba
 f = frame(fixture.model({}, st), { textScale: 1, focus: 0, scroll: {} });
 eq([f.values.grid.items[0].sub, f.values.grid.items[0].badge, f.values.nav.items[1].badge], ['Not for this head unit', 'installed', ''],
     'says so, installed, not counted as an update');
+// for another head unit only: listed while installed, under every filter, in either unit's box; unknown is listed
+Object.keys(UNITS).forEach((unit) => ['all', 'app'].forEach((filter) => {
+    const g = frame(fixture.model({ filter }, st), { textScale: UNITS[unit].scale, focus: 0, scroll: {}, layout: UNITS[unit].layout });
+    eq(g.values.grid.items.map((t) => t.id), ['doom'], `${unit} ${filter}: installed, listed`);
+}));
+const gone = Object.assign({}, st, { components: [Object.assign({}, st.components[0], { installed: null, status: 'available' }),
+    Object.assign({}, st.components[0], { id: 'quake', title: 'Quake', compat: 'unknown', mguHmi: null })] });
+Object.keys(UNITS).forEach((unit) => {
+    const g = frame(fixture.model({}, gone), { textScale: UNITS[unit].scale, focus: 0, scroll: {}, layout: UNITS[unit].layout });
+    eq([g.values.grid.items.map((t) => t.id), g.values.nav.items[1].badge], [['quake'], '1'], `${unit}: removed, no longer listed; unknown listed`);
+});
+// its page, open while it is removed, stays on it
+f = frame(fixture.model({ stack: [{ name: 'main' }, { name: 'app', id: 'doom' }] }, gone), { textScale: 1, focus: 0, scroll: {} });
+eq([text(f, 'name'), text(f, 'note1')], ['DOOM', 'Not for this head unit']);
 // an app installed beside another source's app of its id shows the id it has; one built elsewhere cannot install
 const two = Object.assign(fixture.state(), { busy: null });
 two.components = [Object.assign({}, two.components[1], { id: 'doom2', listedId: 'doom', installAs: 'doom2', status: 'available', installed: null,
@@ -157,8 +172,8 @@ ok(f.labels.indexOf('Display bridge') >= 0 && f.labels.indexOf('M Vitals') < 0, 
 
 // USB: the stick's components
 f = screen('usb');
-eq(f.labels.slice(4), ['Car Data', 'Drive Recorder', 'GPU renderer']);
-eq(text(f, 'subtitle'), 'USB STICK · 3 packages');
+eq(f.labels.slice(4), ['Drive Recorder', 'GPU renderer'], 'not the one for another head unit only');
+eq(text(f, 'subtitle'), 'USB STICK · 2 packages');
 
 // Settings: sources, Add source, Accounts, Phone access, the unit; no restart while busy
 f = screen('settings');

@@ -6,7 +6,7 @@
  *   node tools/test_view.js
  */
 const assert = require('assert');
-const { withSources, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState, sourcesState, sourceActions,
+const { listed, withSources, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState, sourcesState, sourceActions,
     sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress,
     parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage } = require('../src/store_view.js');
 
@@ -101,6 +101,12 @@ const cases = [
     [rowAction(row({ compat: 'yes' }), null), 'install'],
     [groupState([row({}), row({ id: 'vc', compat: 'no' })], null), '1 update'],
     [statusLine(st({ components: [row({}), row({ id: 'vc', compat: 'no' })] }), true, true), '1 update, checked 14:02'],
+    [listed(row({ status: 'available', installed: null, compat: 'no' })), false],
+    [listed(row({ compat: 'no' })), true],
+    [listed(row({ status: 'available', installed: null, compat: 'unknown' })), true],
+    [listed(row({ status: 'available', installed: null })), true],
+    [statusLine(st({ components: [row({ status: 'available', installed: null, compat: 'no', error: 'is for iDrive 8' })] }), true, true),
+        'Up to date, checked 14:02'],
     [rowState(row({ kind: 'tool', status: 'installed', pendingReboot: true }), null), 'Restart pending'],
     [rowState(row({ kind: 'tool', status: 'update', pendingReboot: true }), null), 'Update 1.0.1'],
     [rowAction(row({}), null), 'install'],
