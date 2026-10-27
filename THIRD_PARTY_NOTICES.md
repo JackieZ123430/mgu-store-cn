@@ -16,6 +16,7 @@ the `LICENSES.txt` its build writes.
 | QR Code generator (Project Nayuki) | `apps/robertn_store/src/qrcodegen.js` | MIT | `apps/robertn_store/src/LICENSE-qrcodegen.txt` |
 | netlink, netns (vishvananda) | `native/mgu-uplink` (Go modules) | Apache-2.0 | `native/mgu-uplink/LICENSES.txt` |
 | golang.org/x/sys, Go runtime and standard library (The Go Authors) | `native/mgu-uplink` (built into the binary) | BSD-3-Clause | `native/mgu-uplink/LICENSES.txt` |
+| wpa_supplicant 2.10 (Jouni Malinen and contributors), with our patch `native/mgu-uplink/wpa/wpa-mgu-sme-connect.patch` under the same licence | `native/mgu-uplink` (downloaded and built at build time) | BSD-3-Clause | `native/mgu-uplink/LICENSES.txt` |
 | CPython and the libraries built into it, certifi (python-build-standalone) | `native/mgu-python` (downloaded at build time) | PSF and others; certifi MPL-2.0 | `LICENSES.txt` in the built tool |
 
 The oap-sdk the head unit uses is BMW's and is not part of this repository:
