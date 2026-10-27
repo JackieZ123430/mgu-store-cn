@@ -1,5 +1,11 @@
 # Deploy tool changelog
 
+## 0.5.6
+
+- An app install or update that MainApp itself fails (for example, when the head unit's certificate service does not create the app's keychain) fails at once with MainApp's reason, in one line. MainApp is not restarted and no 10-minute wait follows: a restarted MainApp runs the same install, and restarting it stops every app, the Store included.
+- MainApp's installs wait up to 120 s for an app's keychain, and when it is not created, the error names the certificate service's states, the app's security folder before the request and the uid. The deploy tool binds its copy of `CertificateManager.js` over MainApp's at each app install; app-privacy 1.5.0 lets it run that long for our apps (without it, MainApp stops it after 35 s, as before).
+- The waits for MainApp's installs are measured in wall-clock time.
+
 ## 0.5.5
 
 - iDrive 8: app-privacy installs, updates, rolls back and uninstalls without restarting MainApp-21; its patch takes effect at the next start of the head unit, and app-privacy shows as pending until then. With app-privacy installed, an app is queued only after its patch applies.
