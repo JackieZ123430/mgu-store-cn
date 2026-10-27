@@ -483,19 +483,22 @@ function cmdBump(id, version) {
     console.log(`next: add a ${version} entry to ${c.dir}/${newToken}/CHANGELOG.md, rebuild (${c.release.build}), commit`);
 }
 
-/* What the components about to be published require that neither this run
- * nor the published catalog provides at that version or newer: the car
- * installs requirements first, so each one must be there to install. */
+/* What the catalog this run publishes would require but not hold, at that
+ * version or newer: the car installs requirements first, so each one must
+ * be there to install. current: the published entries still in the
+ * repository; uploads: what this run publishes. */
 function unmetRequires(uploads, current) {
-    const have = new Map([...current.values()].map((e) => [e.id, e.version]));
-    uploads.forEach((e) => have.set(e.id, e.version));
+    const final = new Map([...current.values()].map((e) => [e.id, e]));
+    uploads.forEach((e) => final.set(e.id, e));
     const unmet = [];
-    uploads.forEach((e) => {
+    final.forEach((e) => {
         Object.keys(e.requires || {}).forEach((dep) => {
-            const v = have.get(dep);
-            if (!v || compareVersions(v, e.requires[dep]) < 0) {
+            const d = final.get(dep);
+            if (dep === e.id) {
+                unmet.push(`${e.id}@${e.version} requires itself`);
+            } else if (!d || compareVersions(d.version, e.requires[dep]) < 0) {
                 unmet.push(`${e.id}@${e.version} needs ${dep} ${e.requires[dep]}, ` +
-                    (v ? `but ${dep} ${v} is the newest published or publishing` : `which is not published or publishing`));
+                    (d ? `but the catalog would have ${dep} ${d.version}` : `which the catalog would not have`));
             }
         });
     });

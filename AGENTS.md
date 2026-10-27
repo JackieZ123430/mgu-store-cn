@@ -26,8 +26,8 @@ every release has to be safe whichever component is updated first:
 - A component that needs a newer version of another declares it in
   `requires` (its `component.json`, or the app's `release.json`). The
   updater installs requirements first, its own update included, and
-  `release.js publish` refuses to publish a component whose requirements
-  aren't published or publishing.
+  `release.js publish` publishes nothing while the catalog would list a
+  component whose requirements it doesn't hold.
 - Otherwise a new version keeps working with the published versions of the
   components it talks to (the Store with the updater, the updater with the
   deploy tool and the uplink, apps with the renderer): keep old requests,
@@ -35,9 +35,11 @@ every release has to be safe whichever component is updated first:
 - When a change touches the Store and one of its dependencies (updater,
   deploy tool, renderer, uplink, Python) in ways that depend on each other,
   test it in the emulator before publishing: start from the published
-  release (`./emu.py up --preset store`), update ONLY the changed component
-  from a local build of the branch (`MGU_PUBLISH=dir:...` catalog on a USB
-  stick folder, or `deploy/hu install <id>`), restart when asked, and check
-  that the updater runs, the Store opens with its tile, and it can still
-  update the rest. Repeat for each changed component, each time from the
-  published release.
+  release (`./emu.py up --preset store`), publish every component of the
+  branch to a folder (`MGU_PUBLISH=dir:<folder> node release/release.js
+  publish`), give the emulator that folder as a USB stick, and update ONLY
+  the changed component from it in the Store (its requirements come along).
+  Restart when asked, and check that the updater runs, the Store opens with
+  its tile, and it can still update the rest. Repeat for each changed
+  component, each time from the published release. (`deploy/hu install`
+  also installs the branch's deploy tool, so it can't test an order.)
