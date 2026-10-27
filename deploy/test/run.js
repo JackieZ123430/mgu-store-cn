@@ -865,6 +865,40 @@ function testFallback() {
                 r0.kills().length === 2 && i.out.includes('through a bounce') &&
                 r0.managerLog().includes('install fixture_app 1.0.0 uid 13001'), i.out);
         });
+
+    // each anchor once, but where the fallback's statements cannot go: the copy does not parse
+    const unparsable = main.replace(CLASS_ANCHOR, `var PN=${CLASS_ANCHOR}`);
+    [['fallback on', ['fallback', 'on', '--yes']],
+        ['an app install', ['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']]]
+        .forEach(([what, args]) => {
+            const bad = fakeRoot({ main: unparsable });
+            const before = bad.hash();
+            const r = bad.run(args);
+            check(`${what} with a fallback copy that does not parse: refused, exit 2, naming why`,
+                r.status === 2 && r.out.includes('does not parse (SyntaxError') && r.out.includes('not binding it'), r.out);
+            check(`${what} with a fallback copy that does not parse: no unit, no copy, nothing changed`,
+                !fs.existsSync(bad.p('etc/systemd/system/mgu-app-fallback.service')) &&
+                !fs.existsSync(bad.p('var/opt/mgu-deploy/main.js')) && bad.hash().hash === before.hash,
+                treeDiff(before, bad.hash()));
+        });
+
+    // the boot unit's command, its paths in a fake root and mount logged
+    const boot = fakeRoot();
+    boot.run(['fallback', 'on', '--yes']);
+    const mounts = boot.p('mounts.log');
+    const command = fs.readFileSync(path.join(HERE, '..', 'unit', 'mgu-app-fallback.service'), 'utf8')
+        .match(/^ExecStart=\/bin\/sh -c '(.*)'$/m)[1]
+        .split('/usr/bin/node').join(UNIT_NODE).split('/var/opt/').join(boot.p('var/opt/'))
+        .split('/usr/lib/').join(boot.p('usr/lib/'));
+    const bootRun = () => cp.spawnSync('sh', ['-c', `mount() { echo "$*" >> '${mounts}'; }; ${command}`], { encoding: 'utf8' });
+    let b = bootRun();
+    check('boot unit: a copy that parses is bound', b.status === 0 &&
+        fs.readFileSync(mounts, 'utf8').includes(`--bind ${boot.p('var/opt/mgu-deploy/main.js')}`), `${b.stdout}${b.stderr}`);
+    fs.unlinkSync(mounts);
+    fs.writeFileSync(boot.p('usr/lib/oap-mainapp/src/main.js'), unparsable);
+    b = bootRun();
+    check('boot unit: a copy that does not parse is not bound, the unit succeeds', b.status === 0 && !fs.existsSync(mounts) &&
+        b.stderr.includes('SyntaxError'), `${b.stdout}${b.stderr}`);
 }
 
 /* The fallback built from the fixture main.js, run: its handle() is

@@ -3329,7 +3329,8 @@ function fallbackTouched() {
 }
 /* The fallback copy of the stock main.js (or of input) with the
  * app-privacy patch on it, in a temporary file; refused when either
- * refuses. */
+ * refuses or the copy does not parse: MainApp would crash on it at every
+ * start. */
 function buildPatchedCopy(input) {
     var tmp = path.join(DEPLOY_DIR, 'main.fallback-' + process.pid + '.js');
     mkdirp(DEPLOY_DIR);
@@ -3338,6 +3339,12 @@ function buildPatchedCopy(input) {
         if (fs.existsSync(privacyTool())) {
             var pr = privacyApplyQuiet(['--main', tmp]);
             if (!pr || pr.status !== 0) throw refuse('app-privacy refused the fallback copy; not binding it');
+        }
+        var syntax = run(CFG.node, ['--check', tmp], { allowFail: true, timeout: 60000 });
+        if (syntax.status !== 0) {
+            var why = (syntax.stderr || '').split('\n').filter(function (l) { return /^[A-Za-z]*Error: /.test(l); })[0];
+            throw refuse('the fallback copy of ' + (input || mainJs()) + ' does not parse' +
+                (why ? ' (' + why.trim() + ')' : '') + '; not binding it, MainApp keeps its own main.js');
         }
     } catch (e) { rmrf(tmp); throw e; }
     return tmp;
