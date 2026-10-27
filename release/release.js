@@ -483,6 +483,28 @@ function cmdBump(id, version) {
     console.log(`next: add a ${version} entry to ${c.dir}/${newToken}/CHANGELOG.md, rebuild (${c.release.build}), commit`);
 }
 
+/* What the catalog this run publishes would require but not hold, at that
+ * version or newer: the car installs requirements first, so each one must
+ * be there to install. current: the published entries still in the
+ * repository; uploads: what this run publishes. */
+function unmetRequires(uploads, current) {
+    const final = new Map([...current.values()].map((e) => [e.id, e]));
+    uploads.forEach((e) => final.set(e.id, e));
+    const unmet = [];
+    final.forEach((e) => {
+        Object.keys(e.requires || {}).forEach((dep) => {
+            const d = final.get(dep);
+            if (dep === e.id) {
+                unmet.push(`${e.id}@${e.version} requires itself`);
+            } else if (!d || compareVersions(d.version, e.requires[dep]) < 0) {
+                unmet.push(`${e.id}@${e.version} needs ${dep} ${e.requires[dep]}, ` +
+                    (d ? `but the catalog would have ${dep} ${d.version}` : `which the catalog would not have`));
+            }
+        });
+    });
+    return unmet;
+}
+
 function cmdPublish(ids, dryRun) {
     if (git(['status', '--porcelain', '--untracked-files=no'])) {
         throw new Error('commit first: publish builds HEAD and records its commit in the catalog');
@@ -520,6 +542,10 @@ function cmdPublish(ids, dryRun) {
     skipped.forEach((m) => console.log(`skipped: ${m}`));
     if (skipped.length) {
         process.exitCode = 1;
+    }
+    const unmet = unmetRequires(uploads, current);
+    if (unmet.length) {
+        throw new Error(`nothing published: ${unmet.join('; ')}`);
     }
     if (!uploads.length && !removed.length) {
         console.log('nothing new to publish');
@@ -566,4 +592,4 @@ if (require.main === module) {
     }
 }
 
-module.exports = { components, compareVersions };
+module.exports = { components, compareVersions, unmetRequires };

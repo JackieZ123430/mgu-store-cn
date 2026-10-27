@@ -165,7 +165,9 @@ artifact, and uploads `catalog.json` last, so the published catalog never
 names an artifact that is not there yet. A component that does not build,
 whose bytes differ from its published version, or that is older than it,
 is skipped with a message (exit status 1, a failed workflow run) and the
-rest is published.
+rest is published. Nothing is published when the resulting catalog would list a component
+whose requirements it doesn't hold at that version or newer, so a car can
+always install a component's requirements first.
 An interrupted run can be run again: a release left behind is completed,
 its asset checked against the new artifact's sha256. For the emulator,
 `MGU_PUBLISH=dir:release/published` (git-ignored) writes a local catalog.
