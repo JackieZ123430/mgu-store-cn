@@ -483,6 +483,25 @@ function cmdBump(id, version) {
     console.log(`next: add a ${version} entry to ${c.dir}/${newToken}/CHANGELOG.md, rebuild (${c.release.build}), commit`);
 }
 
+/* What the components about to be published require that neither this run
+ * nor the published catalog provides at that version or newer: the car
+ * installs requirements first, so each one must be there to install. */
+function unmetRequires(uploads, current) {
+    const have = new Map([...current.values()].map((e) => [e.id, e.version]));
+    uploads.forEach((e) => have.set(e.id, e.version));
+    const unmet = [];
+    uploads.forEach((e) => {
+        Object.keys(e.requires || {}).forEach((dep) => {
+            const v = have.get(dep);
+            if (!v || compareVersions(v, e.requires[dep]) < 0) {
+                unmet.push(`${e.id}@${e.version} needs ${dep} ${e.requires[dep]}, ` +
+                    (v ? `but ${dep} ${v} is the newest published or publishing` : `which is not published or publishing`));
+            }
+        });
+    });
+    return unmet;
+}
+
 function cmdPublish(ids, dryRun) {
     if (git(['status', '--porcelain', '--untracked-files=no'])) {
         throw new Error('commit first: publish builds HEAD and records its commit in the catalog');
@@ -520,6 +539,10 @@ function cmdPublish(ids, dryRun) {
     skipped.forEach((m) => console.log(`skipped: ${m}`));
     if (skipped.length) {
         process.exitCode = 1;
+    }
+    const unmet = unmetRequires(uploads, current);
+    if (unmet.length) {
+        throw new Error(`nothing published: ${unmet.join('; ')}`);
     }
     if (!uploads.length && !removed.length) {
         console.log('nothing new to publish');
@@ -566,4 +589,4 @@ if (require.main === module) {
     }
 }
 
-module.exports = { components, compareVersions };
+module.exports = { components, compareVersions, unmetRequires };

@@ -467,7 +467,22 @@ function testRealDonors() {
     });
 }
 
+/* release.js publish: a component's requirements are published or published with it. */
+function testReleaseRequires() {
+    const { unmetRequires } = require(path.join(__dirname, '..', '..', 'release', 'release.js'));
+    const published = new Map([['mgu-updater', { id: 'mgu-updater', version: '0.7.2' }]]);
+    const store = (min) => ({ id: 'robertn_store', version: '0.9.2', requires: { 'mgu-updater': min } });
+    check('release: a requirement published at that version or newer is met', unmetRequires([store('0.7.2')], published).length === 0);
+    check('release: a requirement newer than what is published is unmet',
+        /needs mgu-updater 0\.7\.3, but mgu-updater 0\.7\.2/.test(unmetRequires([store('0.7.3')], published).join()));
+    check('release: a requirement published in the same run is met',
+        unmetRequires([store('0.7.3'), { id: 'mgu-updater', version: '0.7.3', requires: {} }], published).length === 0);
+    check('release: a requirement nothing publishes is unmet',
+        /not published or publishing/.test(unmetRequires([{ id: 'a', version: '1.0.0', requires: { b: '1.0.0' } }], published).join()));
+}
+
 try {
+    testReleaseRequires();
     testUntar();
     testUnitDonors();
     testHostileDonor();
