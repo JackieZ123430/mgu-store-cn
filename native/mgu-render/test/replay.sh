@@ -5,7 +5,8 @@
 # Sessions: test/sessions/<dialect>/*.bin.gz (recorded from the kits' file sinks, test/sessions/README.md) and the synthetic ones
 # test/gen_sessions.js writes. Streams named bad-* must end with "bad message" and exit 1 in both
 # daemons, over-* and refused-* must log the refusal and still draw, *-video must show its videos' colours
-# (the frame files go to /dev/shm/mgu-video-replay-* and mgu-video-test while it runs).
+# (the frame files go to /dev/shm/mgu-video-replay-* and mgu-video-test while it runs). refused-owner names a frame file
+# another uid owns: mgu-render refuses it (drawn as the original draws a refused path) and shows it to the owner.
 set -u
 B=$1
 S=$(cd "$(dirname "$0")" && pwd)
@@ -86,6 +87,22 @@ for k in index8 rgba video; do
         echo "FAIL native/$k: exits $a $b $c"; sed 's/^/     /' "$o.log"; python3 "$S/pamdiff.py" "$o.ref.pam" "$o.pam"; fail=1
     fi
 done
+
+# a frame file the app's uid does not own: refused (as the original draws iterio-refused-path), shown to its owner
+cp /dev/shm/mgu-video-replay-a /dev/shm/mgu-video-replay-owner || exit 1
+owner=$(id -u); other=$((owner + 1))
+if [ "$owner" = 0 ]; then chown 4242 /dev/shm/mgu-video-replay-owner || exit 1; owner=4242; other=4243; fi
+o=$W/refused-owner
+"$B/mgu-render" --replay "$W/synthetic/refused-owner.bin" --uid $other --out "$o.pam" --raw "$o.rgba" > "$o.log" 2>&1; a=$?
+"$B/mgu-render" --replay "$W/synthetic/refused-owner.bin" --uid $owner --out "$o.own.pam" --raw "$o.own.rgba" > "$o.own.log" 2>&1; b=$?
+run "$B/ref-iterio" "$W/synthetic/iterio-refused-path.bin" "$o.orig"; c=$rc
+n=$((n + 1))
+if [ $a = 0 ] && [ $b = 0 ] && [ $c = 0 ] && grep -q "is not the app's (owner uid $owner)" "$o.log" && cmp -s "$o.rgba" "$o.orig.rgba" &&
+    ! grep -q "not the app's" "$o.own.log" && ! cmp -s "$o.own.rgba" "$o.orig.rgba"; then
+    echo "ok   refused-owner: another uid's frame file refused, drawn as a refused path; shown to its owner"
+else
+    echo "FAIL refused-owner: exits $a $b $c"; sed 's/^/     /' "$o.log" "$o.own.log"; fail=1
+fi
 
 # the two originals cannot read each other's sessions: what the dialect detection is for
 run "$B/ref-iterio" "$W/recorded/upstream/doom.bin" "$W/control-iterio"; a=$rc

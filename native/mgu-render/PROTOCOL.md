@@ -137,6 +137,9 @@ Daemon to client:
 Pixmaps share the id space of IMAGE pictures. Pictures, upstream images and
 pixmaps count towards 64 per app and 96 MiB for all apps; pictures also
 towards 32 MiB per app. An upload past them gets an ERROR and draws nothing.
+Videos count towards both byte limits, w×h×3 bytes for each (the newest frame
+in memory and on the GPU), from their first frame and at each new size; a
+frame size past them is not shown (the renderer logs it) until there is room.
 
 ## Video
 
@@ -145,14 +148,18 @@ program (a player) writes decoded frames to a file in `/dev/shm`; the app
 names the file (VIDEO) and draws op 19 where the picture goes. The renderer
 reads the file's newest frame each time it draws the app, and draws the app's
 last frame again by itself when a newer one is there (it looks every 5 ms
-while a shown app has a video), so the app sends frames only for its own
-changes.
+while a shown app has a video), so the app sends frames for its own changes.
+New video frames are not the app talking: a shown app still sends at least
+one message a second (its frame again will do), or after 3 s of silence it is
+taken for hung and hidden until it talks again, as IterioDev's kit does.
 
 - **Path**: `/dev/shm/mgu-video-<name>`, the name of letters, digits, `-`, `_`
   and `.`, not starting with `.`, up to 64 characters; a regular file, opened
-  without following a link (the renderer runs as root). Anything else gets an
-  ERROR and the app stays connected; the op then draws nothing. At most 4
-  videos per app.
+  without following a link (the renderer runs as root), owned by the app's
+  uid, by root or by `nobody` (a player run as a system service: IterioDev's
+  mgu-ytplay gives its file to `nobody` and writes as `nobody`). Anything else
+  gets an ERROR and the app stays connected; the op then draws nothing. At
+  most 4 videos per app.
 - **File**: a 64-byte header, then `nslot` frames of w×h×3/2 bytes, I420 (the
   Y plane, then U, then V, rows without padding):
 
@@ -171,7 +178,9 @@ changes.
   The writer fills slot (slot + 1) % nslot, then sets slot, then seq + 1; the
   renderer reads the header, then that slot. With 3 slots the writer is two
   frames away from the one being read. A header that does not fit these
-  bounds draws the frame read before (or nothing).
+  bounds, or a file shorter than its header says, draws the frame read before
+  (or nothing); a frame that could not be read is not looked for again until
+  seq moves on.
 - A new size (PLACE with another w or h) drops the videos with the other
   resources; the client sends VIDEO again.
 

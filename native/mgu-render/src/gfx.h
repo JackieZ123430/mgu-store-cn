@@ -25,7 +25,8 @@ typedef struct gfx_image {
 
 /* pictures: per app at most GFX_IMG_MAX of them / GFX_IMG_BYTES of pixels, all apps together GFX_IMG_ALL
    (the kit keeps under the per-app limits by itself: it drops the least recently drawn). Upstream images
-   (sides up to GFX_UPSTREAM_SIDE) and pixmaps (GFX_PIXMAP_SIDE) count towards the count and the all-apps total. */
+   (sides up to GFX_UPSTREAM_SIDE) and pixmaps (GFX_PIXMAP_SIDE) count towards the count and the all-apps total.
+   Videos count towards both byte limits: w*h*3 a frame size (its copy in memory and its textures). */
 #define GFX_IMG_SIDE 1024
 #define GFX_UPSTREAM_SIDE 4096
 #define GFX_PIXMAP_SIDE 2048
@@ -38,6 +39,9 @@ typedef struct gfx_image {
 typedef struct gfx_video {
     uint32_t id; int fd; unsigned tex[3]; int w, h, matrix, full; uint32_t seq;
     uint8_t *buf; size_t cap;            /* the frame being uploaded */
+    size_t bytes;                        /* counted towards the picture limits */
+    uint32_t bad_seq;                    /* a frame that could not be read or had no room: not pending */
+    uint32_t refused_w, refused_h;       /* the size last refused for room (logged once) */
     struct gfx_video *next;
 } gfx_video;
 #define GFX_VIDEO_MAX 4
@@ -54,10 +58,11 @@ typedef struct gfx_client {
     gfx_layer *layers;
     gfx_image *images;
     int nimage;
-    size_t image_bytes;                   /* pictures only (GFX_IMG_BYTES) */
+    size_t image_bytes;                   /* pictures and videos (GFX_IMG_BYTES) */
     int upstream_ops;                     /* OP_IMAGE in upstream's layout */
     gfx_video *videos;
     int nvideo;
+    const char *name;                     /* the app, for the log */
 } gfx_client;
 
 int gfx_init(void);                       /* needs a current GL context */
@@ -78,9 +83,9 @@ int gfx_pixmap_pixels(gfx_client *c, uint32_t id, const uint8_t *p, size_t len);
 int gfx_pixmap_palette(gfx_client *c, uint32_t id, const uint8_t *rgb);
 /* one region of a pixmap, px in its format's bytes (rows packed): 0, or -1 (gfx_error) */
 int gfx_pixmap_write(gfx_client *c, uint32_t id, int x, int y, int w, int h, const uint8_t *px);
-/* videos: path /dev/shm/mgu-video-<name> (proto.h), same id replaces; 0, or -1 (gfx_error). Each draw shows the
-   file's newest frame. */
-int gfx_video_def(gfx_client *c, uint32_t id, const char *path);
+/* videos: path /dev/shm/mgu-video-<name> (proto.h), owned by the app's uid, root or nobody; same id replaces; 0, or
+   -1 (gfx_error). Each draw shows the file's newest frame. */
+int gfx_video_def(gfx_client *c, uint32_t id, const char *path, uint32_t uid);
 void gfx_video_drop(gfx_client *c, uint32_t id);
 int gfx_video_pending(gfx_client *c);     /* a video has a newer frame than the one drawn: draw the app's frame again */
 /* draw a command list into the bound framebuffer (size fbw x fbh, y down) */

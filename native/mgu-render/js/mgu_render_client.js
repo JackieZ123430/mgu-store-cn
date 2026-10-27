@@ -24,7 +24,8 @@
  *
  * Video (info.video; kept and sent again like pixmaps): video(id, '/dev/shm/mgu-video-<name>') names the frame file
  * a player writes (PROTOCOL.md, "Video"), a VIDEO op in each frame (videoOp()) shows its newest frame there; each new
- * frame draws the app's last frame again. video(id, null) forgets it.
+ * frame draws the app's last frame again, but the app still sends at least one message a second while shown (an app
+ * silent for 3 s is hidden). video(id, null) forgets it.
  *
  * Events: ready (screen, info), tick (n, ms), touch (phase, x, y), closed, state ({ mode, onScreen,
  * front }), ccu ({ seq, knob, press, tilt, raw }), stats, close. With `kit` (idrive7-apps / IterioDev

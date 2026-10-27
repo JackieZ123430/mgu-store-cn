@@ -20,7 +20,8 @@
  *
  *   mgu-render [-c FILE] [-s key=value]... [-v]
  *   mgu-render [-c FILE] --share | --unshare   link the community and display-bridge sockets now, or remove the links (the socket unit)
- *   mgu-render --replay FILE --out FILE.pam [--raw FILE.rgba]   render a recorded client stream offscreen
+ *   mgu-render --replay FILE --out FILE.pam [--raw FILE.rgba] [--uid N]   render a recorded client stream offscreen, as
+ *                                                                          an app of uid N (default: the caller's)
  *
  * From mgu-renderd src/main.c (idrive7-apps kit/renderd, MIT, Copyright (c) 2026 cauliflowermossgrape;
  * touch routing, pictures and video by IterioDev) and display-bridge (embed placement,
@@ -844,7 +845,7 @@ static int video(client *c, const uint8_t *p, uint32_t len) {
     memcpy(path, p + 4, n); path[n] = 0;
     make_current_any(c);
     /* a bad path is the app's error, not a reason to drop it */
-    if (gfx_video_def(&c->g, id, path) < 0) { log_warn("%s: %s", c->app, gfx_error()); send_error(c, gfx_error()); }
+    if (gfx_video_def(&c->g, id, path, c->uid) < 0) { log_warn("%s: %s", c->app, gfx_error()); send_error(c, gfx_error()); }
     else log_debug("%s: video %u from %s", c->app, id, path);
     return 0;
 }
@@ -1224,14 +1225,14 @@ static void accept_client(void) {
     if (slot < 0) { log_warn("%d apps connected already: refused", MAX_CLIENTS); close(fd); return; }
     int sz = 4 << 20; setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
     client *c = calloc(1, sizeof *c);
-    c->fd = fd; c->slot = slot; c->xf.s = 1; c->es = EGL_NO_SURFACE; c->mode = MODE_LAYER; c->uid = UINT32_MAX;
+    c->fd = fd; c->slot = slot; c->xf.s = 1; c->es = EGL_NO_SURFACE; c->mode = MODE_LAYER; c->uid = UINT32_MAX; c->g.name = c->app;
     struct ucred cr; socklen_t cl = sizeof cr;
     if (!getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &cl)) c->uid = cr.uid;
     clients[slot] = c;
 }
 
 /* ---------------- offscreen replay (testing on a PC) ---------------- */
-static int replay(const char *in, const char *out, const char *raw) {
+static int replay(const char *in, const char *out, const char *raw, uint32_t uid) {
     setenv("EGL_PLATFORM", "surfaceless", 0);
     if (egl_setup(EGL_DEFAULT_DISPLAY, 1) < 0) return 1;
     EGLint pa[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
@@ -1243,6 +1244,7 @@ static int replay(const char *in, const char *out, const char *raw) {
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *buf = malloc(n + 4); if (fread(buf, 1, n, f) != (size_t)n) return 1; fclose(f);
     client c; memset(&c, 0, sizeof c); c.fd = -1; c.xf.s = 1; c.mode = MODE_LAYER; strcpy(c.app, "replay");
+    c.uid = uid; c.g.name = c.app;
     GLuint tex = 0, fbo = 0;
     FILE *rf = raw ? fopen(raw, "wb") : NULL;
     uint8_t *rpx = NULL;
@@ -1382,11 +1384,12 @@ static volatile sig_atomic_t quit;
 static void on_sig(int s) { (void)s; quit = 1; }
 
 static void usage(const char *a0) {
-    fprintf(stderr, "usage: %s [-c FILE] [-s key=value]... [-v] [--share | --unshare] | --replay FILE --out FILE.pam [--raw FILE.rgba]\n", a0);
+    fprintf(stderr, "usage: %s [-c FILE] [-s key=value]... [-v] [--share | --unshare] | --replay FILE --out FILE.pam [--raw FILE.rgba] [--uid N]\n", a0);
 }
 
 int main(int argc, char **argv) {
     const char *rin = NULL, *rout = "out.pam", *rraw = NULL;
+    uint32_t ruid = (uint32_t)getuid();
     int share_only = 0;
     cfg_defaults(&cfg);
     for (int i = 1; i < argc; i++) {
@@ -1395,6 +1398,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) rin = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) rout = argv[++i];
         else if (!strcmp(argv[i], "--raw") && i + 1 < argc) rraw = argv[++i];
+        else if (!strcmp(argv[i], "--uid") && i + 1 < argc) ruid = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "-v")) cfg.verbose = 1;
         else if (!strcmp(argv[i], "--share")) share_only = 1;
         else if (!strcmp(argv[i], "--unshare")) share_only = 2;
@@ -1402,7 +1406,7 @@ int main(int argc, char **argv) {
     }
     log_verbose = cfg.verbose;
     t_start = now_us();
-    if (rin) return replay(rin, rout, rraw);
+    if (rin) return replay(rin, rout, rraw, ruid);
     share_setup();
     if (share_only) {
         for (int i = 0; i < 2; i++) {
