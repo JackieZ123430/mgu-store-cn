@@ -4143,19 +4143,21 @@ function testUplink() {
     const psk = 'p@ss "w0rd\\ {x}';
     const logged = [];
     const log = console.log;
-    // one request: what the updater answered (refused at once: { error }; else the reply)
+    // one request: what the updater answered (refused at once: { error }; else the reply), what it logged meanwhile kept
     const send = (req) => new Promise((resolve) => {
-        const now = u.handle(req, resolve);
+        console.log = (...a) => logged.push(a.join(' '));
+        const done = (r) => {
+            console.log = log;
+            resolve(r);
+        };
+        const now = u.handle(req, done);
         if (now !== undefined) {
-            resolve(now === null ? u.state() : { error: now });
+            done(now === null ? u.state() : { error: now });
         }
     });
-    console.log = (...a) => logged.push(a.join(' '));
-    return send({ op: 'wifi-connect', ssid: 'Cafe', psk })
+    return send({ op: 'wifi-connect', ssid: 'Cafe', psk, secret: u.secret })
         .then((r) => {
-            console.log = log;
             ok('uplink: needs mgu-uplink 0.7.0 running (no ctl.sock)', r.type === 'error' && r.op === 'wifi-connect' && /0\.7\.0/.test(r.error), JSON.stringify(r));
-            console.log = (...a) => logged.push(a.join(' '));
             return new Promise((resolve) => server.listen(ctl, resolve));
         })
         .then(() => Promise.all(['wifi-connect', 'wifi-enable', 'wifi-scan', 'wifi-forget', 'uplink-prefer'].map((op) => send({ op, ssid: 'x', psk }))))
@@ -4194,9 +4196,9 @@ function testUplink() {
         .then((r) => {
             ok('uplink: the uplink\'s refusal is the answer', r.type === 'error' && r.op === 'wifi-scan' && r.error === 'Wi-Fi needs uplink = auto',
                 JSON.stringify(r));
-            console.log = log;
             server.close();
-            ok('uplink: no password in any log line', logged.length > 0 && !logged.some((l) => l.indexOf('w0rd') >= 0), JSON.stringify(logged));
+            ok('uplink: no password in any log line', logged.some((l) => /wifi-connect "Cafe"/.test(l)) && !logged.some((l) => l.indexOf('w0rd') >= 0),
+                JSON.stringify(logged));
         }, (e) => {
             console.log = log;
             server.close();
