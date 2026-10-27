@@ -12,7 +12,7 @@ It installs:
 - **app privacy**, which keeps installed apps out of the head unit's reports to BMW;
 - the **renderer**, which draws the Store and other apps' graphics;
 - **Python**, for apps the head unit builds from source;
-- the optional **internet uplink**, for internet through a USB adapter, an LTE stick or a tethered phone.
+- the **internet uplink**, for internet through a USB adapter, an LTE stick or a tethered phone.
 
 iDrive 8 is tested in an emulator only, not yet on a real car. On iDrive 8,
 installs and removals take effect at the next head-unit restart.
@@ -51,53 +51,32 @@ Adding a GitHub repository: pick its releases, tags or a branch.
 
 ## Install
 
-1. Download the installer:
+Connect the computer to the head unit (the car's Wi-Fi hotspot or an ENET
+cable), then run the installer with root's SSH key:
 
-   ```sh
-   # macOS, Linux
-   curl -LO https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js
-   ```
+```sh
+# macOS, Linux
+curl -fsSL https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js | node - first-install --identity ~/.ssh/mgu_root_key
+```
 
-   ```powershell
-   # Windows PowerShell
-   Invoke-WebRequest https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js -OutFile mgu-install.js
-   ```
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/mgu-install.js -OutFile mgu-install.js; node mgu-install.js first-install --identity $HOME\.ssh\mgu_root_key
+```
 
-2. Connect to the head unit (hotspot, ENET or another SSH route).
-
-3. Run the install with root's key:
-
-   ```sh
-   # macOS, Linux
-   node mgu-install.js first-install --identity ~/.ssh/mgu_root_key
-   ```
-
-   ```powershell
-   # Windows PowerShell
-   node .\mgu-install.js first-install --identity $HOME\.ssh\mgu_root_key
-   ```
-
-   For an address other than the hotspot's, add `--host <address>` and, if
-   needed, `--port <n>`.
-
-4. Restart the head unit when the installer asks. The Store's tile then
-   appears among the car's apps, and every later update comes through the
-   Store.
+It needs Node 18 or newer, finds the head unit by itself and says which
+connection it used. Restart the head unit when the installer asks. The
+Store's tile then appears among the car's apps, and every later update
+comes through the Store.
 
 | Option | What it does |
 |---|---|
 | `--identity <file>` | root's private SSH key |
-| `--host <address>`, `--port <n>` | the head unit's SSH address and port (default `172.16.222.97:22`); an SSH config alias works too, with its port given |
-| `--user <name>` | SSH user (default `root`) |
+| `--host <address>`, `--port <n>` | reach the head unit at this SSH address instead; an SSH config alias works too |
 | `--ssh-opt <option>` | an extra `ssh -o` option, e.g. `ProxyJump=<host>`; repeatable |
 | `--token` | asks for a GitHub token, for private repositories |
 | `--no-uplink` | leaves out the internet uplink |
 | `--no-renderer` | leaves out the renderer |
-
-**ENET on a Mac:** from a clone of this repository, run
-`deploy/hu connect --identity <root's key>`. It finds the head unit and
-keeps a relay open until Ctrl-C. In another terminal, install with
-`--host 127.0.0.1 --port 2222 --ssh-opt StrictHostKeyChecking=no --ssh-opt UserKnownHostsFile=/dev/null`.
 
 ## Using the Store
 

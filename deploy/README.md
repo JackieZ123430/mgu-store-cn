@@ -217,14 +217,35 @@ A **service package** (IterioDev's App Manager format: `package.json` with
 `deploy/mgu-install.js` is the owner's side: one file, no dependencies,
 Node 18 or newer (its own `fetch`, `crypto` and `zlib`; what it sends is
 packed in Node, no `tar`, shell or Python on the computer), driving the system's
-OpenSSH client (`ssh`, built into Windows 10/11, macOS and Linux). Every
-command reaches the unit with `--host <address>` (`172.16.222.97`, the
-car's hotspot), `--port <n>` (22), `--user <name>` (root), `--identity <key
-file>` and repeatable `--ssh-opt <option>` (`ssh -o`, before the tool's
-own); with OpenSSH 8.8 or newer it adds `HostKeyAlgorithms=+ssh-rsa` and
-`PubkeyAcceptedAlgorithms=+ssh-rsa`, which the unit's sshd needs. The ENET
-relay and `--arm-debug` stay with `deploy/hu`: `deploy/hu connect --hold
-<s>` holds the relay, and `--host 127.0.0.1 --port 2222` reaches it.
+OpenSSH client (`ssh`, built into Windows 10/11, macOS and Linux). It runs
+from a file or from stdin (`curl -fsSL <raw URL> | node - first-install
+...`); from stdin a token prompt reads the terminal device (`/dev/tty`),
+and where there is none (Windows) the downloaded file is run instead.
+
+`first-install` and `token` find the head unit by themselves, and print
+which connection they used:
+
+1. the car's hotspot, `172.16.222.97:22`, when it serves an SSH banner;
+2. else ENET, on every interface with a `169.254.x.x` address: HSFZ
+   gateway identification (UDP `00 00 00 00 00 11` to `:6811`, sent from
+   that address), then DID `22 17 2A` read from the head unit (`0x63`)
+   through the gateway's `:6801` — that request alone, no session change,
+   no routine, nothing armed — and the last ENET address that answered
+   (`~/.cache/mgu-store/last_hu_enet_ip`, which `deploy/transport` keeps
+   too). The first of these that serves an SSH banner from the
+   interface's address is the target, and ssh binds to that address
+   (`ssh -b`), so the link-local route goes out of the ENET interface
+   without a relay. The address that answered is remembered.
+
+When nothing answers it stops before downloading anything, naming the
+hotspot, the ENET cable and `--host`. `--host <address>`, `--port <n>`
+(22) or `--ssh-opt <option>` (repeatable, `ssh -o`, before the tool's own;
+e.g. `ProxyJump=<host>`) name the target or route themselves and skip the
+search (`--host` defaults to the hotspot's address). `--user <name>`
+(root) and `--identity <key file>` apply to either. With OpenSSH 8.8 or
+newer it adds `HostKeyAlgorithms=+ssh-rsa` and
+`PubkeyAcceptedAlgorithms=+ssh-rsa`, which the unit's sshd needs.
+`--arm-debug` stays with `deploy/hu`.
 
 ```sh
 node mgu-install.js first-install [--no-renderer] [--no-uplink] [--token] [ssh options]
@@ -267,7 +288,8 @@ Before installing, the car is parked, on stable power (engine running or a
 charger connected), and stays awake until the command finishes.
 
 **token** adds a GitHub token for the updater: read from a hidden prompt
-(not echoed), or from stdin when stdin is not a terminal, never from an
+(not echoed), or from stdin when stdin is not a terminal and the script
+came from a file, never from an
 argument or the environment, never printed. It goes on ssh's stdin to the
 installed deploy tool's `updater-token`; while the updater runs, `updater.js
 check` then has it read its sources again. `--list [--json]` (id, label,
@@ -1211,7 +1233,12 @@ redirected to another host), run twice (the restart line while the
 updater is not running, none once it is), with the uplink, without a
 token, with an artifact that does not match; `usb-repo` from every kind of
 input, the stick then read by the updater's own `sources.js` on the unit's
-Node (`stick_read.js`); and Windows paths and names (`path.win32`).
+Node (`stick_read.js`); the script run from stdin, finding the unit
+at the hotspot address by itself; and Windows paths and names
+(`path.win32`). `deploy/test/connect_test.js` covers how it finds the
+unit: the order with stand-ins, the interface choice, HSFZ framing and the
+DID answer, and the banner check, gateway identification and the DID read
+against servers on `127.0.0.1`.
 `tools/test/run.js` builds and runs linked and module-mode apps against
 that donor; with `MGU_TEST_DONORS` and `MGU_TEST_THIRDPARTY` it also
 checks real donors and third-party packages on the machine (never part of
@@ -1247,6 +1274,9 @@ pointing at `deploy/test/fake_transport.py` (the unit as a banner server on
 - busybox `tar -xzf -` reading the staging stream from ssh stdin.
 - SSH over the ENET relay in field mode.
 - The unit answering DID `22 17 2A` while debug is disarmed.
+- `mgu-install.js` over ENET: the gateway answering identification sent from
+  the interface's address, and `ssh -b <that address>` reaching the unit's
+  link-local address on macOS, Linux and Windows.
 - `deploy/hu`'s `--arm-debug` flow end to end on the car.
 - The migration of the retired installer's leftovers on the car: its
   backups' names and content, and our apps keeping their tiles through the
