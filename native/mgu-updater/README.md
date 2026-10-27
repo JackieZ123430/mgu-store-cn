@@ -117,8 +117,8 @@ installed package's entry-point icon (`rhmiData/resources/`, read through
 no link), copied into `state/icons/` and read again only when the package
 changes. The row of the installed app has its source's icon fetched only
 once its installed package has none; the other sources' rows of that id
-show their own. Once a check has read every source, each source's icons
-are looked at again.
+show their own. Once a check has read every source, the icons of each
+source read without error are looked at again.
 
 **Channels** (a `github` source's `channel`): `releases` (the catalog
 release, else the releases layout), `branch:<name>` (`mgu-repo.json` at

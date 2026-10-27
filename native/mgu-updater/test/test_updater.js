@@ -3079,6 +3079,16 @@ function testIcons() {
                 others.every((c) => bytes(c) && bytes(c).equals(c.source === 'fa' ? aIcon : bIcon)),
                 JSON.stringify(r.map((c) => [c.id, c.source, !!c.installed, c.icon])));
             ok('icons: none through a link in an app\'s home', u.installedIcon('linked') === null);
+            // fb can no longer be read: the icon pass after a check leaves its icons alone
+            const fbRow = others.find((c) => c.source === 'fb');
+            fs.unlinkSync(fbRow.icon);
+            u.iconFailed = {};
+            fs.renameSync(path.join(M, 'fb', 'mgu-repo.json'), path.join(M, 'fb-mgu-repo.json'));
+            return u.check().then(() => u.iconPass).then(() => ({ mine, fbFile: fbRow.icon }));
+        })
+        .then(({ mine, fbFile }) => {
+            ok('icons: the pass after a check skips a source that could not be read', u.src.get('fb').status === 'error' &&
+                !fs.existsSync(fbFile), `${u.src.get('fb').status} ${fs.existsSync(fbFile)}`);
             // twin goes away: its kept icon and its entry go with the clean-up
             const file = mine && mine.icon;
             fs.unlinkSync(path.join(oap, 'oap_12201', 'data', 'apps', 'twin.json'));

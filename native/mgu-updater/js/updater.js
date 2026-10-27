@@ -1493,8 +1493,9 @@ class Updater {
         this.checking = uids.then(() => Promise.all(this.defs().map((d) => this.checkSource(d.id))))
             .then(() => {
                 // with every source read, which row is the installed one is settled: once the
-                // fetches under way are through, each source's icons are looked at again (in the background)
-                const rts = this.defs().map((d) => this.src.get(d.id)).filter(Boolean);
+                // fetches under way are through, the icons of each source read now are looked at again
+                // (in the background); one that could not be read (offline, a refused token) is left alone
+                const rts = this.defs().map((d) => this.src.get(d.id)).filter((rt) => rt && rt.status === 'ok');
                 this.iconPass = Promise.all(rts.map((rt) => rt.icons)).then(() => Promise.all(rts.map((rt) => this.fetchIcons(rt))));
                 return this.pruneIcons();
             })
