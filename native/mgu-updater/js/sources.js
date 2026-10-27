@@ -232,6 +232,40 @@ function safeRel(p) {
         p.split('/').every((s) => s !== '..' && s !== '.' && s !== '');
 }
 
+/* The icon an app shows on the car's app list: its rhmiData's
+ * application.json (app) names it on the first entry point, in a variant
+ * group's resourcesPath, or in resources/ once installed. rhmi: the
+ * rhmiData folder's path with a trailing slash. With has(rel), the first
+ * of those that is there; without, the first one. */
+function entryIcon(app, rhmi, has) {
+    const name = app && Array.isArray(app.entryPoints) && app.entryPoints[0] && app.entryPoints[0].icon;
+    if (typeof name !== 'string' || !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(name)) {
+        return null;
+    }
+    const dirs = (Array.isArray(app.variantGroups) ? app.variantGroups : [])
+        .map((g) => (g && typeof g.resourcesPath === 'string' ? g.resourcesPath.replace(/^\.\//, '').replace(/\/+$/, '') : ''))
+        .filter(safeRel).concat(['resources']);
+    const refs = dirs.map((d) => `${rhmi}${d}/${name}`);
+    return has ? refs.find(has) || null : refs[0];
+}
+
+/* A repo-tree entry's icon bytes through readFile(rel, max): the file its
+ * icon names, or for an entryPoint icon (a source package's) the file its
+ * application.json names. */
+function iconOf(entry, readFile) {
+    if (!entry.icon.entryPoint) {
+        return readFile(entry.icon.ref, ICON_BYTES);
+    }
+    const rhmi = entry.icon.ref.replace(/application\.json$/, '');
+    return readFile(entry.icon.ref, SMALL).then((b) => {
+        const ref = entryIcon(parseJson(b, 'application.json').application, rhmi);
+        if (!ref) {
+            throw Object.assign(new Error('its entry point names no icon'), { missing: true });
+        }
+        return readFile(ref, ICON_BYTES);
+    });
+}
+
 /* What a component needs that another one provides: Python for a
  * "python" build, the deploy tool that hands a build the oap-sdk module
  * ("sdk") and installs drop-ins (a preload tool, a tool with dropins), and
@@ -442,7 +476,13 @@ function repoCatalog(readFile, commit, revision, listDir) {
                         needs['mgu-deploy'] = DEPLOY_SDK_MIN;
                     }
                     const requires = Object.assign(needs, pick('requires') || {});
-                    return list.concat([catalogLib.checkExtras({
+                    // an app's icon, read only when it is fetched: a scripted build's icon.png in its folder
+                    // (or the file rc.icon names there), a source package's entry-point icon (named by its
+                    // staged tree's application.json: iconOf)
+                    const rhmi = !scripted && rc.kind === 'app' && safeRel(c.tree || '') ? `${rc.path}/${c.tree}/rhmiData/` : null;
+                    const iconRef = rc.kind !== 'app' ? null : scripted ? `${rc.path}/${safeRel(rc.icon) ? rc.icon : 'icon.png'}`
+                        : rhmi ? `${rhmi}application.json` : null;
+                    return list.concat([Object.assign(catalogLib.checkExtras({
                         id: rc.id, kind: rc.kind, version: c.version, title: pick('title'), description: pick('description'),
                         build: rc.kind === 'app' ? 'unit' : null, requires: Object.keys(requires).length ? requires : undefined,
                         optional: pick('optional') !== undefined ? pick('optional') : service || undefined,
@@ -454,8 +494,9 @@ function repoCatalog(readFile, commit, revision, listDir) {
                         buildSpec: script ? rc.build : null, manifest: script ? o.name : null,
                         preload: rc.kind === 'tool' && rc.preload !== undefined ? checkPreload(rc.preload) : null,
                         mguNeeds: pick('needs') !== undefined ? pick('needs') : pick('mguNeeds'),
+                        icon: iconRef || undefined,
                         commit: commit || null, revision: revision || null
-                    })]);
+                    }), rhmi ? { icon: { ref: iconRef, sha256: null, entryPoint: true } } : {})]);
                 })
                 .catch((err) => {
                     // a folder a pattern matched that is not an app (no manifest) is no component
@@ -907,12 +948,14 @@ function folderReader(root, ctx) {
         files: (commit, onProgress, under) => Promise.resolve().then(() => walkInside(root, under || '', ctx.maxBuildBytes)
             .map((f) => (under ? Object.assign(f, { name: `${under}/${f.name}` }) : f))),
         icon: (entry) => (/^https:\/\//.test(entry.icon.ref) ? ctx.net.get(entry.icon.ref, ua(ctx.version), 'icon.png', ICON_BYTES)
-            : Promise.resolve().then(() => {
-                if (!safeRel(entry.icon.ref)) {
+            : iconOf(entry, (rel, max) => Promise.resolve().then(() => {
+                if (!safeRel(rel)) {
                     throw new Error('an icon path stays inside the folder');
                 }
-                return readInside(root, entry.icon.ref, ICON_BYTES);
-            }))
+                return readInside(root, rel, max);
+            }).catch((err) => {
+                throw Object.assign(err, { missing: err.missing || err.code === 'ENOENT' });
+            })))
     };
 }
 
@@ -1342,8 +1385,12 @@ function githubReader(s, ctx) {
                 throw err.rateLimited ? Object.assign(new Error('GitHub rate limit reached'), { status: err.status, rateLimited: true }) : err;
             }),
         artifact: (entry, onProgress) => raw(entry.artifact.url, entry.artifact.name, entry.artifact.size, onProgress),
+        // a repo tree's icon is its file at the listed commit
         icon: (entry) => (/^https:\/\//.test(entry.icon.ref) ? raw(entry.icon.ref, 'icon.png', ICON_BYTES)
-            : Promise.reject(new Error('an icon is a release asset or an https url'))),
+            : entry.commit && safeRel(entry.icon.ref) ? iconOf(entry, (rel, max) => (safeRel(rel)
+                ? content(`${repoUrl}/contents/${encode(rel)}?ref=${entry.commit}`, path.posix.basename(rel), max)
+                : Promise.reject(new Error('an icon path stays inside the repo'))))
+                : Promise.reject(new Error('an icon is a release asset, an https url or a file of the repo tree'))),
         files: (commit, onProgress, under) => tarball(commit, onProgress)
             .then((buf) => tar.untgz(buf, ctx.maxBuildBytes))
             // the tarball's one top folder (<owner>-<repo>-<sha>/) is left off
@@ -1427,7 +1474,7 @@ function usbSources(mountsFile, roots) {
 const LOOSE = /^[^.].*\.(tgz|tar\.gz|mgu)$/i;
 
 /* An app package's package.json, en_GB entry-point text, HMIs and icon
- * (icon.png beside package.json), from its members: an OAP tgz flat or
+ * (icon.png beside package.json, else its entry point's), from its members: an OAP tgz flat or
  * under package/, or an .mgu (source/, rhmiData/ beside it). */
 function packageInfo(members) {
     const byName = new Map(members.map((m) => [m.name.replace(/^\.\//, ''), m.data]));
@@ -1467,10 +1514,19 @@ function packageInfo(members) {
             return !!title;
         });
     } catch (e) { /* no entry-point text */ }
-    // the store's picture (App Manager 2): icon.png beside package.json, a PNG of at most ICON_BYTES
-    const ib = byName.get(`${base}icon.png`);
+    // the store's picture (App Manager 2): icon.png beside package.json, else the entry point's icon;
+    // a PNG of at most ICON_BYTES
+    let ref = `${base}icon.png`;
+    if (!byName.has(ref)) {
+        try {
+            ref = entryIcon(parseJson(byName.get(`${rhmi}application.json`), 'application.json').application, rhmi, (r) => byName.has(r));
+        } catch (e) {
+            ref = null;
+        }
+    }
+    const ib = ref && byName.get(ref);
     const icon = ib && ib.length <= ICON_BYTES && ib.slice(0, 8).toString('hex') === '89504e470d0a1a0a'
-        ? { ref: `${base}icon.png`, sha256: crypto.createHash('sha256').update(ib).digest('hex'), packaged: true } : null;
+        ? { ref, sha256: crypto.createHash('sha256').update(ib).digest('hex'), packaged: true } : null;
     return { pkg, title, hmi: hmi.length ? hmi.sort() : null, icon };
 }
 
@@ -1577,5 +1633,5 @@ function label(s) {
 module.exports = {
     load, save, checkStored, writePrivate, mkdirPrivate, reader, label, usbSources, mountPoints,
     repoCatalog, packComponent, serviceUnit, preloadFiles, subtree, packageInfo, packageEntry, readInside, walkInside, authError,
-    renameable, renameApp, packageId, uuid5, orderBranches, REPO, CHANNEL, PACKAGE, ICON_BYTES
+    renameable, renameApp, packageId, uuid5, orderBranches, entryIcon, REPO, CHANNEL, PACKAGE, ICON_BYTES
 };

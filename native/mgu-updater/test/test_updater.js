@@ -2535,6 +2535,15 @@ function testIndexV2(certs, pubDir) {
         author: { name: 'IterioDev' }, description: 'npm text', store: { description: 'Store text' } }, stickIcon);
     storePkg(path.join(stick, 'oap', 'plain.tgz'), { name: 'usb_plain', version: '1.0.0', author: 'Someone', description: 'Plain text', store: { description: '' } },
         png(20 + (130 << 10), 9));
+    // one without icon.png: its entry point's icon, in its variant group's resources
+    const entryIconData = png(55, 10);
+    const ep = path.join(T, 'src', 'store-entry', 'package');
+    mkdirp(path.join(ep, 'rhmiData', 'variantGroups', 'Common', 'images'));
+    fs.writeFileSync(path.join(ep, 'package.json'), JSON.stringify({ name: 'usb_entry', version: '1.0.0' }));
+    fs.writeFileSync(path.join(ep, 'rhmiData', 'application.json'), JSON.stringify({ application: {
+        entryPoints: [{ icon: 'usb_entry_icon.png' }], variantGroups: [{ resourcesPath: './variantGroups/Common/images' }] } }));
+    fs.writeFileSync(path.join(ep, 'rhmiData', 'variantGroups', 'Common', 'images', 'usb_entry_icon.png'), entryIconData);
+    cp.execFileSync('tar', ['-czf', path.join(stick, 'oap', 'entry.tgz'), '-C', path.dirname(ep), 'package']);
     fs.writeFileSync(path.join(M, 'mounts'), `/dev/sda1 ${stick} vfat rw 0 0\n`);
     const v1 = fs.readFileSync(storePkg(path.join(pubDir, 'v1store@1.0.0.tgz'), { name: 'v1store', version: '1.0.0', author: 'V1',
         store: { description: 'From a v1 index' } }, v1Icon));
@@ -2589,7 +2598,7 @@ function testIndexV2(certs, pubDir) {
                 (fs.statSync(a.icon).mode & 0o777) === 0o644 && (fs.statSync(iconDir).mode & 0o777) === 0o755, a.icon);
             ok('icons: one without a sha256 is kept too', r.icon && fs.readFileSync(r.icon).equals(png(40, 4)), r.icon);
             ok('icons: one that does not match its sha256, or is too big, is not kept', comp('v2both').icon === null && comp('v2big').icon === null &&
-                fs.readdirSync(iconDir).length === 6, fs.readdirSync(iconDir).join());
+                fs.readdirSync(iconDir).length === 7, fs.readdirSync(iconDir).join());
             ok('icons: a folder catalog\'s icon beside it, with its author', comp('cat_app').icon && fs.readFileSync(comp('cat_app').icon).equals(png(20, 5)) &&
                 comp('cat_app').author === 'Me', JSON.stringify(comp('cat_app')));
             ok('icons: a release asset mgu-store.json names', comp('rel2').icon && fs.readFileSync(comp('rel2').icon).equals(relIcon) &&
@@ -2602,6 +2611,8 @@ function testIndexV2(certs, pubDir) {
             ok('package: author as a string, description under an empty store.description, an icon.png over 128 KiB left out',
                 comp('usb_plain').author === 'Someone' && comp('usb_plain').description === 'Plain text' && comp('usb_plain').icon === null,
                 JSON.stringify(comp('usb_plain')));
+            ok('package: without icon.png, a package gives its entry point\'s icon', comp('usb_entry').icon &&
+                fs.readFileSync(comp('usb_entry').icon).equals(entryIconData), JSON.stringify(comp('usb_entry')));
             ok('package: a version 1 index\'s package gives them too', comp('v1store').icon && fs.readFileSync(comp('v1store').icon).equals(v1Icon) &&
                 comp('v1store').author === 'V1' && comp('v1store').description === 'From a v1 index', JSON.stringify(comp('v1store')));
             iconAsks = asked(/\.png$/);
@@ -2824,12 +2835,36 @@ function testIdrive7(certs) {
     };
     installed('car_vitals', '2.13.0', 12450);
     installed('my_kitapp', '0.1.0', 12449);
+    // the icon the car's app list shows: the installed package's first entry point's, under rhmiData/resources
+    const png = (n, fill) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(n, fill)]);
+    const carIcon = png(70, 1);
+    mkdirp(path.join(oap, 'oap_12450', 'rhmiData', 'resources'));
+    fs.writeFileSync(path.join(oap, 'oap_12450', 'rhmiData', 'application.json'), JSON.stringify({ application: {
+        entryPoints: [{ name: 'CAR_VITALS_ENTRY', icon: 'car_vitals_icon.png' }] } }));
+    fs.writeFileSync(path.join(oap, 'oap_12450', 'rhmiData', 'resources', 'car_vitals_icon.png'), carIcon);
+    const repoIcon = png(80, 2);
+    const gforceIcon = png(90, 3);
+    const srcIcon = png(95, 4);
+    // GitHub requests that read an icon (or the application.json naming a source package's)
+    const iconReads = (from) => seen.slice(from).filter((x) => /\/contents\/[^?]*(icon\.png|application\.json)/.test(x.url)).map((x) => x.url.split('?')[0]);
+    let mark = seen.length;
     fs.writeFileSync(`${deployLog}.idrive7`, JSON.stringify([{ id: 'car_vitals', version: '2.13.0' }, { id: 'my_kitapp', version: '0.1.0' }]));
     ghRepo('cauliflowermossgrape/idrive7-apps');
     gh.repos['cauliflowermossgrape/idrive7-apps'].branches.main = ghCommit('cauliflowermossgrape/idrive7-apps', {
         'mgu-repo.json': JSON.stringify({ schema: 1, components: [{ id: 'car_vitals', kind: 'app', path: 'apps/car_vitals', mguHmi: ['ID7'],
-            uninstallable: true, build: { node: 'tools/build.js', args: ['car_vitals'] } }] }),
+            uninstallable: true, build: { node: 'tools/build.js', args: ['car_vitals'] } },
+        { id: 'gforce', kind: 'app', path: 'more/gforce', build: { node: 'tools/build.js', args: ['gforce'] } },
+        { id: 'redline', kind: 'app', path: 'more/redline', build: { node: 'tools/build.js', args: ['redline'] } },
+        { id: 'srcpkg', kind: 'app', path: 'pkg' }] }),
+        'pkg/mgu-app.json': JSON.stringify({ schema: 1, id: 'srcpkg', version: '1.0.0', tree: 'srcpkg@1.0.0' }),
+        'pkg/srcpkg@1.0.0/rhmiData/application.json': JSON.stringify({ application: { entryPoints: [{ icon: 'srcpkg_icon.png' }],
+            variantGroups: [{ resourcesPath: './variantGroups/Common/images' }] } }),
+        'pkg/srcpkg@1.0.0/rhmiData/variantGroups/Common/images/srcpkg_icon.png': srcIcon,
         'apps/car_vitals/app.json': JSON.stringify({ id: 'car_vitals', title: 'M Vitals', version: '2.14.0' }),
+        'apps/car_vitals/icon.png': repoIcon,
+        'more/gforce/app.json': JSON.stringify({ id: 'gforce', title: 'G-Force', version: '1.4.1' }),
+        'more/gforce/icon.png': gforceIcon,
+        'more/redline/app.json': JSON.stringify({ id: 'redline', title: 'Redline', version: '1.0.0' }),
         'tools/build.js': '// not run here\n'
     });
     const sources = path.join(M, 'sources.json');
@@ -2866,6 +2901,55 @@ function testIdrive7(certs) {
             const mine = comp('my_kitapp');
             ok('idrive7: an imported app keeps a row, installed and removable', mine.source === 'imported' && mine.status === 'installed' &&
                 mine.uninstallable === true, JSON.stringify(mine));
+            return until(() => u.src.get('idrive7-apps').icons, (x) => !x, 30000, 'icons fetched');
+        })
+        .then(() => {
+            const iconOf = (id) => comp(id).icon && fs.readFileSync(comp(id).icon);
+            ok('icons: an installed app shows its installed package\'s entry-point icon, kept readable by its sha256',
+                comp('car_vitals').icon === path.join(state, 'icons', `${sha256(carIcon)}.png`) && iconOf('car_vitals').equals(carIcon) &&
+                (fs.statSync(comp('car_vitals').icon).mode & 0o777) === 0o644, comp('car_vitals').icon);
+            ok('icons: an app a repo tree lists, not installed, shows the icon.png of its folder at the listed commit',
+                iconOf('gforce') && iconOf('gforce').equals(gforceIcon), comp('gforce').icon);
+            ok('icons: none for a repo-tree app without icon.png, nor for an installed app without an entry-point icon',
+                comp('redline').id && comp('redline').icon === null && comp('my_kitapp').icon === null,
+                `${comp('redline').icon} ${comp('my_kitapp').icon}`);
+            u.pruneIcons();
+            ok('icons: an installed app\'s icon is kept by the clean-up', fs.existsSync(comp('car_vitals').icon) && iconOf('gforce'));
+            ok('icons: a source package shows the icon its entry point names', iconOf('srcpkg') && iconOf('srcpkg').equals(srcIcon), comp('srcpkg').icon);
+            const first = iconReads(mark);
+            ok('requests: a new listing reads each app\'s icon once (a source package\'s through its application.json), ' +
+                'none for an app installed with its own', first.length === 4 && !first.some((u) => /car_vitals/.test(u)), first.join(' '));
+            mark = seen.length;
+            return u.check().then(() => until(() => u.src.get('idrive7-apps').icons, (x) => !x, 30000, 'icons fetched'));
+        })
+        .then(() => {
+            ok('requests: a check of an unchanged source reads no icon, kept or missing', iconReads(mark).length === 0, iconReads(mark).join(' '));
+            u.server.close();
+            u = new Updater(conf);
+            mark = seen.length;
+            return u.serve().then(() => u.refresh()).then(() => u.check())
+                .then(() => until(() => u.src.get('idrive7-apps').icons, (x) => !x, 30000, 'icons fetched'));
+        })
+        .then(() => {
+            ok('requests: nor does a restarted updater: a missing icon is remembered', iconReads(mark).length === 0 && comp('gforce').icon,
+                iconReads(mark).join(' '));
+            // a new commit: gforce 1.4.2 with a new icon, the rest as they were
+            const repo = gh.repos['cauliflowermossgrape/idrive7-apps'];
+            const tree = Object.assign({}, repo.trees[repo.branches.main]);
+            const files = {};
+            Object.keys(tree).forEach((k) => {
+                files[k] = [tree[k][0], tree[k][1]];
+            });
+            files['more/gforce/app.json'] = [JSON.stringify({ id: 'gforce', title: 'G-Force', version: '1.4.2' }), 0o644];
+            files['more/gforce/icon.png'] = [png(99, 5), 0o644];
+            repo.branches.main = ghCommit('cauliflowermossgrape/idrive7-apps', files);
+            mark = seen.length;
+            return u.check().then(() => until(() => u.src.get('idrive7-apps').icons, (x) => !x, 30000, 'icons fetched'));
+        })
+        .then(() => {
+            const reads = iconReads(mark);
+            ok('requests: a new commit reads only the icon of the app with a new version, once', reads.length === 1 &&
+                /more\/gforce\/icon\.png$/.test(reads[0]) && fs.readFileSync(comp('gforce').icon).equals(png(99, 5)), reads.join(' '));
             u.server.close();
             u = new Updater(conf);
             return u.serve().then(() => u.refresh());

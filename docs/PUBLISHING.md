@@ -164,6 +164,13 @@ An entry may also carry `title`, `description`, `requires`, `optional`,
 manifest. A component that cannot be used is left out, the source's error
 says why, and the rest are listed.
 
+**Icons.** The Store shows an app's `icon.png` in its folder (a PNG of at
+most 128 KiB, the size the car's app list uses, such as 140 × 140) for an
+app with a build script, or the file an entry's `icon` names in its
+folder; for a source package (`"build": "unit"`), the icon its staged
+tree's `rhmiData/application.json` gives its first entry point. Once the
+app is installed, the Store shows the installed package's own icon.
+
 ### Channels
 
 The source's **channel** picks the commit the head unit reads

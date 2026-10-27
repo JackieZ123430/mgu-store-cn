@@ -1,5 +1,12 @@
 # Updater changelog
 
+## 0.7.3
+
+- An installed app's `icon` is the icon its installed package shows on the car's app list (its rhmiData's first entry point's), kept in `state/icons/`; its source's icon is not fetched while it has one.
+- A repo tree's apps have icons: a build-script app's `icon.png` in its folder (or the file its `mgu-repo.json` entry's `icon` names there), a source package's entry-point icon. Each is read from the listed commit once per version, in the background.
+- A package without `icon.png` beside `package.json` gives its entry point's icon.
+- An icon that is missing or not a usable PNG is not asked for again for that version, across restarts too (`state/icon-failures.json`); one that could not be fetched is asked for again a day later.
+
 ## 0.7.2
 
 - Builds, downloads and the phone page run as uids the updater picks on the unit (README.md, "Its own uids"): free numbers above the app uid ranges of the running MainApp's config, kept in `state/uids.json` and picked again, once no download or build runs, when something else takes one; what the old uid left is removed as it, downloads wait for the uplink to read the new fetch uid, and the phone page restarts. Without MainApp's config nothing is picked. `build_uid`, `fetch_uid`, `web_uid` and their gids are overrides; `updater.conf` ships none. The fetch uid reaches the uplink as `uids.d/mgu-updater` (`component.json` `"internet": true`, `"uids": "state/internet-uids"`); while an uplink older than 0.4.0 runs, downloads run as 12990.
