@@ -44,7 +44,7 @@ var cp = require('child_process');
 
 /* deploy/component.json's version; bumped when a file under deploy/unit/
  * changes. */
-var VERSION = '0.5.9';
+var VERSION = '0.5.10';
 var HERE = __dirname;
 var MGR_UID = Number(process.env.MGU_DEPLOY_MAINAPP_UID || 12201);
 
@@ -1472,7 +1472,9 @@ function privacyApplyAndBounce(state) {
     if (!fs.existsSync(tool)) return { ok: false, why: 'tool missing at ' + tool };
     var r = run(CFG.node, [tool, 'apply', '--json'], { allowFail: true, timeout: 120000 });
     var result = lastJsonLine(r.stdout);
-    if (r.status !== 0 || !result) return { ok: false, why: 'apply exited ' + r.status + (result ? '' : ' with no result') };
+    if (r.status !== 0 || !result) {
+        return { ok: false, why: 'apply exited ' + r.status + (result ? privacyMismatch(result) : ' with no result') };
+    }
     say('app-privacy: ' + (result.state || 'applied') + (result.changed ? ' (applied now)' : ''));
     /* MainApp-21 is never bounced: it loads the bundles at its next start,
      * as it takes app changes (app-privacy reports nextStart) */
@@ -1483,6 +1485,31 @@ function privacyApplyAndBounce(state) {
         }
     } else if ((result.changed || result.restartNeeded) && managerPid()) bounceManager();
     return { ok: true };
+}
+/* app-privacy's JSON result of a refusal: the MainApp bundles do not
+ * match its edits, as on a MainApp version it was not made for. */
+function privacyMismatch(result) {
+    if (result.state !== 'mismatch' || !Array.isArray(result.files)) return '';
+    var problems = [];
+    result.files.forEach(function (f) {
+        (f.problems || []).forEach(function (p) { problems.push(path.basename(f.path || f.kind || '') + ': ' + p); });
+    });
+    var pkg = readJsonOrNull(path.join(mainappRoot(), 'package.json'));
+    return ': this head unit\'s MainApp' + (pkg && pkg.version ? ' ' + pkg.version : '') +
+        ' is a version it does not support (' + problems.join('; ') + ')';
+}
+/* Before anything changes: the app-privacy this install brings must fit
+ * this head unit's MainApp, else the install is refused and the car stays
+ * as it is. */
+function preflightPrivacy(artifacts) {
+    artifacts.filter(function (a) { return a.kind === 'tool' && a.id === 'app-privacy'; }).forEach(function (a) {
+        var tool = env('MGU_DEPLOY_PRIVACY', path.join(a.dir, 'files', 'patch_mainapp.js'));
+        if (!fs.existsSync(tool)) return;
+        var result = lastJsonLine(run(CFG.node, [tool, 'check', '--json'], { allowFail: true, timeout: 120000 }).stdout);
+        if (result && result.state === 'mismatch') {
+            throw refuse('app-privacy ' + a.version + privacyMismatch(result) + '; nothing was installed');
+        }
+    });
 }
 /* After app-privacy's revert put the stock bundles back. */
 function privacyReverted() {
@@ -4127,6 +4154,7 @@ function cmdInstall(args) {
                 return !older;
             });
         }
+        preflightPrivacy(validated);
         var work = validated.filter(function (a) {
             return a.kind !== 'app' || ['current', 'older'].indexOf(decisions[a.id].action) < 0;
         }).map(function (a) { return a.kind !== 'app' ? a : id8 ? id8Package(a, stage) : prepareApp(a, stage); });

@@ -1772,8 +1772,9 @@ function testRollback() {
 
 /* An app-privacy tool whose patch_mainapp.js applies with the given exit
  * status, logging each call to $FAKE_PRIVACY_LOG. apply and revert report
- * the files written, and nextStart for MainApp-21. */
-function privacyTool(version, applyExit, revertExit) {
+ * the files written, and nextStart for MainApp-21. With mismatch, check
+ * and apply refuse as on a MainApp the tool does not fit. */
+function privacyTool(version, applyExit, revertExit, mismatch) {
     const dir = path.join(fs.mkdtempSync(path.join(T, 'priv-')), 'app-privacy');
     fs.mkdirSync(dir);
     fs.writeFileSync(path.join(dir, 'component.json'), JSON.stringify({ id: 'app-privacy', kind: 'tool', version,
@@ -1782,6 +1783,11 @@ function privacyTool(version, applyExit, revertExit) {
     fs.writeFileSync(path.join(dir, 'patch_mainapp.js'), `'use strict';
 const cmd = process.argv[2];
 require('fs').appendFileSync(process.env.FAKE_PRIVACY_LOG, '${version} ' + process.argv.slice(2).join(' ') + '\\n');
+if (${!!mismatch} && cmd !== 'revert') {
+    console.log(JSON.stringify({ state: 'mismatch', changed: false, files: [{ kind: 'main', path: '/usr/lib/oap-mainapp/src/main.js',
+        problems: ['anchor "class AppsAutoupdater{...": 0 occurrence(s), expected 1'] }, { kind: 'appmanagement', problems: [] }] }));
+    process.exit(2);
+}
 if (cmd === 'apply' && process.argv[3] !== '--main' && ${applyExit}) process.exit(${applyExit});
 if (cmd === 'revert' && ${revertExit || 0}) process.exit(${revertExit || 0});
 console.log(JSON.stringify({ state: cmd === 'revert' ? 'unpatched' : 'patched', changed: cmd !== 'check', restartNeeded: false,
@@ -1805,7 +1811,7 @@ function testPrivacyTool() {
     r = root.run(['install', '--artifact', privacyTool('1.0.1', 1), '--yes']);
     check('privacy tool: an update whose apply fails returns to the previous version, applies it again, exit 1',
         r.status === 1 && fs.readlinkSync(path.join(root.tool('app-privacy'), 'current')) === 'versions/1.0.0' &&
-        JSON.stringify(plog(root).slice(n)) === JSON.stringify(['1.0.1 apply --json', '1.0.0 apply --json']) &&
+        JSON.stringify(plog(root).slice(n)) === JSON.stringify(['1.0.1 check --json', '1.0.1 apply --json', '1.0.0 apply --json']) &&
         !fs.existsSync(path.join(root.tool('app-privacy'), 'versions/1.0.1')), `${r.out}\n${plog(root).join('\n')}`);
     root.run(['install', '--artifact', privacyTool('1.0.2', 0), '--yes']);
     const m = plog(root).length;
@@ -1821,6 +1827,21 @@ function testPrivacyTool() {
         r.out.includes('NOT in effect'), r.out);
     r = root.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
     check('privacy tool: and an app install is then refused', r.status === 2 && r.out.includes('app-privacy apply exited'), r.out);
+
+    root = fakeRoot({ privacy: false });
+    fs.writeFileSync(path.join(root.R, 'usr/lib/oap-mainapp/package.json'), JSON.stringify({ version: '7.9.9' }));
+    r = root.run(['install', '--artifact', privacyTool('1.0.0', 0, 0, true), '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    check('privacy tool: a first install on a MainApp it does not fit is refused before anything changes, naming why',
+        r.status === 2 && r.out.includes("app-privacy 1.0.0: this head unit's MainApp 7.9.9 is a version it does not support " +
+            '(main.js: anchor "class AppsAutoupdater{...": 0 occurrence(s), expected 1); nothing was installed') &&
+        JSON.stringify(plog(root)) === JSON.stringify(['1.0.0 check --json']) && !fs.existsSync(root.tool('app-privacy')) &&
+        !fs.existsSync(root.tool('mgu-deploy')), `${r.out}\n${plog(root).join('\n')}`);
+    r = root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
+    r = root.run(['install', '--artifact', privacyTool('1.0.1', 0, 0, true), '--yes']);
+    check('privacy tool: an update that does not fit the MainApp is refused, the installed version stays',
+        r.status === 2 && r.out.includes('app-privacy 1.0.1: this head unit\'s MainApp 7.9.9 is a version it does not support') &&
+        fs.readlinkSync(path.join(root.tool('app-privacy'), 'current')) === 'versions/1.0.0' &&
+        !fs.existsSync(path.join(root.tool('app-privacy'), 'versions/1.0.1')), r.out);
 
     root = fakeRoot({ privacy: false });
     root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
