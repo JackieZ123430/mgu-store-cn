@@ -246,9 +246,9 @@ test('the patch set is recorded', () => {
 
 // sha256 of JSON.stringify(PATCH_SETS_21) as shipped by 1.4.0, and of
 // MainApp-21's reference bundles (I-step 036.010.004) as it patches them.
-const PATCH_SETS_21_SHA256 = '937c7294ab88c5959d62653c304f57f50c761edc2eb83791da2b04928953721e';
+const PATCH_SETS_21_SHA256 = '44b92e5de169297798163bd2b9a31728027f78b3db793f08de810c9d911b0f5a';
 const PATCHED_21_SHA256 = {
-    main: '7dead02abbb8788f45f6f3228bb8c873589f43f75a6cf5fab6cdd3ff4bd90167',
+    main: '10c59be5b5e75bfa21f5d5fae806e6c85ffa4ed8b5b83f980a178f1cec64bba3',
     appmanagement: 'b8ad9c0d6acce898f783a0bfa7bf51c363754b4b4c92c3a7680c0feb59a1ceb8'
 };
 
@@ -454,6 +454,9 @@ function fakeProc(dir, secondsAgo, mainapp) {
 
 const MAINAPP_EMU = { argv: ['node', 'src/main.js'], cwd: '/usr/lib/oap-mainapp' };
 const MAINAPP21 = { argv: ['/usr/bin/node', '--expose-gc', '/usr/lib/oap-mainapp21/src/main.js'], cwd: '/' };
+// as the emulator starts it: a module preloaded with -r
+const MAINAPP21_EMU = { argv: ['/usr/bin/node', '-r', '/usr/local/libexec/emu/emu-dlt-print.js', '--expose-gc',
+    '/usr/lib/oap-mainapp21/src/main.js'], cwd: '/' };
 const MAINAPP_OPTS = { argv: ['/usr/bin/node', '--max-old-space-size=256', '/usr/lib/oap-mainapp/src/main.js'], cwd: '/' };
 
 test('restartNeeded while MainApp runs code older than the bundles', () => withBundles((b) => {
@@ -477,7 +480,7 @@ test('restartNeeded while MainApp runs code older than the bundles', () => withB
     // MainApp-21 counts for iDrive 8 only
     assert.strictEqual(patcher.run('check', b.paths, quiet, fakeProc(b.dir, 600, MAINAPP21)).result.restartNeeded, false);
     assert.strictEqual(patcher.run('check', b.paths, quiet, path.join(b.dir, 'proc'), patcher.UNITS.ID7.sets, 'ID8')
-        .result.restartNeeded, true);
+        .result.nextStart, true);
 }));
 
 /* The helper as injected into oap-mainapp, evaluated against a fake
@@ -956,9 +959,11 @@ test('reference firmware: a local-only app stays so through a failed read, and s
 });
 
 /* MainApp-21's CorruptAppsHandler module (its browserify module, patched),
- * run against fake collaborators as crashHandler runs iDrive 7's. The
- * forced update ('update') and the 48 h reset timer are recorded, not
- * waited for. */
+ * run against fake collaborators as crashHandler runs iDrive 7's. A crash
+ * goes the way AppLauncher reports one: the app is held unstartable
+ * (NOT_IN_CORRUPT_APPS_HANDLING false), then terminated reaches the
+ * handler. The forced update ('update') and the 48 h reset timer are
+ * recorded, not waited for. */
 function crashHandler21(root, apps, localOnly) {
     const main = patcher.applyPatches(fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8'),
         patcher.PATCH_SETS_21.main);
@@ -1040,7 +1045,10 @@ function crashHandler21(root, apps, localOnly) {
         provisioningBroker: { callMethod: () => ({ app_management: {} }) },
         initTimeout: 10000
     });
-    const crash = (id) => handler.handleAppTerminated(registry[id]);
+    const crash = (id) => {
+        registry[id].updateStartableCouncil('NOT_IN_CORRUPT_APPS_HANDLING', false);
+        return handler.handleAppTerminated(registry[id]);
+    };
     const kinds = (id) => events.filter((e) => e[1] === id).map((e) => e[0]);
     return { events, clock, state, crash, kinds, registry, handler };
 }
@@ -1049,6 +1057,30 @@ function firmware21Dir() {
     const dir = process.env.FIRMWARE_MAINAPP21_DIR;
     return dir && fs.existsSync(path.join(dir, 'src', 'main.js')) ? dir : undefined;
 }
+
+test('on iDrive 8 MainApp-21 is never to be bounced: nextStart instead of changed and restartNeeded', () => {
+    const dir = tmpdir();
+    try {
+        const paths = {};
+        Object.keys(patcher.PATCH_SETS_21).forEach((kind) => {
+            paths[kind] = path.join(dir, kind + '.js');
+            fs.writeFileSync(paths[kind], syntheticBundle(patcher.PATCH_SETS_21[kind]));
+        });
+        const running = fakeProc(dir, 60, MAINAPP21_EMU);
+        let r = patcher.run('apply', paths, quiet, running, null, 'ID8');
+        assert.strictEqual(r.code, 0);
+        assert.strictEqual(r.written, true);
+        assert.strictEqual(fs.readFileSync(paths.main, 'utf8').indexOf('function isLocalOnlyApp(') >= 0, true);
+        assert.deepStrictEqual([r.result.changed, r.result.restartNeeded, r.result.nextStart], [false, false, true]);
+        r = patcher.run('check', paths, quiet, running, null, 'ID8');
+        assert.deepStrictEqual([r.result.restartNeeded, r.result.nextStart], [false, true]);
+        r = patcher.run('revert', paths, quiet, running, null, 'ID8');
+        assert.deepStrictEqual([r.written, r.result.changed, r.result.nextStart], [true, false, true]);
+        assert.strictEqual(patcher.run('apply', paths, quiet, path.join(dir, 'none'), null, 'ID8').result.nextStart, false);
+    } finally {
+        rmrf(dir);
+    }
+});
 
 test('MainApp-21: a local-only app is only restarted, a stock app keeps its recovery', () => {
     const root = firmware21Dir();

@@ -1469,20 +1469,23 @@ function privacyApplyAndBounce(state) {
     var result = lastJsonLine(r.stdout);
     if (r.status !== 0 || !result) return { ok: false, why: 'apply exited ' + r.status + (result ? '' : ' with no result') };
     say('app-privacy: ' + (result.state || 'applied') + (result.changed ? ' (applied now)' : ''));
-    if (result.changed || result.restartNeeded) privacyTakeEffect(state);
+    /* MainApp-21 is never bounced: it loads the bundles at its next start,
+     * as it takes app changes (app-privacy reports nextStart) */
+    if (isId8()) {
+        if (result.nextStart) {
+            addPending(state, 'app-privacy', PENDING_NEXT_START);
+            say('app-privacy: in effect from the next start of the head unit');
+        }
+    } else if ((result.changed || result.restartNeeded) && managerPid()) bounceManager();
     return { ok: true };
 }
-/* The manager loads the bundles app-privacy wrote: on iDrive 7 it is
- * bounced now; on iDrive 8 MainApp-21 is not restarted and loads them at
- * its next start, as it takes app changes. */
-function privacyTakeEffect(state) {
+/* After app-privacy's revert put the stock bundles back. */
+function privacyReverted() {
     if (!isId8()) {
         if (managerPid()) bounceManager();
         return;
     }
-    if (!managerPid()) return;
-    if (state) addPending(state, 'app-privacy', PENDING_NEXT_START);
-    say('app-privacy: in effect from the next start of the head unit');
+    say('app-privacy: removed; MainApp-21 runs without it from the next start of the head unit');
 }
 
 /* ---- tool install ------------------------------------------------------------ */
@@ -1847,7 +1850,7 @@ function privacyRevertRun(tool, what) {
     var result = lastJsonLine(r.stdout);
     say('app-privacy' + what + ': ' + (result && result.state ? result.state : 'reverted') +
         (result && result.changed ? ' (reverted now)' : ''));
-    return !!(result && result.changed);
+    return !!(result && (result.changed || result.nextStart));
 }
 function readCustomApps() {
     var c = readJsonOrNull(customAppsFile());
@@ -2273,7 +2276,7 @@ function uninstallTool(id, state) {
     var c = tools[0].component, root = tools[0].root;
     say('uninstalling tool ' + id + ' ' + c.version);
     /* the stock bundles go back first; a failed revert keeps the tool */
-    if (id === 'app-privacy' && privacyRevert()) privacyTakeEffect(state);
+    if (id === 'app-privacy' && privacyRevert()) privacyReverted();
     (c.units || []).forEach(function (u) {
         if (unitState(u.name, 'is-active') !== 'active') return;
         if (recmgrLoaded(recmgrBase(u.name))) { runOk(CFG.systemctl, ['stop', u.name]); say('stopped ' + u.name); }
@@ -4119,10 +4122,10 @@ function cmdRestore(args) {
     var appsBefore = installedApps().map(function (a) { return a.id; });
     try {
         var fbWas = fallbackState();
-        var privacyCurrent = path.join(CFG.varOpt, 'app-privacy', 'current'), privacyReverted = false;
+        var privacyCurrent = path.join(CFG.varOpt, 'app-privacy', 'current'), reverted = false;
         if (data.entries.some(function (e) { return e.path === privacyCurrent && e.kind === 'absent'; }) &&
             lstatOrNull(privacyCurrent)) {
-            privacyReverted = privacyRevert();
+            reverted = privacyRevert();
         }
         var restored = restoreSnapshot(dir);
         restored.entries.forEach(function (e) {
@@ -4152,7 +4155,10 @@ function cmdRestore(args) {
         if (removed.length) {
             bounceManager();
             say('apps removed: ' + removed.join(', ') + ' (manager-side records are not removed)');
-        } else if (privacyReverted) privacyTakeEffect(state);
+        } else if (reverted) privacyReverted();
+        if (!lstatOrNull(privacyCurrent)) {
+            state.pending_reboot = state.pending_reboot.filter(function (p) { return p.id !== 'app-privacy'; });
+        }
         saveState(state);
     } catch (e) {
         if (e.code !== 2) {

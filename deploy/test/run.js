@@ -1502,7 +1502,8 @@ function testRollback() {
 }
 
 /* An app-privacy tool whose patch_mainapp.js applies with the given exit
- * status, logging each call to $FAKE_PRIVACY_LOG. */
+ * status, logging each call to $FAKE_PRIVACY_LOG. apply and revert report
+ * the files written, and nextStart for MainApp-21. */
 function privacyTool(version, applyExit, revertExit) {
     const dir = path.join(fs.mkdtempSync(path.join(T, 'priv-')), 'app-privacy');
     fs.mkdirSync(dir);
@@ -1514,7 +1515,8 @@ const cmd = process.argv[2];
 require('fs').appendFileSync(process.env.FAKE_PRIVACY_LOG, '${version} ' + process.argv.slice(2).join(' ') + '\\n');
 if (cmd === 'apply' && process.argv[3] !== '--main' && ${applyExit}) process.exit(${applyExit});
 if (cmd === 'revert' && ${revertExit || 0}) process.exit(${revertExit || 0});
-console.log(JSON.stringify({ state: cmd === 'revert' ? 'unpatched' : 'patched', changed: cmd !== 'check', restartNeeded: false }));
+console.log(JSON.stringify({ state: cmd === 'revert' ? 'unpatched' : 'patched', changed: cmd !== 'check', restartNeeded: false,
+    nextStart: cmd !== 'check' }));
 `);
     const out = fs.mkdtempSync(path.join(T, 'art-'));
     const r = hu(['artifact', dir, '--out', out]);
@@ -1585,12 +1587,25 @@ function testPrivacyId8() {
     check('privacy id8: an app install applies the patch first and queues the app, no bounce',
         r.status === 0 && plog(root).slice(n).includes('1.0.0 apply --json') && root.kills().length === 0 &&
         fs.existsSync(root.p('var/opt/mgu-deploy/id8/queue/robertn_x8@1.0.0.tgz')), `${r.out}\n${plog(root).join('\n')}`);
-    root.noManager();
-    r = root.run(['uninstall', 'robertn_x8', '--yes']);
+    root.run(['uninstall', 'robertn_x8', '--yes']);
     r = root.run(['uninstall', 'app-privacy', '--yes']);
-    check('privacy id8: uninstall reverts with MainApp-21 stopped, nothing pending for it',
+    check('privacy id8: uninstall with MainApp-21 running reverts, does not bounce it, says it is removed, leaves nothing pending',
         r.status === 0 && plog(root).includes('1.0.0 revert --json') && root.kills().length === 0 &&
-        !r.out.includes('in effect from the next start'), r.out);
+        r.out.includes('app-privacy: removed; MainApp-21 runs without it from the next start of the head unit') &&
+        !r.out.includes('in effect from the next start') &&
+        !root.status().pending_reboot.some((p) => p.id === 'app-privacy'), r.out);
+
+    root = id8Root({ privacy: false });
+    root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
+    check('privacy id8: (restore) app-privacy pending before the restore',
+        root.status().pending_reboot.some((p) => p.id === 'app-privacy'), JSON.stringify(root.status().pending_reboot));
+    r = root.run(['restore', 'stock', '--yes']);
+    check('privacy id8: restore removing app-privacy with MainApp-21 running reverts, does not bounce it, drops its pending entry',
+        r.status === 0 && plog(root).includes('1.0.0 revert --json') && root.kills().length === 0 &&
+        !fs.existsSync(root.tool('app-privacy')) &&
+        r.out.includes('app-privacy: removed; MainApp-21 runs without it from the next start of the head unit') &&
+        !r.out.includes('in effect from the next start') &&
+        !root.status().pending_reboot.some((p) => p.id === 'app-privacy'), `${r.out}\n${JSON.stringify(root.status().pending_reboot)}`);
 
     root = id8Root();
     root.env.FAKE_PRIVACY_APPLY_EXIT = '2';

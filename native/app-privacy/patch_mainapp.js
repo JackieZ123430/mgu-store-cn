@@ -147,12 +147,12 @@ const CRASH_RESTARTS = 5;
 const CRASH_WINDOW_MS = 10 * 60 * 1000;
 const CRASH_GATE_BEFORE =
     'appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],{recoveryAttemptsSinceCorruption:0});';
-/* The gate as MainApp's tryRecoverApp runs it, logging as logPrefix. */
-function crashGateJs(logPrefix) {
+/* giveUp: MainApp code run just before the app is left stopped. */
+function crashGateJs(logPrefix, giveUp) {
     return 'if(appCorruptInfo.localOnlyRestarts||isLocalOnlyApp(appId)){const now=Date.now(),' +
         'restarts=appCorruptInfo.localOnlyRestarts=(appCorruptInfo.localOnlyRestarts||[])' +
         '.filter(at=>now-at<' + CRASH_WINDOW_MS + ');' +
-        'if(restarts.length>=' + CRASH_RESTARTS + '){' +
+        'if(restarts.length>=' + CRASH_RESTARTS + '){' + (giveUp || '') +
         'const log=typeof logger==="object"&&logger&&typeof logger.warn==="function"?logger:console;' +
         'return log.warn(`' + logPrefix + ' ${appId} is local-only ' +
         'and was restarted ' + CRASH_RESTARTS + ' times in ' + CRASH_WINDOW_MS / 60000 + ' minutes; ' +
@@ -171,7 +171,6 @@ const CRASH_EDITS = [
 const KEEP_APP = '.filter(app=>!isLocalOnlyApp(app.getAppId()))';
 const KEEP_APP_ID = '.filter(appId=>!isLocalOnlyApp(appId))';
 
-// Each patch: [anchor, replacement, expected anchor occurrences].
 const MAIN_PATCHES = [
     // Predicate, one copy per bundle module that uses it.
     helperInjection('var AppManagementFfProviderImplOptions;'),
@@ -284,7 +283,12 @@ const MAIN_PATCHES_21 = [
     // APP_CRASH analytics event for local-only apps. A local-only app never
     // reaches MainApp-21's later rungs (the forced update, the data wipe,
     // the disable); its 48 h reset clears the stock counters only.
-    ins('Promise.resolve();', crashGateJs('CorruptAppsHandler::tryRecoverApp'), '(0,AnalyticsServiceBuilders_1', 1),
+    // MainApp-21 holds a crashed app unstartable (NOT_IN_CORRUPT_APPS_HANDLING)
+    // until its recovery ends; an app left stopped is released, so its tile
+    // starts it again.
+    ins('Promise.resolve();', crashGateJs('CorruptAppsHandler::tryRecoverApp',
+        'app.updateStartableCouncil(StartableCouncil_1.default.NOT_IN_CORRUPT_APPS_HANDLING,!0);'),
+    '(0,AnalyticsServiceBuilders_1', 1),
     ins('appCorruptInfo.recoveryAttemptsSinceCorruption++,', CRASH_COUNT_JS, 'app.updateStartableCouncil(', 1),
     // The corrupt-app report.
     ins('return ', 'isLocalOnlyApp(appId)?Promise.resolve():', 'this.backendTransport.reportCorruptApp(appId,version', 1),
@@ -319,8 +323,7 @@ const APPMANAGEMENT_PATCHES_21 = [
 
 const PATCH_SETS_21 = { main: MAIN_PATCHES_21, appmanagement: APPMANAGEMENT_PATCHES_21 };
 
-/* Each head unit's MainApp: its folder, edits and reference fingerprints.
- * MainApp-21 has no earlier release's edits. */
+// MainApp-21 has no earlier release's edits.
 function bundlePaths(root) {
     return { main: root + '/src/main.js', appmanagement: root + '/src/AppManagement/AppManagement.js' };
 }
@@ -506,12 +509,20 @@ function writeInPlace(file, data) {
 const USER_HZ = 100;
 
 /* Whether argv runs MainApp: node with mainJs as its script (the first
- * argument that is not a node option), relative to cwd. */
+ * argument that is not a node option or a module -r preloads), relative
+ * to cwd. */
 function runsMainapp(argv, cwd, mainJs) {
     if (!/(^|\/)node$/.test(argv[0])) {
         return false;
     }
-    const script = argv.slice(1).filter((arg) => arg && arg[0] !== '-')[0];
+    let script;
+    for (let i = 1; i < argv.length && script === undefined; i += 1) {
+        if (argv[i] === '-r' || argv[i] === '--require') {
+            i += 1;
+        } else if (argv[i] && argv[i][0] !== '-') {
+            script = argv[i];
+        }
+    }
     return script !== undefined && path.resolve(cwd, script) === mainJs;
 }
 
@@ -700,14 +711,27 @@ function runCommand(command, paths, log, sets, known) {
     return { result: refresh(result, jobs, known), code: 0 };
 }
 
-/* runCommand for unit's MainApp (ID7 when not given), plus whether
- * MainApp must be bounced to load the files. */
+/* MainApp-21 is never bounced for this patch, whoever calls the tool: on
+ * iDrive 8 changed and restartNeeded stay false, and nextStart says the
+ * running MainApp-21 has not loaded the files as they are now (it does at
+ * its next start). r.written: this call wrote the files. */
 function run(command, paths, log, procRoot, sets, unit) {
     const u = UNITS[unit || 'ID7'];
     const r = runCommand(command, paths, log, sets || u.sets, u.known);
+    const stale = restartNeeded(r.result.files.map((f) => f.path), procRoot || '/proc', u.paths.main);
+    r.written = r.result.changed;
     r.result.unit = unit || 'ID7';
-    r.result.restartNeeded = restartNeeded(r.result.files.map((f) => f.path), procRoot || '/proc', u.paths.main);
-    if (r.result.restartNeeded) {
+    if (r.result.unit === 'ID8') {
+        r.result.changed = false;
+        r.result.restartNeeded = false;
+        r.result.nextStart = stale;
+        if (stale) {
+            log('MainApp-21 loads the bundles as they are now at its next start');
+        }
+        return r;
+    }
+    r.result.restartNeeded = stale;
+    if (stale) {
         log('MainApp started before the bundles were last written; bounce its node child');
     }
     return r;
@@ -850,7 +874,7 @@ function main(argv) {
         let r;
         try {
             r = run('apply', paths, (line) => out('app-privacy: ' + line), null, null, unit);
-            out('app-privacy: ' + r.result.state + (r.result.changed ? ' (applied)' : ''));
+            out('app-privacy: ' + r.result.state + (r.written ? ' (applied)' : ''));
         } catch (e) {
             out('app-privacy: ERROR: ' + e.message);
         }

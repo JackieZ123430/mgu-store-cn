@@ -73,7 +73,10 @@ Uninstall needs no app-privacy step.
 
 ### iDrive 8
 
-MainApp-21 is never bounced for app-privacy. An app install is queued and
+MainApp-21 is never bounced for app-privacy. The tool's JSON says so
+itself: on iDrive 8 `changed` and `restartNeeded` are always false, and
+`nextStart` is true while the running MainApp-21 has not loaded the
+bundles as they are now (it does at its next start). An app install is queued and
 MainApp-21 installs it at the next start of the head unit, after
 `app-privacy.service` has applied the patch (§3); so before queueing an
 app the installer runs `apply --json` as above but does not bounce, and
@@ -100,7 +103,7 @@ release's patch, and the unit runs the new release from the next boot on.
 release's, so an update needs no `revert` first. After installing or
 updating the component, the installer runs `apply --json` and bounces
 MainApp's node child when `changed` or `restartNeeded` is true (§2); on
-iDrive 8 it bounces nothing and reports the component pending until the
+iDrive 8 it bounces nothing and, when `nextStart` is true, reports the component pending until the
 next start. Removing the component is refused while any of our apps is
 installed; otherwise it runs `revert` first, which also removes an
 earlier release's edits, then bounces MainApp the same way.

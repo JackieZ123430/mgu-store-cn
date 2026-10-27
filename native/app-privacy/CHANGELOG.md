@@ -2,7 +2,7 @@
 
 ## 1.4.0
 
-- iDrive 8: MainApp-21 (`/usr/lib/oap-mainapp21`) is patched too, at the next start of the head unit. Our apps are left out of its backend app inventory, app-repository queries and downloads, release-notes request, install/crash/start/stop analytics, corrupt-app reports and DiagOap readout. A crashed local-only app is only restarted, with the same 5 restarts in 10 minutes as on iDrive 7. iDrive 7 is unchanged.
+- iDrive 8: MainApp-21 (`/usr/lib/oap-mainapp21`) is patched too, at the next start of the head unit. Our apps are left out of its backend app inventory, app-repository queries and downloads, release-notes request, install/crash/start/stop analytics, corrupt-app reports and DiagOap readout. A crashed local-only app is only restarted, with the same 5 restarts in 10 minutes as on iDrive 7; one left stopped can be started again from its tile. On iDrive 8 the tool never asks for MainApp-21 to be restarted (`nextStart` in its JSON instead). iDrive 7 is unchanged.
 
 ## 1.3.0
 

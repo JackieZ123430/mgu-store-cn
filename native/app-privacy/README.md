@@ -130,6 +130,10 @@ tool keeps every earlier release's edits that differ from its own in
 remounted read-write for the write only; a file bind-mounted over a bundle
 path is written in place. With `--json`, the last stdout line is
 `{"version","command","state","changed","files":[...],"restartNeeded","unit"}`.
+On iDrive 8 `changed` and `restartNeeded` are always false, since
+MainApp-21 is not to be bounced for this patch, whoever runs the tool;
+`nextStart` is true while the running MainApp-21 has not loaded the
+bundles as they are now.
 
 Installing or updating the component writes the new release's patch at
 once: the installer runs `apply --json` and, on iDrive 7, bounces MainApp
