@@ -145,6 +145,16 @@ eq(frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} }).values.
 // two sources of the same repo name: owner/repo on each
 two.sources = [{ id: 'idrive7-apps', label: 'one/apps' }, { id: 'iterio', label: 'two/apps' }];
 eq(frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} }).values.grid.items.map((t) => t.src), ['one/apps', 'two/apps']);
+// the status line names the source of a row whose title another row has: downloading, and a failure
+const sub = (st) => text(frame(fixture.model({}, st), { textScale: 1, focus: 0, scroll: {} }), 'subtitle');
+two.sources = [{ id: 'idrive7-apps', label: 'cauliflowermossgrape/idrive7-apps' }, { id: 'iterio', label: 'someone/other-apps' }];
+const dooms = (o) => Object.assign({}, two, { components: [Object.assign({}, two.components[0], o), Object.assign({}, two.components[1], { blocked: null })] });
+eq(sub(Object.assign(dooms({}), { busy: { id: 'doom2', op: 'install', phase: 'download', progress: 42, total: 100 } })),
+    'Downloading 42 % · DOOM (idrive7-apps)');
+eq(sub(dooms({ error: 'the build failed (exit 3)' })), 'DOOM (idrive7-apps): the build failed (exit 3)');
+// one DOOM listed: its title alone
+eq(sub(Object.assign({}, dooms({}), { components: [dooms({}).components[0]], busy: { id: 'doom2', op: 'install', phase: 'download', progress: 42, total: 100 } })),
+    'Downloading 42 % · DOOM');
 const moved = Object.assign({}, two, { components: [Object.assign({}, two.components[1], { id: 'doom', listedId: null, blocked: null,
     status: 'installed', installed: two.components[1].version })] });
 const followed = frame(fixture.model({ stack: [{ name: 'main' }, { name: 'app', id: 'doom@iterio', source: 'iterio', listed: 'doom' }] }, moved),

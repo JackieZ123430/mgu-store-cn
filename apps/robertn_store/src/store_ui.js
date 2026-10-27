@@ -60,6 +60,8 @@ function comps(m) {
 }
 /* The short name of a component's source, '' when the updater names none. */
 const srcName = (m, c) => (c.source && sourceNames(sources(m))[c.source]) || '';
+/* Its title, with its source's short name where another listed row has the same title (two sources' DOOM). */
+const named = (m, c) => (srcName(m, c) && comps(m).some((o) => o !== c && o.title === c.title) ? `${c.title} (${srcName(m, c)})` : c.title);
 /* A component's page: its row, else (its row's id changed with an install)
  * the row of the same source and listed id, else (its source turned to a
  * stick copying it, or back) the row of its id. */
@@ -152,13 +154,15 @@ const button = (text, act, extra) => Object.assign({ hidden: false, disabled: fa
 function storeView(m) {
     const busy = busyOf(m);
     const busyRow = busy && find(comps(m), busy.id);
+    // the status line names a row as the tiles tell it apart
+    const st = m.st && Object.assign({}, m.st, { components: m.st.components.map((c) => (listed(c) ? Object.assign({}, c, { title: named(m, c) }) : c)) });
     const list = comps(m).filter((c) => m.filter === 'all' || (m.filter === 'app' ? !isTool(c) : isTool(c)));
     const checking = !!(m.connected && m.st && m.st.catalog && m.st.catalog.checking);
     const online = m.connected && m.st && m.st.online;
     return {
         title: { text: 'Store' },
-        subtitle: busyRow ? { text: `${busy.phase === 'download' ? `Downloading ${percent(busy)} %` : PHASE[busy.phase] || 'Installing'} · ${busyRow.title}`, color: BLUE }
-            : { text: m.connected ? statusLine(m.st, true) : statusLine(null, false, m.secret), color: DIM },
+        subtitle: busyRow ? { text: `${busy.phase === 'download' ? `Downloading ${percent(busy)} %` : PHASE[busy.phase] || 'Installing'} · ${named(m, busyRow)}`, color: BLUE }
+            : { text: m.connected ? statusLine(st, true) : statusLine(null, false, m.secret), color: DIM },
         filter: { sel: Math.max(0, FILTERS.indexOf(m.filter)), acts: FILTERS.map((f) => ({ do: 'filter', filter: f })) },
         online: { items: !m.connected ? [] : checking ? [{ text: 'Checking', color: BLUE, dot: true }]
             : online ? [{ text: 'Online', color: GREEN, dot: true }] : [{ text: 'Offline', color: AMBER, dot: true }] },

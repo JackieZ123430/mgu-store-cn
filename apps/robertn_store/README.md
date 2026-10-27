@@ -22,7 +22,8 @@ drawn with, `src/am_*.js` and `src/kit_*.js`), fed from the updater's state
 USB, Settings) beside:
 
 - **Store**: All / Apps / Tools, Online / Offline / Checking, the status line
-  (or the running install), a grid of tiles: the package's picture when the
+  (or the running install; an app whose title another listed app has is
+  named with its source, `DOOM (idrive7-apps)`), a grid of tiles: the package's picture when the
   updater names one (`components[].icon`, a PNG file), else a letter tile
   (round for a tool), its name, its source under it (the repo's name,
   `owner/repo` where two sources share a repo name, a catalog's host), its state (`Installed`, `Update 1.0.1`, `Downloading

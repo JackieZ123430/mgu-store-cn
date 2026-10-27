@@ -4,7 +4,9 @@
 
 Each Store and USB tile names its source under the title: the repo's
 name, owner/repo where two sources share a repo name, a catalog's host.
-Installed rows name it after the version.
+Installed rows name it after the version. The status line names the
+source of an app another source lists under the same title, as in
+`Downloading 42 % · DOOM (idrive7-apps)`.
 
 ## 0.9.2
 
