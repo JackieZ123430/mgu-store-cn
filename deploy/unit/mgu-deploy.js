@@ -2052,10 +2052,19 @@ function inplaceAsk(app, version, action) {
     if (!st) return { why: 'the app manager did not take the request within ' + Math.round(CFG.inplaceAckMs / 1000) + 's' };
     return { pid: m.pid, id: id, st: st };
 }
-/* The manager ran this app's install, update or uninstall in its
- * AppManagement child and it failed there (the hook's trace). */
+/* The app manager's installer rejected this app's install or update (the
+ * hook's trace has the run failing), as opposed to its AppManagement child
+ * or the channel to it failing, which a bounce restarts: the stub's own
+ * wrapper with no reason from AppManager in it, or a child that did not
+ * start. MainApp passes a rejection's reason code (UPDATE_FAILED, an
+ * install's reason or code) as the error, else AppManager's message. */
+function channelFailed(st) {
+    var err = String(st.error || '');
+    return /^AppManagerStub::_callMethod /.test(err) && !/AppManager::\w+ Failed due to/.test(err) ||
+        !!(st.trace && st.trace.fork && st.trace.fork.err);
+}
 function ranAndFailed(st, app) {
-    if (!/AppManager::(install|update) Failed due to/.test(String(st.error || ''))) return false;
+    if (channelFailed(st)) return false;
     var ops = st.trace && Array.isArray(st.trace.ops) ? st.trace.ops : [];
     return ops.some(function (o) {
         return o.k === 'run' && o.app === app && !!o.err && typeof st.taken === 'number' && o.t >= st.taken - 1000;
@@ -2180,7 +2189,7 @@ function certCopySource(text) {
  * an install: on any error the stock script stays in place. */
 function ensureCertCopy() {
     try { bindCertCopy(); } catch (e) {
-        rmrf(path.join(DEPLOY_DIR, 'CertificateManager.tmp-' + process.pid + '.js'));
+        try { rmrf(path.join(DEPLOY_DIR, 'CertificateManager.tmp-' + process.pid + '.js')); } catch (e2) { /* left for cleanStale */ }
         warn('the copy of ' + certManagerJs() + ' is not in place (' + e.message + '): MainApp keeps its 30 s keychain wait');
     }
 }
@@ -2245,9 +2254,8 @@ function installApp(a, state, decision) {
     placePreinstalled(a);
     customAppsPut(a.id, entry ? entry.provisioningCache : null, a.pkg.mguAppStartType || 'manually');
     var r = installInPlace(a, existing), uid = r.uid;
-    /* MainApp's own install or update of the app rejected it in its
-     * installer (not the child or its channel failing): a restarted manager
-     * runs the same install, and restarting it stops every app. */
+    /* MainApp's installer rejected the app's install or update: a restarted
+     * manager runs the same install, and restarting it stops every app. */
     if (r.ranFailed) {
         throw fail('the app manager could not ' + (existing ? 'update ' : 'install ') + a.id + ' ' + a.version + ': ' +
             managerReason(r.error));

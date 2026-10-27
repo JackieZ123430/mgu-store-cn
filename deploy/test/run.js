@@ -980,18 +980,23 @@ function testInplace() {
     check('in place: the respawned manager announced nothing: the next install bounces too', next.status === 0 &&
         root.kills().length === 3 && next.out.includes('has no in-place hook'), next.out);
 
-    // MainApp's own install or update rejected it in its installer: the same install after a bounce fails too
-    [['an update', 'update', () => appArtifact('fixture_app', '1.1.0', true), 'could not update fixture_app 1.1.0: validation failed'],
-        ['a fresh install', 'install', () => appArtifact('second_app', '1.0.0', true), 'could not install second_app 1.0.0: validation failed']]
-        .forEach(([what, m, artifact, why]) => {
-            const c = inplaceRoot('fail', { minUp: 1 }, { FAKE_INPLACE_ERROR:
-                `AppManagerStub::_callMethod appManager.${m}(x, ) failed due to Error: AppManager::${m} Failed due to validation failed` });
+    // MainApp's installer rejected it, its errors as the iD7 firmware gives them (AppManager.update's reason
+    // UPDATE_FAILED; an install's reason or code; else its message): the same install after a bounce fails too
+    [['an update (UPDATE_FAILED)', () => appArtifact('fixture_app', '1.1.0', true), { FAKE_INPLACE_REASON: 'UPDATE_FAILED' },
+        'could not update fixture_app 1.1.0: UPDATE_FAILED', true],
+    ['a fresh install with a reason code', () => appArtifact('second_app', '1.0.0', true), { FAKE_INPLACE_REASON: 'APP_INSTALLATION_FAILED' },
+        'could not install second_app 1.0.0: APP_INSTALLATION_FAILED', false],
+    ['a fresh install with AppManager\'s message', () => appArtifact('second_app', '1.0.0', true), { FAKE_INPLACE_ERROR:
+        'AppManagerStub::_callMethod appManager.install(second_app, ) failed due to Error: AppManager::install Failed due to validation failed' },
+        'could not install second_app 1.0.0: validation failed', false]]
+        .forEach(([what, artifact, env, why, update]) => {
+            const c = inplaceRoot('fail', { minUp: 1 }, env);
             const r = c.root.run(['install', '--artifact', artifact(), '--yes']);
             check(`in place: ${what} the manager failed in its installer fails with its reason, exit 1, no bounce, rolled back`,
                 r.status === 1 && r.out.includes(`mgu-deploy: the app manager ${why}`) && r.out.includes('rolling back') &&
                 !r.out.includes('through a bounce') && c.root.kills().length === 1 && c.root.managerPid() === c.mgr.pid &&
                 c.mgr.exitCode === null && readJson(c.root.entry('fixture_app')).userId === 13001 &&
-                !fs.existsSync(c.root.entry('second_app')), r.out);
+                (update || !fs.existsSync(c.root.entry('second_app'))), r.out);
         });
 
     // MainApp's own error, with its stack: the reason in one line
@@ -1014,8 +1019,10 @@ function testInplace() {
             'create the app\'s keychain (uidrun exited 1)') && !/\n\s+at ChildProcess/.test(cr.out), cr.out);
 
     const cases = [
-        ['a failed update (the child, not MainApp\'s install)', 'fail', () => appArtifact('fixture_app', '1.1.0', true), {},
-            'the app manager failed the in-place update (FAKE_FAILURE)', 'update fixture_app 1.1.0 uid 13001'],
+        ['an update whose channel to the AppManagement child failed', 'fail', () => appArtifact('fixture_app', '1.1.0', true),
+            { FAKE_INPLACE_ERROR: 'AppManagerStub::_callMethod appManager.update(fixture_app, PLATFORM) failed due to Error: channel closed.' },
+            'the app manager failed the in-place update (AppManagerStub::_callMethod appManager.update(fixture_app, PLATFORM) failed due to ' +
+            'Error: channel closed.)', 'update fixture_app 1.1.0 uid 13001'],
         ['a refused install', 'refuse', () => appArtifact('second_app', '1.0.0', true), {},
             'the app manager refused the in-place install (already registered)', 'install second_app 1.0.0 uid 13002'],
         ['a request not taken', 'deaf', () => appArtifact('second_app', '1.0.0', true), { MGU_DEPLOY_INPLACE_ACK_MS: '500' },
@@ -1024,7 +1031,7 @@ function testInplace() {
             'the app manager restarted during the in-place install', 'install second_app 1.0.0 uid 13002']
     ];
     cases.forEach(([what, mode, artifact, extra, why, done]) => {
-        const c = inplaceRoot(mode, { minUp: 1 });
+        const c = inplaceRoot(mode, { minUp: 1 }, extra);
         const r = c.root.run(['install', '--artifact', artifact(), '--yes'], extra);
         const k = c.root.kills();
         check(`in place: ${what} falls back to a bounce, which installs it`, r.status === 0 &&
