@@ -1,5 +1,9 @@
 # Updater changelog
 
+## 0.7.6
+
+- `deploy_timeout_s` is 5400 (90 min): longer than the deploy tool's 60-minute wait for another run's lock plus its longest run, so a queued run is never stopped mid-change.
+
 ## 0.7.5
 
 - A deploy tool run still going after `deploy_timeout_s` (3600) is stopped together with everything it started, and the install fails with `the deploy tool did not finish within 60 min and was stopped`. No `mgu-deploy` process is left running.

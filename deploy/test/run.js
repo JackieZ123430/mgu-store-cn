@@ -980,11 +980,12 @@ function testInplace() {
     check('in place: the respawned manager announced nothing: the next install bounces too', next.status === 0 &&
         root.kills().length === 3 && next.out.includes('has no in-place hook'), next.out);
 
-    // the manager's own install or update failed in its installer: the same install after a bounce fails too
-    [['an update', () => appArtifact('fixture_app', '1.1.0', true), 'could not update fixture_app 1.1.0: FAKE_FAILURE'],
-        ['a fresh install', () => appArtifact('second_app', '1.0.0', true), 'could not install second_app 1.0.0: FAKE_FAILURE']]
-        .forEach(([what, artifact, why]) => {
-            const c = inplaceRoot('fail', { minUp: 1 });
+    // MainApp's own install or update rejected it in its installer: the same install after a bounce fails too
+    [['an update', 'update', () => appArtifact('fixture_app', '1.1.0', true), 'could not update fixture_app 1.1.0: validation failed'],
+        ['a fresh install', 'install', () => appArtifact('second_app', '1.0.0', true), 'could not install second_app 1.0.0: validation failed']]
+        .forEach(([what, m, artifact, why]) => {
+            const c = inplaceRoot('fail', { minUp: 1 }, { FAKE_INPLACE_ERROR:
+                `AppManagerStub::_callMethod appManager.${m}(x, ) failed due to Error: AppManager::${m} Failed due to validation failed` });
             const r = c.root.run(['install', '--artifact', artifact(), '--yes']);
             check(`in place: ${what} the manager failed in its installer fails with its reason, exit 1, no bounce, rolled back`,
                 r.status === 1 && r.out.includes(`mgu-deploy: the app manager ${why}`) && r.out.includes('rolling back') &&
@@ -1013,6 +1014,8 @@ function testInplace() {
             'create the app\'s keychain (uidrun exited 1)') && !/\n\s+at ChildProcess/.test(cr.out), cr.out);
 
     const cases = [
+        ['a failed update (the child, not MainApp\'s install)', 'fail', () => appArtifact('fixture_app', '1.1.0', true), {},
+            'the app manager failed the in-place update (FAKE_FAILURE)', 'update fixture_app 1.1.0 uid 13001'],
         ['a refused install', 'refuse', () => appArtifact('second_app', '1.0.0', true), {},
             'the app manager refused the in-place install (already registered)', 'install second_app 1.0.0 uid 13002'],
         ['a request not taken', 'deaf', () => appArtifact('second_app', '1.0.0', true), { MGU_DEPLOY_INPLACE_ACK_MS: '500' },
@@ -1112,8 +1115,8 @@ function testCertCopy() {
     write(stock, stockCertManager(['PENDING', 'PENDING']));
     const r = root.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
     const text = fs.existsSync(copy) ? fs.readFileSync(copy, 'utf8') : '';
-    check('certificate wait: an app install builds the copy of CertificateManager.js, waiting 120 s',
-        r.status === 0 && r.out.includes('keychain wait of MainApp\'s installs: 120 s') && text.includes('TIMEOUT=120e3') &&
+    check('certificate wait: an app install builds the copy of CertificateManager.js, waiting 115 s',
+        r.status === 0 && r.out.includes('keychain wait of MainApp\'s installs: 115 s') && text.includes('TIMEOUT=115e3') &&
         (fs.statSync(copy).mode & 0o777) === 0o755 && fs.readFileSync(stock, 'utf8') === stockCertManager(['PENDING', 'PENDING']), r.out);
     // the copy run as MainApp runs it (its service's states swapped in), with a short wait
     const run = (states, timeout) => {
@@ -1121,7 +1124,7 @@ function testCertCopy() {
         fs.writeFileSync(path.join(dir, 'old.json'), 'abc');
         const script = path.join(dir, '..', path.basename(dir) + '.js');
         fs.writeFileSync(script, text.replace(JSON.stringify(['PENDING', 'PENDING']), JSON.stringify(states))
-            .replace('TIMEOUT=120e3', `TIMEOUT=${timeout}`));
+            .replace('TIMEOUT=115e3', `TIMEOUT=${timeout}`));
         const out = cp.spawnSync(process.execPath, [script, 'demo_app', dir], { encoding: 'utf8' });
         return { out, dir };
     };
@@ -1147,6 +1150,14 @@ function testCertCopy() {
     const br = bad.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
     check('certificate wait: a copy that does not parse is not used, with a warning, and the install goes on',
         br.status === 0 && br.out.includes('does not parse') && !fs.existsSync(bad.p('var/opt/mgu-deploy/CertificateManager.js')), br.out);
+    // the copy cannot be put in place: the install goes on with the stock script
+    const stuck = fakeRoot();
+    write(stuck.p('usr/lib/oap-mainapp/src/scripts/CertificateManager.js'), stockCertManager([]));
+    write(stuck.p('var/opt/mgu-deploy/CertificateManager.js/x'), 'a folder where the copy goes');
+    const sr = stuck.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    check('certificate wait: a copy that cannot be put in place never fails the install',
+        sr.status === 0 && sr.out.includes('is not in place (') && sr.out.includes('MainApp keeps its 30 s keychain wait') &&
+        readJson(stuck.entry('fixture_app')).userId > 0, sr.out);
     const off = root.run(['fallback', 'off', '--yes']);
     check('certificate wait: fallback off removes the copy', off.status === 0 && !fs.existsSync(copy), off.out);
 }
