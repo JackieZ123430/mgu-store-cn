@@ -803,16 +803,21 @@ function runWidgetsExtra() {
     const held = comp({ id: 'mgu-renderd', kind: 'tool', title: 'GPU renderer', version: '1.1.0', installed: '1.1.0', provides: 'renderer' });
     const id8only = comp({ id: 'cardash', title: 'Car Data', version: '1.1.4', installed: null, status: 'available', mguHmi: ['ID8'],
         compat: 'no' });
-    const st = Object.assign({}, ST, { unit: { hmi: 'ID7' }, components: [comp({}), id8only, renderer, held], signin: false,
+    const id8installed = comp({ id: 'vitals', title: 'M Vitals', version: '2.1.0', installed: '2.0.0', status: 'update', mguHmi: ['ID8'],
+        compat: 'no' });
+    const st = Object.assign({}, ST, { unit: { hmi: 'ID7' }, components: [comp({}), id8only, id8installed, renderer, held], signin: false,
         signinApp: { installUrl: 'https://github.com/apps/mgu-store/installations/new' } });
     reset();
     app._forgetWritten();
     app._client.emit('state', st);
     return tick().then(() => {
-        eq(last(/storeAppList\.1\.Text2ndCol/), 'storeAppList.1.Text2ndCol=Not for this head unit', 'not for this unit: says so');
+        eq(app._rows.app, ['doom', 'vitals'], 'one for another head unit only is listed only while installed');
+        eq(last(/storeAppList\.1\.Text2ndCol/), 'storeAppList.1.Text2ndCol=Not for this head unit', 'installed, not for this unit: says so');
+        eq(last(/storeNavApps\.0\.Text2ndCol/), 'storeNavApps.0.Text2ndCol=', 'and not counted as an update');
         app._onRow('app', 1);
-        eq(sent, [], 'and is not installed');
+        eq([sent, states.length], [[], 1], 'and is not updated: its Remove? opens');
         eq(last(/storeAccountSignIn\.Visible/), 'storeAccountSignIn.Visible=0', 'no Sign in with GitHub without state.signin');
+        reset();
         app._onRow('tool', 0);
         return tick();
     }).then(() => {

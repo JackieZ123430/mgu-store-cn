@@ -31,6 +31,12 @@ function notForUnit(row) {
     return row.compat === 'no' && (row.status === 'update' || row.status === 'available');
 }
 
+/* Whether the Store lists the component: not one for another head unit
+ * only (compat "no") unless it is installed, so it can be removed. */
+function listed(row) {
+    return row.compat !== 'no' || !!row.installed;
+}
+
 /* The components, each titled with its source's name where another
  * source lists one of the same id (two repositories' Doom). */
 function withSources(rows, sources) {
@@ -122,7 +128,7 @@ function statusLine(st, connected, secret) {
     if (st.privacy && st.privacy !== 'patched') {
         return 'App privacy patch not in effect';
     }
-    const failed = st.components.find((c) => c.error);
+    const failed = st.components.find((c) => c.error && listed(c));
     if (failed && !st.busy) {
         return `${failed.title}: ${failed.error}`;
     }
@@ -353,6 +359,6 @@ function sourcesMessage(m) {
     }
 }
 
-module.exports = { withSources, removable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
+module.exports = { listed, withSources, removable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode,
     phoneState, phoneAddress };

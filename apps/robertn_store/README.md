@@ -1,4 +1,4 @@
-# robertn_store 0.9.1
+# robertn_store 0.9.2
 
 The Store: every app and head-unit tool of every source, each with its
 state, the progress of the running install, the sources and the phone page.
@@ -26,8 +26,10 @@ USB, Settings) beside:
   updater names one (`components[].icon`, a PNG file), else a letter tile
   (round for a tool), its state (`Installed`, `Update 1.0.1`, `Downloading
   42 %`, `Waiting`, `Not for this head unit`, `Failed`, `Restart pending`,
-  version and size) and a badge or progress ring. A version not for this
-  head unit is not counted as an update.
+  version and size) and a badge or progress ring. A component for another
+  head unit only (the updater's `compat: "no"`) is listed only while
+  installed, so it can be removed (on the widget screens too). A version
+  not for this head unit is not counted as an update.
 - **A component's page**: picture, name, author and source, Version, Commit, size, `Id
   <id>` (an app installed under another id than its source's), App
   or Tool, its head units and capability, the description; Installed and
@@ -97,7 +99,7 @@ installs it; the same package runs on iDrive 7.
 | `DOOM` · `42%` / `Verifying` / `Building` / `Installing` / `Removing` | nothing (in progress) |
 | `Extended dashboard` · `Waiting` | nothing (queued) |
 | `Display bridge` · `Restart pending` | nothing (installed; active after the next reboot) |
-| `Car Data` · `Not for this head unit` | nothing (the updater marks that version `compat: "no"`); *Remove?* for an installed, `uninstallable` one |
+| `Car Data` · `Not for this head unit` | nothing (installed; the updater marks the new version `compat: "no"`); *Remove?* when `uninstallable` |
 | `DOOM` · `Failed, retry` | try again (the status line names the error) |
 | `Renderer` · `Install 0.2.0` | install it (beside another installed renderer) |
 
@@ -264,15 +266,15 @@ tools/test_screens.js      every drawn screen in iDrive 7's and 8's boxes: in th
 tools/test_store.js        src/store.js's flows against stand-in SDK, RHMI, updater, speller and renderer
 tools/shots.js             screenshots of the drawn screens through mgu-render --replay
 tools/make_icon.py         the 140x140 tile icon
-robertn_store@0.9.1/       staged package tree (no javascript/: the build writes it)
+robertn_store@0.9.2/       staged package tree (no javascript/: the build writes it)
 ```
 
 ## Build
 
 ```sh
 cd apps/robertn_store
-node tools/build.js                                # robertn_store@0.9.1.src.tgz
-node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.1.tgz (MGU_SDK_DONOR)
+node tools/build.js                                # robertn_store@0.9.2.src.tgz
+node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.2.tgz (MGU_SDK_DONOR)
 node tools/test_view.js && node tools/test_rhmi.js && node tools/test_qr.js && node tools/test_speller.js &&
     node tools/test_screens.js && node tools/test_store.js && STORE_HMI=ID8 node tools/test_store.js
 (cd ../../native/mgu-render && make test) && node tools/shots.js <out dir>     # screenshots

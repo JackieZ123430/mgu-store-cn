@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.2
+
+The Store lists only what is for this head unit: an app or tool for the
+other iDrive only no longer shows on the Store, Apps, Tools and USB lists,
+unless it is installed, so it can still be removed.
+
 ## 0.9.1
 
 On iDrive 8 the Store has its tile and opens, drawn by the renderer; touch,
