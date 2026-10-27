@@ -5,7 +5,8 @@
 // $FAKE_PRIVACY_STOCK_MAIN or $FAKE_PRIVACY_STOCK_APPMANAGEMENT. Without
 // --main/--appmanagement, check reports $FAKE_PRIVACY_STATE when set and
 // apply exits $FAKE_PRIVACY_APPLY_EXIT when set. Each command is appended
-// to $FAKE_PRIVACY_LOG when it is set.
+// to $FAKE_PRIVACY_LOG when it is set. With $FAKE_PRIVACY_CHANGED_ONCE
+// naming a file that does not exist, apply reports changed and makes it.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -39,7 +40,12 @@ const files = Object.keys(paths).map((kind) => {
         state: 'patched', patchedBy: null, problems: [] };
 });
 const state = argv[0] === 'check' && !explicit && env.FAKE_PRIVACY_STATE ? env.FAKE_PRIVACY_STATE : 'patched';
-console.log(JSON.stringify({ version: 'fake', command: argv[0], state, changed: false, files, restartNeeded: false }));
+let changed = false;
+if (argv[0] === 'apply' && !explicit && env.FAKE_PRIVACY_CHANGED_ONCE && !fs.existsSync(env.FAKE_PRIVACY_CHANGED_ONCE)) {
+    fs.writeFileSync(env.FAKE_PRIVACY_CHANGED_ONCE, '');
+    changed = true;
+}
+console.log(JSON.stringify({ version: 'fake', command: argv[0], state, changed, files, restartNeeded: false }));
 if (argv[0] === 'apply' && !explicit && env.FAKE_PRIVACY_APPLY_EXIT) {
     process.exitCode = Number(env.FAKE_PRIVACY_APPLY_EXIT);
 }
