@@ -340,12 +340,13 @@ const wifiSub = (w) => screen('settings', {}, { uplink: Object.assign({}, fixtur
     .values.access.items[0].sub;
 eq([{ link: 'connected' }, { link: 'connecting', ssid: 'Cafe' }, { enabled: false, link: 'off', ssid: '' },
     { link: 'unavailable', ssid: '', error: 'wlan1 is in access point mode' },
-    { link: 'failed', ssid: '', error: 'wpa_supplicant did not start' }, { link: 'idle', ssid: '' }].map(wifiSub),
-['Connected · Mario iPhone', 'Connecting · Cafe', 'Off', 'Unavailable', 'Error', 'Not connected']);
+    { link: 'failed', ssid: '', error: 'wpa_supplicant ended (exit status 1)' }, { link: 'idle', ssid: '', error: 'could not join Cafe' },
+    { link: 'idle', ssid: '' }].map(wifiSub),
+['Connected · Mario iPhone', 'Connecting · Cafe', 'Not used', 'Unavailable', 'Failed', 'Error', 'Not connected']);
 // the page: the network joined first, then the scan's, then saved ones out of range; a tap joins a saved or open one and asks a
-// secured one's password; a saved one has Forget; Turn off, Scan, the preferred connection
+// secured one's password; a saved one has Forget; Don't use Wi-Fi, Scan, the preferred connection
 f = screen('wifi');
-eq(own(f), ['Forget', 'FRITZ!Box 7590 XY', 'Cafe Free WiFi', 'Telekom_FON', 'Forget', 'Turn off', 'Scan', 'Preferred: Wi-Fi', 'Back']);
+eq(own(f), ['Forget', 'FRITZ!Box 7590 XY', 'Cafe Free WiFi', 'Telekom_FON', 'Forget', "Don't use Wi-Fi", 'Scan', 'Preferred: Wi-Fi', 'Back']);
 eq(f.values.networks.items.map((n) => n.sub), ['Online · Strong', 'Secured · Strong', 'Open · Good', 'Open · Weak', 'Saved · not in range']);
 eq([text(f, 'subtitle'), text(f, 'state'), text(f, 'info')], ['5 networks', 'Online · Mario iPhone', 'IP 172.20.10.3 · -52 dBm']);
 eq(f.items.slice(0, 5).map((i) => i.act), [{ do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: 'Mario iPhone' } },
@@ -353,7 +354,15 @@ eq(f.items.slice(0, 5).map((i) => i.act), [{ do: 'open', page: { name: 'confirm'
     { do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: 'Home' } }]);
 eq(f.items.slice(5, 8).map((i) => i.act), [{ do: 'wifi-power' }, { do: 'wifi-scan' }, { do: 'open', page: { name: 'prefer' } }]);
 f = screen('wifi-off');
-eq([own(f), f.values.networks.empty, text(f, 'state')], [['Turn on', 'Preferred: Wi-Fi', 'Back'], 'Off', 'Off'], 'off: no networks, no Scan');
+eq([own(f), f.values.networks.empty, text(f, 'state')], [['Use Wi-Fi', 'Preferred: Wi-Fi', 'Back'], 'Not used', 'Not used'],
+    'not used: no networks, no Scan');
+// failed: the reason shown, no Scan
+f = screen('wifi', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: { enabled: true, link: 'failed', networks: [], saved: [],
+    scanning: false, error: 'wpa_supplicant ended (exit status 1) (trying again in 30s)' } }) });
+eq([text(f, 'state'), text(f, 'note'), f.values.scan.disabled], ['Failed', 'wpa_supplicant ended (exit status 1) (trying again in 30s)', true]);
+// the uplink's state missing (it restarts): waiting, nothing to press but Back
+f = screen('wifi', {}, { uplink: null });
+eq([text(f, 'state'), f.values.networks.empty, own(f)], ['Waiting', 'Waiting', ['Back']]);
 f = screen('wifi-failed');
 eq([text(f, 'state'), text(f, 'note')], ['Error', 'could not join "FRITZ!Box 7590 XY" (wrong password, or out of range)']);
 eq(f.items[0].act, { do: 'wifi-join', ssid: 'Mario iPhone' }, 'a saved network not joined: a tap joins it');
@@ -363,7 +372,7 @@ ok(own(screen('wifi', {}, { uplink: Object.assign({}, fixture.state().uplink, { 
     { scanning: true }) }) })).indexOf('Scan') < 0, 'no Scan while it scans');
 // the password: word keys and symbols, Connect only from 8 characters
 f = screen('wifi-password');
-eq([text(f, 'title'), text(f, 'field'), f.values.field.label], ['FRITZ!Box 7590 XY', 'sec', 'Password · at least 8 characters']);
+eq([text(f, 'title'), text(f, 'field'), f.values.field.label], ['FRITZ!Box 7590 XY', '···', 'Password · at least 8 characters']);
 ok(own(f).indexOf('Connect') >= 0 && own(f).indexOf('#+=') >= 0, 'word keys with the symbols page, Connect');
 const pass = { name: 'type', title: 'FRITZ!Box 7590 XY', text: '', label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63 };
 ok(!typeOn('iDrive 8', pass, ['s', 'e', 'c', 'r', 'e', 't', '1', 'Connect']), 'Connect does nothing under 8 characters');

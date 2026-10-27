@@ -1135,7 +1135,7 @@ function runDrawn() {
         eq([sent.map(secretless), !!sent[0].secret, drawn.top().name], [[{ op: 'wifi-connect', ssid: 'Home', psk: WIFI_PSK }], true, 'wifi'],
             'the password, exactly as typed, to the updater; back on the Wi-Fi page');
         eq(logged.filter((l) => l.indexOf('w0rd') >= 0), [], 'no password in the log');
-        // joined and saved: Forget asks first; Turn off, Scan
+        // joined and saved: Forget asks first; Don't use Wi-Fi, Scan
         app._client.emit('state', Object.assign({}, st, { uplink: { device: { kind: 'wifi', name: 'Home' }, state: 'online', error: null, preferred: '',
             wifi: Object.assign({}, WIFI, { link: 'online', ssid: 'Home', ip: '172.20.10.2', saved: ['Home'],
                 networks: [Object.assign({}, WIFI.networks[0], { saved: true, current: true }), WIFI.networks[1]] }) } }));
@@ -1148,7 +1148,7 @@ function runDrawn() {
         app._states[host(3)].emit('visible', { visible: false });
         app._states[host(2)].emit('focus', { focus: true });
         reset();
-        ['Turn off', 'Scan'].forEach(tap);
+        ["Don't use Wi-Fi", 'Scan'].forEach(tap);
         eq(sent.map(secretless), [{ op: 'wifi-enable', on: false }, { op: 'wifi-scan' }]);
         // the uplink's refusal shows on the page
         app._client.emit('reply-error', 'Wi-Fi needs uplink = auto', 'wifi-scan');

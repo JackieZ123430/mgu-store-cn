@@ -247,10 +247,11 @@ a log line.
 
 On the drawn screens, Settings has **Wi-Fi** while the uplink reports its
 Wi-Fi (`state.uplink.wifi`: mgu-uplink 0.7.0 or newer on `uplink = auto`,
-through an updater from 0.8.0; the Store requires both, `release.json`), with its state: `Online · <network>`,
-`Connected · <network>` (joined; the uplink uses another device or waits
-for DHCP), `Connecting · <network>`, `Not connected`, `Off`, `Unavailable` (no radio, or the car uses it; the page says why),
-`Error`. Its page (from IterioDev App Manager 2.0.6's Wi-Fi page) lists,
+through an updater from 0.8.0; without them the row is not there), with
+its state: `Online · <network>`, `Connected · <network>` (joined; the
+uplink uses another device or waits for DHCP), `Connecting · <network>`,
+`Not connected`, `Not used`, `Unavailable` (no radio, or the car uses it),
+`Failed`, `Error`; the page shows the reason. Its page (from IterioDev App Manager 2.0.6's Wi-Fi page) lists,
 while Wi-Fi is on, the network joined first, then the latest scan's,
 strongest first, then saved ones out of range, each with `Online` /
 `Connected` / `Connecting`, `Saved`, `Secured` or `Open` and its signal
@@ -262,7 +263,7 @@ the HMI's speller. The password goes to the updater in that request and
 is kept nowhere, logged nowhere. A saved network has **Forget** (a confirm
 step, `wifi-forget`). The panel shows the state, address and signal, the
 uplink's error (a join that failed) or the refusal of the last request,
-and **Turn on** / **Turn off** (`wifi-enable`), **Scan** (`wifi-scan`, also
+and **Use Wi-Fi** / **Don't use Wi-Fi** (`wifi-enable`: whether the uplink uses Wi-Fi; the radio stays as the car has it), **Scan** (`wifi-scan`, also
 asked when the page opens) and **Preferred: <kind>**, which opens the
 preferred connection: Automatic, Wi-Fi, USB (adapters and LTE sticks),
 Phone (Android and iPhone tethering): the uplink's `preferred` values

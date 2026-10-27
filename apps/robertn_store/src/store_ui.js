@@ -32,7 +32,7 @@
  * go, secret, max, min, label }) is text typed on the drawn keyboard: layout 'url'
  * (URLs and tokens, the default) or 'text' (words; with symbols its '#+='
  * page has every printable ASCII symbol), go the Enter key's text, secret
- * shows only the last 4 characters, max the length (300), min the length
+ * shows only the last 4 characters ('password': none), max the length (300), min the length
  * its Enter key takes, label the text box's caption.
  *
  * The Wi-Fi page (wifi) and the preferred connection (prefer) show the
@@ -443,14 +443,16 @@ function loginView(m) {
     };
 }
 
-const masked = (t) => (t.length <= 4 ? t : '·'.repeat(Math.min(24, t.length - 4)) + t.slice(-4));
+// a token keeps its last 4 characters in view, a password ('password') none
+const masked = (t, kind) => (kind === 'password' ? '·'.repeat(Math.min(24, t.length))
+    : t.length <= 4 ? t : '·'.repeat(Math.min(24, t.length - 4)) + t.slice(-4));
 
 function typeView(m, page) {
     const text = page.text || '';
     const short = page.min && text.length < page.min ? ` · at least ${page.min} characters` : '';
     return {
         title: { text: page.title || '' },
-        field: { text: page.secret ? masked(text) : text, label: page.label ? page.label + short : '' },
+        field: { text: page.secret ? masked(text, page.secret) : text, label: page.label ? page.label + short : '' },
         keyboard: { layout: page.layout || 'url', shift: !!page.shift, symbols: !!page.symbols, sym: !!page.sym, go: page.go || 'OK' }
     };
 }
@@ -504,11 +506,14 @@ function wifiState(w) {
     if (w.link === 'unavailable') {
         return ['Unavailable', DIM];
     }
+    if (w.link === 'failed') {
+        return ['Failed', AMBER];
+    }
     if (w.error && ['online', 'connected', 'connecting'].indexOf(w.link) < 0) {
         return ['Error', AMBER];
     }
     return { online: [`Online${at}`, GREEN], connected: [`Connected${at}`, BLUE], connecting: [`Connecting${at}`, BLUE],
-        off: ['Off', DIM], failed: ['Error', AMBER] }[w.link] || ['Not connected', DIM];
+        off: ['Not used', DIM] }[w.link] || ['Not connected', DIM];
 }
 const strength = (dbm) => (typeof dbm !== 'number' ? null : dbm >= -60 ? ['Strong', GREEN] : dbm >= -72 ? ['Good', BLUE] : ['Weak', AMBER]);
 const scanningOf = (w) => !!(w.scanning || w.link === 'scanning');
@@ -546,8 +551,10 @@ const groupOf = (kind) => (GROUPS.find((x) => x[2].indexOf(kind) >= 0) || [kind]
 const LIT = { [GREEN]: '#5be38e,#1f9a52', [BLUE]: '#5fb4ff,#1f5fd0', [AMBER]: '#ffc04d,#c98a12' };
 
 function wifiView(m) {
+    // without the uplink's state (it restarts) the page waits, its controls off
+    const waiting = !wifiOf(m);
     const w = wifiOf(m) || { enabled: false, link: 'off' };
-    const s = wifiState(w);
+    const s = waiting ? ['Waiting', DIM] : wifiState(w);
     const nets = wifiNets(w);
     const scanning = scanningOf(w);
     const dbm = typeof w.signal === 'number' ? `${w.signal} dBm` : '';
@@ -555,16 +562,17 @@ function wifiView(m) {
     return {
         subtitle: { text: !w.enabled ? '' : scanning ? 'Scanning' : plural(nets.length, 'network') },
         networks: { items: nets.map((n) => netRow(w, n)),
-            empty: !w.enabled ? 'Off' : w.link === 'unavailable' ? 'Unavailable' : scanning ? 'Scanning' : 'No networks' },
+            empty: waiting ? 'Waiting' : !w.enabled ? 'Not used' : w.link === 'unavailable' ? 'Unavailable' : scanning ? 'Scanning' : 'No networks' },
         icon: { vicon: 'wifi', kind: 'service', colors: LIT[s[1]] || '#7a808a,#3a3f47' },
         state: { text: s[0], color: s[1] },
         info: { text: [w.ip && `IP ${w.ip}`, dbm].filter(Boolean).join(' · ') },
         note: { text: String(m.uplinkNote || w.error || '').slice(0, 160) },
-        power: w.enabled ? button('Turn off', { do: 'wifi-power' }, { vicon: 'wifi', style: 'outline' })
-            : button('Turn on', { do: 'wifi-power' }, { vicon: 'wifi', style: 'primary', color: GREEN }),
+        power: w.enabled ? button("Don't use Wi-Fi", { do: 'wifi-power' }, { vicon: 'wifi', style: 'outline' })
+            : button('Use Wi-Fi', { do: 'wifi-power' }, { vicon: 'wifi', style: 'primary', color: GREEN, disabled: waiting }),
         scan: button(scanning ? 'Scanning' : 'Scan', { do: 'wifi-scan' }, { vicon: 'refresh', style: 'outline',
             disabled: !w.enabled || scanning || w.link === 'unavailable' || w.link === 'failed' }),
-        prefer: button(`Preferred: ${groupLabel(preferred)}`, { do: 'open', page: { name: 'prefer' } }, { vicon: 'route', style: 'outline' })
+        prefer: button(`Preferred: ${groupLabel(preferred)}`, { do: 'open', page: { name: 'prefer' } }, { vicon: 'route', style: 'outline',
+            disabled: waiting })
     };
 }
 

@@ -1150,7 +1150,7 @@ class Updater {
             // one of them each, for clients that know a single provider (the Store 0.7)
             providers: Object.keys(this.providers).reduce((o, cap) => Object.assign(o, { [cap]: this.providers[cap][0] }), {}),
             online: readLease(this.conf).online,
-            // the uplink's device, preferred kind and Wi-Fi (its status.json), null while it does not run
+            // the uplink's device, preferred group and Wi-Fi (its status.json), null while it does not run
             uplink: this.uplink,
             privacy: this.privacy,
             // one line for clients that know a single catalog (the Store 0.3)
