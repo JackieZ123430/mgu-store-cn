@@ -1569,6 +1569,43 @@ function testPrivacyTool() {
         fs.existsSync(path.join(root.tool('app-privacy'), 'current')), r.out);
 }
 
+/* iDrive 8: MainApp-21 is never bounced for app-privacy; its patch takes
+ * effect at the next start, before MainApp-21 installs a queued app. */
+function testPrivacyId8() {
+    const plog = (root) => (fs.existsSync(`${root.R}.privacy.log`) ? fs.readFileSync(`${root.R}.privacy.log`, 'utf8').split('\n').filter(Boolean) : []);
+    let root = id8Root({ privacy: false });
+    let r = root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
+    check('privacy id8: installing it runs its apply, MainApp-21 is not bounced, the patch waits for the next start',
+        r.status === 0 && plog(root).includes('1.0.0 apply --json') && root.kills().length === 0 &&
+        r.out.includes('app-privacy: in effect from the next start of the head unit') &&
+        root.status().pending_reboot.some((p) => p.id === 'app-privacy' && p.reason === 'the new version runs from its next start'),
+        `${r.out}\n${plog(root).join('\n')}`);
+    const n = plog(root).length;
+    r = root.run(['install', '--artifact', rhmiApp('robertn_x8', '1.0.0', ['ID8'], { marked: true, npm: true }), '--yes']);
+    check('privacy id8: an app install applies the patch first and queues the app, no bounce',
+        r.status === 0 && plog(root).slice(n).includes('1.0.0 apply --json') && root.kills().length === 0 &&
+        fs.existsSync(root.p('var/opt/mgu-deploy/id8/queue/robertn_x8@1.0.0.tgz')), `${r.out}\n${plog(root).join('\n')}`);
+    root.noManager();
+    r = root.run(['uninstall', 'robertn_x8', '--yes']);
+    r = root.run(['uninstall', 'app-privacy', '--yes']);
+    check('privacy id8: uninstall reverts with MainApp-21 stopped, nothing pending for it',
+        r.status === 0 && plog(root).includes('1.0.0 revert --json') && root.kills().length === 0 &&
+        !r.out.includes('in effect from the next start'), r.out);
+
+    root = id8Root();
+    root.env.FAKE_PRIVACY_APPLY_EXIT = '2';
+    r = root.run(['install', '--artifact', rhmiApp('robertn_x8', '1.0.0', ['ID8'], { marked: true, npm: true }), '--yes']);
+    check('privacy id8: an app install is refused while the patch does not apply',
+        r.status === 2 && r.out.includes('refusing the app install') &&
+        !fs.existsSync(root.p('var/opt/mgu-deploy/id8/queue/robertn_x8@1.0.0.tgz')), r.out);
+
+    root = id8Root({ privacy: false });
+    r = root.run(['install', '--artifact', rhmiApp('robertn_x8', '1.0.0', ['ID8'], { marked: true, npm: true }), '--yes']);
+    check('privacy id8: without app-privacy an app still queues, with a warning',
+        r.status === 0 && r.out.includes('app-privacy is not installed') &&
+        fs.existsSync(root.p('var/opt/mgu-deploy/id8/queue/robertn_x8@1.0.0.tgz')), r.out);
+}
+
 /* stock and the newest ten snapshots stay */
 function testBackupRetention() {
     const root = fakeRoot();
@@ -3984,6 +4021,7 @@ const SUITES = [
     testHealth,
     testRollback,
     testPrivacyTool,
+    testPrivacyId8,
     testRestoreRefusals,
     testStaleFiles,
     testProvisioningSection,

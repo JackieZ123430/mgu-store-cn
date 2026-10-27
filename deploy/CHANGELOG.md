@@ -1,5 +1,9 @@
 # Deploy tool changelog
 
+## 0.5.5
+
+- iDrive 8: app-privacy installs, updates, rolls back and uninstalls without restarting MainApp-21; its patch takes effect at the next start of the head unit, and app-privacy shows as pending until then. With app-privacy installed, an app is queued only after its patch applies.
+
 ## 0.5.4
 
 - An app update, the Store's included, runs in place, restarting only that app, also right after an update of the deploy tool: while the app manager runs a provisioning fallback with the same in-place install hook, it keeps that one, and the deploy tool's new one takes effect at the next start. An app manager restarted moments before (by an app-privacy update, say) is given its usual time to come up first.

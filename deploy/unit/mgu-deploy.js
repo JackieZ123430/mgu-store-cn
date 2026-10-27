@@ -44,7 +44,7 @@ var cp = require('child_process');
 
 /* deploy/component.json's version; bumped when a file under deploy/unit/
  * changes. */
-var VERSION = '0.5.4';
+var VERSION = '0.5.5';
 var HERE = __dirname;
 var MGR_UID = Number(process.env.MGU_DEPLOY_MAINAPP_UID || 12201);
 
@@ -1462,15 +1462,27 @@ function restartAgain(units, what) {
 }
 /* app-privacy's apply after its own install or rollback, with the bounce
  * rule of INTEGRATION.md §2. */
-function privacyApplyAndBounce() {
+function privacyApplyAndBounce(state) {
     var tool = privacyTool();
     if (!fs.existsSync(tool)) return { ok: false, why: 'tool missing at ' + tool };
     var r = run(CFG.node, [tool, 'apply', '--json'], { allowFail: true, timeout: 120000 });
     var result = lastJsonLine(r.stdout);
     if (r.status !== 0 || !result) return { ok: false, why: 'apply exited ' + r.status + (result ? '' : ' with no result') };
     say('app-privacy: ' + (result.state || 'applied') + (result.changed ? ' (applied now)' : ''));
-    if ((result.changed || result.restartNeeded) && managerPid()) bounceManager();
+    if (result.changed || result.restartNeeded) privacyTakeEffect(state);
     return { ok: true };
+}
+/* The manager loads the bundles app-privacy wrote: on iDrive 7 it is
+ * bounced now; on iDrive 8 MainApp-21 is not restarted and loads them at
+ * its next start, as it takes app changes. */
+function privacyTakeEffect(state) {
+    if (!isId8()) {
+        if (managerPid()) bounceManager();
+        return;
+    }
+    if (!managerPid()) return;
+    if (state) addPending(state, 'app-privacy', PENDING_NEXT_START);
+    say('app-privacy: in effect from the next start of the head unit');
 }
 
 /* ---- tool install ------------------------------------------------------------ */
@@ -1584,7 +1596,7 @@ function installTool(a, state, tx) {
     if (bad) { e = fail(c.id + ' ' + c.version + ': ' + bad); e.health = touched; throw e; }
     if (c.id === 'mgu-deploy') ensureShim();
     if (c.id === 'app-privacy') {
-        var pr = privacyApplyAndBounce();
+        var pr = privacyApplyAndBounce(state);
         if (!pr.ok) { e = fail('app-privacy ' + c.version + ': ' + pr.why); e.privacy = true; throw e; }
     }
     fs.readdirSync(versions).forEach(function (v) {
@@ -1631,7 +1643,7 @@ function rollbackTool(a, tx, backup, e, state) {
     pruneCreatedDirs(state);
     if (e.health) restartAgain(e.health, c.id + ' ' + tx.before);
     if (e.privacy) {
-        var pr = privacyApplyAndBounce();
+        var pr = privacyApplyAndBounce(state);
         say(pr.ok ? 'app-privacy ' + tx.before + ' applied again' : 'app-privacy ' + tx.before + ' apply failed too: ' + pr.why);
     }
 }
@@ -2261,7 +2273,7 @@ function uninstallTool(id, state) {
     var c = tools[0].component, root = tools[0].root;
     say('uninstalling tool ' + id + ' ' + c.version);
     /* the stock bundles go back first; a failed revert keeps the tool */
-    if (id === 'app-privacy' && privacyRevert() && managerPid()) bounceManager();
+    if (id === 'app-privacy' && privacyRevert()) privacyTakeEffect(state);
     (c.units || []).forEach(function (u) {
         if (unitState(u.name, 'is-active') !== 'active') return;
         if (recmgrLoaded(recmgrBase(u.name))) { runOk(CFG.systemctl, ['stop', u.name]); say('stopped ' + u.name); }
@@ -2558,9 +2570,21 @@ function queueId8(change) {
     });
     writePending(change.action ? keep.concat([change]) : keep);
 }
+/* With app-privacy installed its patch must apply, so that MainApp-21
+ * starts with it when it installs the app; without it the app installs
+ * and MainApp-21 reports it. */
+function ensurePrivacyId8(state) {
+    if (!fs.existsSync(privacyTool())) {
+        warn('app-privacy is not installed: MainApp-21 reports our apps to the backend until it is');
+        return;
+    }
+    var pr = privacyApplyAndBounce(state);
+    if (!pr.ok) throw refuse('app-privacy ' + pr.why + '; refusing the app install');
+}
 function installAppId8(a, state, decision) {
     var existing = decision.existing || null, file = path.join(ID8_QUEUE, a.id + '@' + a.version + '.tgz');
     say('queueing app ' + a.id + ' ' + a.version + (existing ? ' (update of ' + existing.version + ')' : '') + ' for the next start');
+    ensurePrivacyId8(state);
     ensureApplyUnit(state);
     mkdirp(ID8_QUEUE, 0o700);
     copyFileMode(a.file, file, 0o600);
@@ -4061,11 +4085,11 @@ function cmdRollback(args) {
             throw fail(id + ' ' + target + ': ' + bad);
         }
         if (id === 'app-privacy') {
-            var pr = privacyApplyAndBounce();
+            var pr = privacyApplyAndBounce(state);
             if (!pr.ok) {
                 switchCurrent(root, cur);
                 say(cur + ' is current again');
-                var again = privacyApplyAndBounce();
+                var again = privacyApplyAndBounce(state);
                 if (!again.ok) say('app-privacy ' + cur + ' apply failed too: ' + again.why);
                 throw fail('app-privacy ' + target + ': ' + pr.why);
             }
@@ -4128,7 +4152,7 @@ function cmdRestore(args) {
         if (removed.length) {
             bounceManager();
             say('apps removed: ' + removed.join(', ') + ' (manager-side records are not removed)');
-        } else if (privacyReverted && managerPid()) bounceManager();
+        } else if (privacyReverted) privacyTakeEffect(state);
         saveState(state);
     } catch (e) {
         if (e.code !== 2) {
