@@ -69,7 +69,6 @@ type relayLink struct {
 	info    usbDeviceInfo
 	dev     *usbDevice
 	claimed []int
-	unbound unboundDrivers
 	fr      framer
 	pktFd   int
 	peerIdx int
@@ -128,9 +127,9 @@ func orUnknown(s string) string {
 // startRelay sets up the veth pair with mac on Ifname and the given MTU (0:
 // the default) and starts the pumps. On failure it releases everything it
 // was handed.
-func startRelay(kind string, info usbDeviceInfo, dev *usbDevice, claimed []int, unbound unboundDrivers,
+func startRelay(kind string, info usbDeviceInfo, dev *usbDevice, claimed []int,
 	fr framer, mac []byte, mtu int) (Link, error) {
-	l := &relayLink{kind: kind, info: info, dev: dev, claimed: claimed, unbound: unbound, fr: fr,
+	l := &relayLink{kind: kind, info: info, dev: dev, claimed: claimed, fr: fr,
 		pktFd: -1, done: make(chan struct{}), stop: make(chan struct{})}
 	if err := l.setupVeth(mac, mtu); err != nil {
 		l.teardown()
@@ -299,20 +298,23 @@ func (l *relayLink) teardown() {
 	if l.dev == nil {
 		return
 	}
+	failed := false
 	select {
 	case <-l.done: // the device left, or failed
+		failed = true
 	default:
-		if h, ok := l.fr.(haltFramer); ok {
-			h.halt()
-		}
+	}
+	// An iPhone goes back to the media daemon also when its link failed
+	// (nothing received, Trust declined): its halt is a sysfs write, which
+	// does nothing once the phone is gone.
+	if h, ok := l.fr.(haltFramer); ok && (!failed || l.kind == kindIPhone) {
+		h.halt()
 	}
 	for i := len(l.claimed) - 1; i >= 0; i-- {
 		l.dev.releaseInterface(l.claimed[i])
 	}
 	l.dev.Close()
 	l.dev = nil
-	l.unbound.rebind()
-	l.unbound = nil
 }
 
 // htons returns v held big-endian (the target is little-endian amd64).

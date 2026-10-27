@@ -20,16 +20,20 @@ const Ifname = "vethuplink"
 const defaultConfig = "/var/opt/mgu-uplink/current/mgu-uplink.conf"
 
 type config struct {
-	Uplink    string   // see uplinkChoices
+	Uplink    string   // auto, or netdev:<ifname> (see uplinkChoices)
 	Apps      []string // OAP app names, resolved to uids through uids.txt
 	UIDs      []int    // static uids (non-app processes)
 	Table     int      // routing table holding the uplink's default route
 	Pref      int      // first of the three ip rule priorities this tool owns
 	OAPDir    string   // OAP install root: oap_<uid>/ per app
 	RunDir    string   // lease.json and the DHCP hook socket
-	USBDevice string   // optional VID:PID: the usb uplink uses only this adapter
 	LocalConf string   // read on top of this file when it exists; survives updates
+	Settings  string   // read on top of LocalConf when it exists: what requests set (ctl.go); survives updates
 	StateDir  string   // uids.d/ and apps.d/; survives updates
+	Ignored   []string // settings that pick a device kind or adapter: the uplink takes whatever is plugged in
+	Preferred string   // the kind tried first ("": the order of autoKinds)
+	WiFi      bool     // the Wi-Fi provider is switched on
+	WiFiIf    string   // the Wi-Fi interface
 }
 
 func defaults() config {
@@ -40,22 +44,25 @@ func defaults() config {
 		OAPDir:   "/var/opt/public/oap",
 		RunDir:   "/run/mgu-uplink",
 		StateDir: "/var/opt/mgu-uplink",
+		WiFiIf:   wifiIfname,
 	}
 }
 
-var (
-	appNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	vidPidRe  = regexp.MustCompile(`^[0-9a-f]{4}:[0-9a-f]{4}$`)
-)
+var appNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
-// loadConfig reads path and then, if it exists, the local_conf it names.
+// loadConfig reads path and then, if they exist, the local_conf and the
+// settings_conf it names. Requests write settings_conf only, a file older
+// versions do not read, so a rollback never meets a key it lacks.
 func loadConfig(path string) (config, error) {
 	c := defaults()
 	if err := c.read(path, true); err != nil {
 		return c, err
 	}
-	if c.LocalConf != "" {
-		if err := c.read(c.LocalConf, false); err != nil && !os.IsNotExist(err) {
+	for _, p := range []string{c.LocalConf, c.Settings} {
+		if p == "" {
+			continue
+		}
+		if err := c.read(p, false); err != nil && !os.IsNotExist(err) {
 			return c, err
 		}
 	}
@@ -86,6 +93,10 @@ func (c *config) read(path string, top bool) error {
 		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
 		if key == "local_conf" && top {
 			c.LocalConf = val
+			continue
+		}
+		if key == "settings_conf" && top {
+			c.Settings = val
 			continue
 		}
 		// A local uids adds to the shipped list, so an override written
@@ -135,7 +146,16 @@ func (c *config) set(key, val string) error {
 	var err error
 	switch key {
 	case "uplink":
-		c.Uplink = val
+		// A device kind (usb, usbecm, rndis, ncm, iphone) is not a choice:
+		// the uplink takes whatever is plugged in. Such a setting, left on a
+		// unit by hand, is ignored rather than refused, so the service starts.
+		if val == "auto" || strings.HasPrefix(val, "netdev:") {
+			c.Uplink = val
+		} else if kindRank(val) < len(autoKinds) {
+			c.Ignored = append(c.Ignored, key+" = "+val)
+		} else {
+			return fmt.Errorf("uplink: %q is none of %s", val, uplinkChoices)
+		}
 	case "apps":
 		c.Apps = splitList(val)
 	case "uids":
@@ -152,7 +172,17 @@ func (c *config) set(key, val string) error {
 	case "rule_pref":
 		c.Pref, err = strconv.Atoi(val)
 	case "usb_device":
-		c.USBDevice = strings.ToLower(val)
+		c.Ignored = append(c.Ignored, key+" = "+val)
+	case "preferred":
+		if val != "" && kindRank(val) == len(autoKinds) {
+			return fmt.Errorf("preferred: %q is none of %s", val, strings.Join(autoKinds, ", "))
+		}
+		c.Preferred = val
+	case "wifi":
+		if val != "on" && val != "off" {
+			return fmt.Errorf("wifi: on or off, not %q", val)
+		}
+		c.WiFi = val == "on"
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}
@@ -184,9 +214,6 @@ func (c *config) validate() error {
 	if c.Pref <= 0 || c.Pref+rulePrefs > 32766 {
 		return fmt.Errorf("rule_pref: %d must leave room for %d rules before main (32766)", c.Pref, rulePrefs)
 	}
-	if c.USBDevice != "" && !vidPidRe.MatchString(c.USBDevice) {
-		return fmt.Errorf("usb_device: %q is not VID:PID in hex", c.USBDevice)
-	}
 	return nil
 }
 
@@ -195,6 +222,58 @@ func (c config) leaseFile() string  { return c.RunDir + "/lease.json" }
 func (c config) hookSocket() string { return c.RunDir + "/hook.sock" }
 func (c config) linkFile() string   { return c.RunDir + "/link.json" }
 func (c config) statusFile() string { return c.RunDir + "/status.json" }
+func (c config) ctlSocket() string  { return c.RunDir + "/ctl.sock" }
+func (c config) wifiFile() string   { return c.RunDir + "/wifi.json" }
+func (c config) wpaCtrl() string    { return c.RunDir + "/wpa" }     // wpa_supplicant's control socket folder
+func (c config) wpaLocal() string   { return c.RunDir + "/wpa-ctl" } // our end of it
+
+// pairDir holds the unit's host identity for iPhone pairing; updates keep it.
+func (c config) pairDir() string { return c.StateDir + "/pairing" }
+
+// wpaConf holds the saved Wi-Fi networks, in a folder only root can read;
+// updates keep it.
+func (c config) wpaConf() string { return c.StateDir + "/wifi/wpa.conf" }
+
+// setSetting makes the conf file path say key = val, or drop key when val
+// is "", and keeps every other line as it is.
+func setSetting(path, key, val string) error {
+	if path == "" {
+		return fmt.Errorf("no settings_conf to keep %s in", key)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var out []string
+	done := val == ""
+	for _, line := range strings.SplitAfter(string(b), "\n") {
+		k := line
+		if i := strings.IndexByte(k, '#'); i >= 0 {
+			k = k[:i]
+		}
+		if kv := strings.SplitN(k, "=", 2); len(kv) == 2 && strings.TrimSpace(kv[0]) == key {
+			if !done {
+				out = append(out, key+" = "+val+"\n")
+				done = true
+			}
+			continue
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	if n := len(out); n > 0 && !strings.HasSuffix(out[n-1], "\n") {
+		out[n-1] += "\n"
+	}
+	if !done {
+		out = append(out, key+" = "+val+"\n")
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(out, "")), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
 // Drop-in folders the deploy tool fills per installed component that
 // declares "internet": true: uids.d/<id> holds numeric uids, apps.d/<id>

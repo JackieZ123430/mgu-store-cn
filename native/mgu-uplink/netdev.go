@@ -18,8 +18,8 @@ import (
 	"strings"
 )
 
-// usbNetDrivers are the USB Ethernet drivers an adapter is taken from when
-// usb_device does not name it.
+// usbNetDrivers are the USB Ethernet drivers whose adapters the uplink
+// takes.
 var usbNetDrivers = map[string]bool{
 	"asix": true, "ax88179_178a": true, "smsc95xx": true, "smsc75xx": true, "r8152": true,
 	"cdc_ether": true, "cdc_ncm": true, "cdc_eem": true, "cdc_subset": true, "rndis_host": true,
@@ -28,10 +28,9 @@ var usbNetDrivers = map[string]bool{
 const sysClassNet = "/sys/class/net"
 
 // usbNetdevs lists the Ethernet interfaces under sys (/sys/class/net) that
-// belong to a USB adapter: the one with VID:PID device, or with device "" any
-// on a usbNetDrivers driver. Wireless interfaces never qualify. Ifname, left
-// by a killed run, sorts first.
-func usbNetdevs(sys, device string) []string {
+// belong to a USB adapter on a usbNetDrivers driver. Wireless interfaces
+// never qualify. Ifname, left by a killed run, sorts first.
+func usbNetdevs(sys string) []string {
 	entries, _ := os.ReadDir(sys)
 	var out []string
 	for _, e := range entries {
@@ -51,11 +50,8 @@ func usbNetdevs(sys, device string) []string {
 		if filepath.Base(subsys) != "usb" {
 			continue
 		}
-		vid, _ := readSysctl(filepath.Join(intf, "..", "idVendor"))
-		pid, _ := readSysctl(filepath.Join(intf, "..", "idProduct"))
 		drv, _ := filepath.EvalSymlinks(filepath.Join(intf, "driver"))
-		if device != "" && strings.ToLower(vid+":"+pid) == device ||
-			device == "" && usbNetDrivers[filepath.Base(drv)] {
+		if usbNetDrivers[filepath.Base(drv)] {
 			out = append(out, e.Name())
 		}
 	}

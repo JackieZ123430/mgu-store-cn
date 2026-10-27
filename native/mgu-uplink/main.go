@@ -1,15 +1,17 @@
 // mgu-uplink: internet for chosen apps through a USB network adapter, an LTE
-// stick or a USB-tethered phone, and for nothing else on the unit.
+// stick, a USB-tethered phone or a Wi-Fi network, and for nothing else on
+// the unit.
 //
 // The service brings up the adapter's interface, gets an address from the
 // adapter by DHCP and routes only the configured uids through it, in a routing
 // table and firewall table of its own; the unit's own routes, default route
 // and resolver stay as they are. A stop removes everything it added. See
-// uplink.go for the uplink seam, netcfg.go for the routing, firewall.go for
-// the firewall, state.go for the files apps read and devstatus.go for
-// status.json.
+// uplink.go for the uplink seam, scan.go for the device order, wifi.go for
+// Wi-Fi, netcfg.go for the routing, firewall.go for the firewall, state.go
+// for the files apps read, devstatus.go for status.json and ctl.go for
+// requests.
 //
-//	mgu-uplink run [-c <config>] [-uplink auto|usb|usbecm|rndis|ncm|iphone|netdev:<ifname>]   the service
+//	mgu-uplink run [-c <config>] [-uplink auto|netdev:<ifname>]   the service
 //	mgu-uplink status [-c <config>]  device state, lease, rules, uplink table, firewall, routes per uid
 //	mgu-uplink clean [-c <config>]   remove what a killed run left behind
 //	mgu-uplink --version
@@ -30,7 +32,7 @@ func logf(format string, a ...interface{}) {
 }
 
 const usage = `usage:
-  mgu-uplink run [-c <config>] [-uplink auto|usb|usbecm|rndis|ncm|iphone|netdev:<ifname>]
+  mgu-uplink run [-c <config>] [-uplink auto|netdev:<ifname>]
   mgu-uplink status [-c <config>]
   mgu-uplink clean [-c <config>]
   mgu-uplink --version`
@@ -77,6 +79,11 @@ func command(name string, args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mgu-uplink: %v\n", err)
 		return 1
+	}
+	if name == "run" {
+		for _, s := range c.Ignored {
+			logf("ignoring %q: the uplink takes whatever is plugged in", s)
+		}
 	}
 	if name == "status" {
 		status(c)
