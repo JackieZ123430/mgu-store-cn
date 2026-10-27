@@ -1910,6 +1910,25 @@ function testHuToken() {
 
 const TRANSPORT = path.join(DEPLOY, 'transport');
 
+/* deploy/test/connect_test.js: how mgu-install.js finds the unit. */
+function testConnect() {
+    const r = cp.spawnSync(process.execPath, [path.join(HERE, 'connect_test.js')], { encoding: 'utf8' });
+    const lines = r.stdout.split('\n');
+    let seen = 0;
+    lines.forEach((l, i) => {
+        const m = /^(not )?ok (.*)$/.exec(l);
+        if (m) {
+            seen += 1;
+            const detail = [];
+            for (let j = i + 1; j < lines.length && lines[j].startsWith('  # '); j += 1) {
+                detail.push(lines[j].slice(4));
+            }
+            check(`connect: ${m[2]}`, !m[1], detail.join('\n'));
+        }
+    });
+    check('connect: connect_test.js ran to the end', r.status === 0 && seen > 20, `${r.status} ${r.stderr.slice(-2000)}`);
+}
+
 /* deploy/transport compiles on the system python3, and its own tests
  * (transport_test.py: selection, banner, relay, arming) all pass. */
 function testTransport() {
@@ -2698,12 +2717,27 @@ function installBin(root) {
     return { bin, envFile };
 }
 
+/* A server on 127.0.0.1 that greets like an sshd, in its own process (the
+ * tests block this one); its port. */
+function bannerServer() {
+    const portFile = path.join(fs.mkdtempSync(path.join(T, 'banner-')), 'port');
+    const child = cp.spawn(process.execPath, ['-e', `const s = require('net').createServer((c) => { c.on('error', () => {}); c.end('SSH-2.0-OpenSSH_7.8\\r\\n'); });
+s.listen(0, '127.0.0.1', () => require('fs').writeFileSync(process.argv[1], String(s.address().port)));`, portFile], { stdio: 'inherit' });
+    inplaceChildren.push(child);
+    for (let i = 0; i < 200 && !(fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8')); i += 1) {
+        sleepSync(25);
+    }
+    return fs.readFileSync(portFile, 'utf8');
+}
+
 function mguInstall(args, opts) {
     const log = path.join(fs.mkdtempSync(path.join(T, 'ssh-')), 'log');
     fs.writeFileSync(log, '');
     const env = Object.assign({}, process.env, { PATH: `${opts.bin.bin}:${process.env.PATH}`, FAKE_SSH_LOG: log,
         FAKE_SSH_ENV: opts.bin.envFile, MGU_INSTALL_GITHUB_API: opts.api, FAKE_GH_TOKEN: '' }, opts.env || {});
-    const r = cp.spawnSync(process.execPath, [MGU_INSTALL].concat(args), { encoding: 'utf8', env, input: opts.input || '' });
+    // stdin: the script itself on stdin (node -), with no terminal
+    const r = opts.stdin ? cp.spawnSync(process.execPath, ['-'].concat(args), { encoding: 'utf8', env, input: fs.readFileSync(MGU_INSTALL), detached: true }) :
+        cp.spawnSync(process.execPath, [MGU_INSTALL].concat(args), { encoding: 'utf8', env, input: opts.input || '' });
     r.out = `${r.stdout}${r.stderr}`;
     r.calls = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] !== '-V');
     return r;
@@ -2833,6 +2867,22 @@ function testMguInstall() {
         check('mgu-install: an unknown option is a usage error', r.status === 2 && r.stderr.includes('unknown option --source'), r.out);
         check('mgu-install: seeds the same sources as deploy/hu', JSON.stringify(require(MGU_INSTALL).SOURCES) ===
             JSON.stringify(readJson(path.join(DEPLOY, 'sources.json'))));
+
+        // the one-liner: the script on stdin (curl ... | node - first-install), the unit found on its own
+        const unit3 = donorRoot();
+        const port = bannerServer();
+        const one = { bin: installBin(unit3), api: gh.api, stdin: true, env: { FAKE_GH_TOKEN: TOKEN, MGU_INSTALL_HOTSPOT: `127.0.0.1:${port}` } };
+        r = mguInstall(['first-install'], one);
+        check('mgu-install from stdin, no --host: finds the unit at the hotspot address, says so, and installs there',
+            r.status === 0 && unit3.status().components.some((x) => x.id === 'robertn_store') &&
+            r.stderr.includes(`connecting over the car's hotspot (127.0.0.1)`) && r.calls.length > 0 &&
+            r.calls.every((a) => a.join(' ').startsWith(`-p ${port} `) && a.includes('root@127.0.0.1')), `${r.out.slice(-2000)}\n${JSON.stringify(r.calls[0])}`);
+        r = mguInstall(['token'], one);
+        check('mgu-install from stdin without a terminal: token is refused before connecting, saying how to run it',
+            r.status === 2 && r.stderr.includes('no terminal') && !r.calls.length, r.out);
+        r = mguInstall(['first-install'], Object.assign({}, one, { env: { FAKE_GH_TOKEN: TOKEN, MGU_INSTALL_HOTSPOT: '127.0.0.1:9' } }));
+        check('mgu-install: no unit answering SSH stops before any download or ssh, saying what to check',
+            r.status === 1 && !r.calls.length && r.stderr.includes('no head unit answered SSH') && r.stderr.includes('--host'), r.out);
     } finally {
         gh.stop();
     }
@@ -3950,6 +4000,7 @@ const SUITES = [
     testSourcesAndDonor,
     testMguInstall,
     testMguInstallUsb,
+    testConnect,
     testMguInstallPaths,
     testUpdaterStateRestore,
     testTransport,

@@ -33,9 +33,18 @@
  * *.mgu: apps, source packages, tool kits; together in mgu-repo/local/).
  * Without inputs: github:robertnisipeanu/mgu-store.
  *
- * SSH options: --host <address> (172.16.222.97, the car's hotspot),
- * --port <n> (22), --user <name> (root), --identity <key file>, and
- * --ssh-opt <option> (repeatable, passed as ssh -o <option>).
+ * Without --host or --port it finds the head unit itself: the
+ * car's hotspot (172.16.222.97) when its SSH answers, else over ENET (an
+ * interface with a 169.254.x.x address) the address the vehicle gateway
+ * reports for the head unit (DID 22 17 2A, read without changing any
+ * session), or the last ENET address that answered. ssh then binds to
+ * that interface's address (ssh -b). --ssh-opt options apply either way.
+ *
+ * SSH options: --host <address>, --port <n> (22), --user <name> (root),
+ * --identity <key file>, and --ssh-opt <option> (repeatable, passed as
+ * ssh -o <option>).
+ *
+ * It also runs from stdin: curl -fsSL <url> | node - first-install ...
  *
  * Downloads from a private GitHub repository take a token: the one given
  * with --token, else `gh auth token` when the GitHub CLI is signed in, else
@@ -47,10 +56,25 @@ const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const cp = require('child_process');
+const net = require('net');
+const dgram = require('dgram');
+const tty = require('tty');
 
 const STORE_REPO = 'robertnisipeanu/mgu-store';
 const GITHUB_API = process.env.MGU_INSTALL_GITHUB_API || 'https://api.github.com';
 const HOTSPOT_IP = '172.16.222.97';
+/* the hotspot address detection tries first (<host>[:<port>]; the tests point it elsewhere) */
+const HOTSPOT = process.env.MGU_INSTALL_HOTSPOT || HOTSPOT_IP;
+/* HSFZ (diagnostics over IP) to the ENET gateway: identification on UDP
+ * 6811, UDS on TCP 6801, from tester 0xF4 to the head unit 0x63 */
+const HSFZ_IDENT_PORT = 6811;
+const HSFZ_DIAG_PORT = 6801;
+const TESTER = 0xf4;
+const HEAD_UNIT = 0x63;
+/* the head unit's last ENET address that answered (deploy/transport keeps the same file) */
+const LAST_ENET = path.join(os.homedir(), '.cache', 'mgu-store', 'last_hu_enet_ip');
+/* run as `node -` with the script on stdin */
+const FROM_STDIN = __filename === '[stdin]';
 /* the updater's sources first-install seeds when it has none (deploy/sources.json) */
 const SOURCES = { schema: 1, sources: [{ id: 'mgu-store', type: 'github', repo: STORE_REPO, builtin: true },
     { id: 'idrive7-apps', type: 'github', repo: 'cauliflowermossgrape/idrive7-apps', channel: 'branch' }] };
@@ -229,10 +253,25 @@ function readAll(stream) {
     });
 }
 
+/* The terminal to prompt at: stdin, or the terminal device when the
+ * script itself came on stdin; null when there is none. */
+function terminal() {
+    if (process.stdin.isTTY) {
+        return process.stdin;
+    }
+    if (!FROM_STDIN || process.platform === 'win32') {
+        return null;
+    }
+    try {
+        return new tty.ReadStream(fs.openSync('/dev/tty', 'r'));
+    } catch (e) {
+        return null;
+    }
+}
+
 /* A line typed at the terminal, not echoed. */
-function promptHidden(question) {
+function promptHidden(question, input) {
     return new Promise((resolve, reject) => {
-        const input = process.stdin;
         process.stderr.write(question);
         input.setRawMode(true);
         input.setEncoding('utf8');
@@ -242,6 +281,9 @@ function promptHidden(question) {
             input.removeListener('data', onData);
             input.setRawMode(false);
             input.pause();
+            if (input !== process.stdin) {
+                input.destroy();
+            }
             process.stderr.write(os.EOL);
             if (err) {
                 reject(err);
@@ -273,10 +315,12 @@ function promptHidden(question) {
 let stdinTaken = false;
 
 /* A GitHub token: a hidden prompt at a terminal, else stdin (once). */
-async function readToken(question) {
+async function readToken(question, term = terminal()) {
     let text;
-    if (process.stdin.isTTY) {
-        text = await promptHidden(question);
+    if (term) {
+        text = await promptHidden(question, term);
+    } else if (FROM_STDIN) {
+        throw new Usage('a token is needed and there is no terminal to type it at; run the downloaded file with node instead');
     } else if (!stdinTaken) {
         stdinTaken = true;
         text = (await readAll(process.stdin)).toString('utf8');
@@ -307,7 +351,10 @@ async function githubRepo(repo, given) {
     }
     const base = `${GITHUB_API.replace(/\/+$/, '')}/repos/${repo}`;
     const tries = [() => null, () => given || null, ghToken,
-        () => (process.stdin.isTTY ? readToken(`GitHub token for ${repo} (input hidden): `) : null)];
+        () => {
+            const term = terminal();
+            return term ? readToken(`GitHub token for ${repo} (input hidden): `, term) : null;
+        }];
     let token = null;
     let reached = false;
     let last = null;
@@ -440,7 +487,7 @@ function rsaOpts() {
 /* ssh's arguments for one remote command: the owner's -o options first
  * (ssh takes the first value of an option). */
 function sshArgs(o, remote) {
-    const args = ['-p', String(o.port)];
+    const args = ['-p', String(o.port)].concat(o.bind ? ['-b', o.bind] : []);
     o.sshOpts.forEach((x) => args.push('-o', x));
     if (o.identity) {
         args.push('-i', o.identity, '-o', 'IdentitiesOnly=yes');
@@ -461,6 +508,224 @@ function ssh(o, remote, { input, capture } = {}) {
         throw new Error(`ssh to ${o.user}@${o.host}:${o.port} failed`);
     }
     return { status: r.status === null ? 1 : r.status, stdout: capture ? String(r.stdout) : '' };
+}
+
+/* ---- finding the head unit ------------------------------------------------------------- */
+
+/* The SSH banner host:port serves (connecting from local when given), else null. */
+function sshBanner(host, port, local, timeout = 4000) {
+    return new Promise((resolve) => {
+        const s = net.connect(Object.assign({ host, port: Number(port), timeout }, local ? { localAddress: local } : {}));
+        let got = Buffer.alloc(0);
+        const done = (v) => {
+            s.destroy();
+            resolve(v);
+        };
+        s.on('data', (d) => {
+            got = Buffer.concat([got, d]);
+            const nl = got.indexOf(10);
+            if (nl >= 0 || got.length >= 255) {
+                const line = got.slice(0, nl >= 0 ? nl : got.length).toString('latin1').trim();
+                done(line.startsWith('SSH-') ? line : null);
+            }
+        });
+        s.on('timeout', () => done(null));
+        s.on('error', () => done(null));
+        s.on('end', () => done(null));
+    });
+}
+
+/* The interfaces with a link-local (169.254.x.x) IPv4 address, the ENET
+ * adapter among them: [{ name, address }]. */
+function enetInterfaces(ifaces) {
+    const out = [];
+    Object.entries(ifaces || os.networkInterfaces()).forEach(([name, addrs]) => (addrs || []).forEach((a) => {
+        if ((a.family === 'IPv4' || a.family === 4) && !a.internal && /^169\.254\./.test(a.address)) {
+            out.push({ name, address: a.address });
+        }
+    }));
+    return out;
+}
+
+/* One HSFZ diagnostic frame: length, control 0x0001, tester, head unit, UDS. */
+function hsfzFrame(uds) {
+    const h = Buffer.alloc(8);
+    h.writeUInt32BE(2 + uds.length, 0);
+    h.writeUInt16BE(0x0001, 4);
+    h[6] = TESTER;
+    h[7] = HEAD_UNIT;
+    return Buffer.concat([h, uds]);
+}
+
+/* The complete HSFZ frames at the start of buf: { frames: [{ control,
+ * payload }] (payload without the two address bytes), rest }. */
+function hsfzFrames(buf) {
+    const frames = [];
+    let off = 0;
+    while (buf.length - off >= 6 && buf.length - off >= 6 + buf.readUInt32BE(off)) {
+        const len = buf.readUInt32BE(off);
+        frames.push({ control: buf.readUInt16BE(off + 4), payload: buf.slice(off + 8, off + 6 + len) });
+        off += 6 + len;
+    }
+    return { frames, rest: buf.slice(off) };
+}
+
+/* The head unit's address in a response to 22 17 2A (62 17 2A 00 AA BB CC
+ * DD), else null. */
+function didAddress(uds) {
+    return uds.length >= 8 && uds[0] === 0x62 && uds[1] === 0x17 && uds[2] === 0x2a ? Array.from(uds.slice(4, 8)).join('.') : null;
+}
+
+/* The ENET gateway's address: HSFZ identification (00 00 00 00 00 11)
+ * broadcast from local (from the gateway's port when it is free), answers
+ * heard on that socket and on the gateway's port on all addresses (a
+ * gateway may answer by broadcast); the first answer that is not the
+ * request itself. null when nothing answers. */
+const IDENT = Buffer.from([0, 0, 0, 0, 0, 0x11]);
+
+function hsfzGateway(local, { to = ['169.254.255.255', '255.255.255.255'], port = HSFZ_IDENT_PORT, from = HSFZ_IDENT_PORT,
+    listen = HSFZ_IDENT_PORT, timeout = 6000 } = {}) {
+    const bind = (address, ports) => new Promise((resolve) => {
+        const s = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        s.once('error', () => {
+            s.close();
+            resolve(ports.length > 1 ? bind(address, ports.slice(1)) : null);
+        });
+        s.bind({ address, port: ports[0] }, () => {
+            s.removeAllListeners('error');
+            s.on('error', () => {});
+            resolve(s);
+        });
+    });
+    return Promise.all([bind(local, [from, 0]), bind('0.0.0.0', [listen])]).then(([send, all]) => new Promise((resolve) => {
+        const socks = [send, all].filter(Boolean);
+        let tick = null;
+        let timer = null;
+        const done = (v) => {
+            clearTimeout(timer);
+            clearInterval(tick);
+            socks.forEach((x) => x.close());
+            resolve(v);
+        };
+        if (!send) {
+            done(null);
+            return;
+        }
+        socks.forEach((x) => x.on('message', (m, r) => {
+            if (!m.equals(IDENT)) {
+                socks.forEach((y) => y.removeAllListeners('message'));
+                done(r.address);
+            }
+        }));
+        const out = () => to.forEach((dst) => send.send(IDENT, port, dst, () => {}));
+        send.setBroadcast(true);
+        timer = setTimeout(() => done(null), timeout);
+        tick = setInterval(out, 1000);
+        out();
+    }));
+}
+
+/* The head unit's address from the gateway: DID 22 17 2A, sent alone (no
+ * session change, no routine). null on a negative, odd or missing answer. */
+function hsfzHuAddress(gw, local, { port = HSFZ_DIAG_PORT, timeout = 8000 } = {}) {
+    return new Promise((resolve) => {
+        const s = net.connect(Object.assign({ host: gw, port, timeout }, local ? { localAddress: local } : {}));
+        let buf = Buffer.alloc(0);
+        const timer = setTimeout(() => done(null), timeout);
+        function done(v) {
+            clearTimeout(timer);
+            s.destroy();
+            resolve(v);
+        }
+        s.on('connect', () => s.write(hsfzFrame(Buffer.from([0x22, 0x17, 0x2a]))));
+        s.on('data', (d) => {
+            const r = hsfzFrames(Buffer.concat([buf, d]));
+            buf = r.rest;
+            for (const f of r.frames) {
+                const p = f.payload;
+                // acks (control 0x0002), empty frames and "response pending" (7F xx 78) are not the answer
+                if (f.control !== 0x0001 || !p.length || (p.length >= 3 && p[0] === 0x7f && p[2] === 0x78)) {
+                    continue;
+                }
+                done(didAddress(p));
+                return;
+            }
+        });
+        s.on('timeout', () => done(null));
+        s.on('error', () => done(null));
+        s.on('end', () => done(null));
+    });
+}
+
+function readLast() {
+    try {
+        const ip = fs.readFileSync(LAST_ENET, 'utf8').trim();
+        return /^169\.254\.\d+\.\d+$/.test(ip) ? ip : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveLast(ip) {
+    try {
+        fs.mkdirSync(path.dirname(LAST_ENET), { recursive: true });
+        fs.writeFileSync(LAST_ENET, `${ip}\n`);
+    } catch (e) { /* only a hint for next time */ }
+}
+
+const NET = { banner: sshBanner, interfaces: () => enetInterfaces(), gateway: (local) => hsfzGateway(local),
+    huAddress: (gw, local) => hsfzHuAddress(gw, local), last: readLast, save: saveLast, platform: process.platform };
+
+/* Where the head unit's sshd answers: the hotspot; else, on each ENET
+ * interface, the address the gateway reports, then the last one that
+ * answered. { host, port, bind, via } or null. */
+async function findUnit(d = NET) {
+    const [hhost, hport] = HOTSPOT.split(':');
+    if (await d.banner(hhost, hport || '22', null)) {
+        return { host: hhost, port: hport || '22', bind: null, via: `the car's hotspot (${hhost})` };
+    }
+    const last = d.last();
+    // one interface at a time: an answer on the gateway's port names the interface asked
+    for (const i of d.interfaces()) {
+        const gw = await d.gateway(i.address);
+        const ip = gw ? await d.huAddress(gw, i.address) : null;
+        for (const c of [ip, last].filter((x, k, a) => x && a.indexOf(x) === k)) {
+            if (await d.banner(c, '22', i.address)) {
+                d.save(c);
+                return { host: c, port: '22', bind: i.address, via: `ENET on ${i.name} (head unit ${c}${c === ip ? '' : ', the last that answered'})` };
+            }
+        }
+    }
+    return null;
+}
+
+/* What to check when no head unit answered. */
+function notFound(d) {
+    const lines = ['no head unit answered SSH. Join the car\'s Wi-Fi hotspot or connect the ENET cable, with the car awake, ' +
+        'and run it again;', 'for another route, give --host (and --port).'];
+    const ifs = d.interfaces();
+    if (d.platform === 'linux' && !ifs.length) {
+        lines.push('On Linux the ENET adapter needs a link-local address: nmcli con mod <its connection> ipv4.method link-local, then reconnect it.');
+    } else if (d.platform === 'linux' && ifs.length > 1) {
+        lines.push(`Linux reaches only one of the link-local interfaces ${ifs.map((i) => i.name).join(', ')}: unplug the others, or give --host.`);
+    }
+    return lines.join('\n');
+}
+
+/* Sets the SSH target: as given, or the head unit findUnit finds; which
+ * one on stderr (stdout may be token --list --json). */
+async function reach(o, d = NET) {
+    if (o.given) {
+        o.host = o.host || HOTSPOT_IP;
+        process.stderr.write(`connecting to ${o.host}:${o.port} as given\n`);
+        return;
+    }
+    const u = await findUnit(d);
+    if (!u) {
+        throw new Error(notFound(d));
+    }
+    Object.assign(o, { host: u.host, port: u.port, bind: u.bind });
+    process.stderr.write(`connecting over ${u.via}\n`);
 }
 
 /* ---- first-install ---------------------------------------------------------------------- */
@@ -512,6 +777,7 @@ function deployToolFiles(artifact) {
 
 async function firstInstall(o) {
     const token = o.token ? await readToken('GitHub token for the updater (input hidden): ') : null;
+    await reach(o);
     const gh = await githubRepo(STORE_REPO, token);
     const { components } = await githubComponents(gh);
     const wanted = WITH.filter((w) => !o[w.skip]);
@@ -581,16 +847,18 @@ const TOKENS_DEPLOY = `/usr/bin/node -e "var v=require('/var/opt/mgu-deploy/curr
 
 async function tokenCommand(o) {
     // no stdin: these read no token
+    if (o.remove !== null && !/^[0-9a-f]{8}$/.test(o.remove)) {
+        throw new Usage(`not a token id: ${o.remove}`);
+    }
+    const token = o.list || o.remove !== null ? null : await readToken('GitHub token for the updater (input hidden): ');
+    await reach(o);
     if (o.list) {
         return ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --list${o.json ? ' --json' : ''}`, { input: Buffer.alloc(0) }).status;
     }
     if (o.remove !== null) {
-        if (!/^[0-9a-f]{8}$/.test(o.remove)) {
-            throw new Usage(`not a token id: ${o.remove}`);
-        }
         return ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --remove ${shQuote(o.remove)}`, { input: Buffer.alloc(0) }).status;
     }
-    return addToken(o, await readToken('GitHub token for the updater (input hidden): '));
+    return addToken(o, token);
 }
 
 /* ---- usb-repo ------------------------------------------------------------------------------ */
@@ -924,11 +1192,12 @@ async function usbRepo(o) {
 
 /* ---- command line ---------------------------------------------------------------------------- */
 
-const USAGE = fs.readFileSync(__filename, 'utf8').split('*/')[0].split('\n').slice(3)
+/* The header comment; from stdin there is no file to read it from. */
+const USAGE = FROM_STDIN ? 'usage: deploy/README.md, "mgu-install"' : fs.readFileSync(__filename, 'utf8').split('*/')[0].split('\n').slice(3)
     .map((l) => l.replace(/^ \* ?/, '')).join('\n').trimEnd();
 
 function parse(argv) {
-    const o = { command: argv[0], host: HOTSPOT_IP, port: '22', user: 'root', identity: null, sshOpts: [],
+    const o = { command: argv[0], host: null, port: '22', bind: null, given: false, user: 'root', identity: null, sshOpts: [],
         noRenderer: false, noUplink: false, token: false, list: false, json: false, remove: null, rest: [] };
     const value = (i, flag) => {
         if (i >= argv.length) {
@@ -952,10 +1221,12 @@ function parse(argv) {
         else if (a.startsWith('--')) throw new Usage(`unknown option ${a} for ${o.command}\n${USAGE}`);
         else o.rest.push(a);
     }
+    // a target named: no detection
+    o.given = argv.slice(1).some((a) => ['--host', '--port'].includes(a));
     if (!/^\d+$/.test(o.port)) {
         throw new Usage(`--port needs a number: ${o.port}`);
     }
-    if (!/^[A-Za-z0-9._-]+$/.test(o.user) || !/^[A-Za-z0-9.:%_[\]-]+$/.test(o.host)) {
+    if (!/^[A-Za-z0-9._-]+$/.test(o.user) || (o.host !== null && !/^[A-Za-z0-9.:%_[\]-]+$/.test(o.host))) {
         throw new Usage('--user and --host take a plain name or address');
     }
     if (o.list && o.remove !== null) {
@@ -991,7 +1262,7 @@ async function main(argv) {
     throw new Usage(`unknown command ${o.command}\n${USAGE}`);
 }
 
-if (require.main === module) {
+if (require.main === module || FROM_STDIN) {
     main(process.argv.slice(2)).then((code) => {
         process.exitCode = code;
     }, (e) => {
@@ -1000,4 +1271,5 @@ if (require.main === module) {
     });
 }
 
-module.exports = { tgz, untgz, sshArgs, folderName, plainName, parse, SOURCES };
+module.exports = { tgz, untgz, sshArgs, folderName, plainName, parse, SOURCES, sshBanner, enetInterfaces, hsfzFrame, hsfzFrames,
+    didAddress, hsfzGateway, hsfzHuAddress, findUnit, reach };
