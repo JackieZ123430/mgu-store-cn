@@ -6,7 +6,7 @@ package main
 //	{"device": {"kind": "iphone", "name": "Apple Inc. iPhone"} | null,
 //	 "state": "searching|connecting|trust-needed|busy|online|error",
 //	 "error": null | "Tap Trust on the iPhone" | ...,
-//	 "preferred": "wifi",       only while a kind is preferred
+//	 "preferred": "phone",      only while a group is preferred
 //	 "wifi": {...}}             the Wi-Fi provider (wifi.go), only with uplink = auto
 //
 // searching: no usable device. connecting: a device is being set up or
@@ -81,7 +81,7 @@ func setStatus(dev *statusDevice, state, msg string) {
 	writeStatus()
 }
 
-// setStatusPreferred and setStatusWiFi set the preferred kind and the
+// setStatusPreferred and setStatusWiFi set the preferred group and the
 // Wi-Fi provider's state.
 func setStatusPreferred(kind string) {
 	ustat.Lock()

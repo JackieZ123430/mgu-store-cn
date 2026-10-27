@@ -3,36 +3,45 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // fastWiFi shortens the provider's timings for a test.
 func fastWiFi(t *testing.T) {
-	every, join, drop := wifiEvery, joinTimeout, wifiDropAfter
+	every, join, drop, recheck, retry, stable := wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiRetry, wifiStable
 	wifiEvery, joinTimeout, wifiDropAfter = 50*time.Millisecond, 1500*time.Millisecond, 300*time.Millisecond
-	t.Cleanup(func() { wifiEvery, joinTimeout, wifiDropAfter = every, join, drop })
+	wifiRecheck, wifiRetry, wifiStable = 100*time.Millisecond, 100*time.Millisecond, time.Hour
+	t.Cleanup(func() {
+		wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiRetry, wifiStable = every, join, drop, recheck, retry, stable
+	})
 }
 
 // testProvider is a provider on a fake radio (sysfs with one rfkill, soft
-// blocked) and the fake wpa_supplicant (wpa_test.go) with scan file scan.
+// blocked, in station mode, nobody else using it) and the fake
+// wpa_supplicant (wpa_test.go) with scan file scan.
 func testProvider(t *testing.T, scan string) (*wifiProvider, config, string) {
 	dir := t.TempDir()
 	c := defaults()
 	c.RunDir, c.StateDir, c.WiFiIf = filepath.Join(dir, "run"), filepath.Join(dir, "state"), "wlant0"
 	os.MkdirAll(c.RunDir, 0755)
 	p := newWiFiProvider(c, os.Args[0])
-	p.sys, p.proc = filepath.Join(dir, "sys"), filepath.Join(dir, "proc")
+	p.sys, p.proc, p.connmanConf = filepath.Join(dir, "sys"), filepath.Join(dir, "proc"), filepath.Join(dir, "main.conf")
 	os.MkdirAll(p.proc, 0755)
 	soft := filepath.Join(p.sys, "wlant0", "phy80211", "rfkill7", "soft")
 	writeFile(t, soft, "1\n")
+	writeFile(t, filepath.Join(filepath.Dir(soft), "hard"), "0\n")
 	p.linkUp = func(string) (linkState, error) { return linkState{}, nil }
+	p.iftype = func(string) (uint32, error) { return nl80211Station, nil }
+	p.dbusHas = func(string) (bool, error) { return false, nil }
 	t.Setenv(fakeWPAEnv, scan)
 	return p, c, soft
 }
@@ -80,6 +89,9 @@ func TestWiFiProvider(t *testing.T) {
 	}
 	if v, _ := readSysctl(soft); v != "1" {
 		t.Fatal("radio unblocked while off")
+	}
+	if err := p.connect("Home", `pa"ss#word1`); err == nil || !strings.Contains(err.Error(), "can't be saved") {
+		t.Fatalf("a password wpa.conf can't keep: %v", err)
 	}
 
 	p.setEnabled(true)
@@ -132,6 +144,19 @@ func TestWiFiProvider(t *testing.T) {
 		t.Fatalf("associated %q %v", ssid, ok)
 	}
 
+	// The password entered again for the network it is on: tried before
+	// it is saved. A wrong one is not saved, and the saved one is back.
+	if err := p.connect("Home", "wrongpass9"); err != nil {
+		t.Fatal(err)
+	}
+	waitWiFi(t, p, "Home with a wrong password", func(st wifiStatus) bool {
+		return st.Error != nil && strings.Contains(*st.Error, "could not join Home")
+	})
+	waitWiFi(t, p, "back on Home", func(st wifiStatus) bool { return st.Link == "connected" && st.SSID == "Home" })
+	if b, _ := os.ReadFile(c.wpaConf()); strings.Contains(string(b), "wrongpass9") || !strings.Contains(string(b), "rightpass1") {
+		t.Fatalf("wpa.conf after a wrong password for the current network:\n%s", b)
+	}
+
 	// A link on Home ends when the supplicant joins another network.
 	l := p.openLink("Home")
 	if l.Ifname() != "wlant0" || l.device() != (statusDevice{Kind: kindWiFi, Name: "Home"}) {
@@ -168,8 +193,9 @@ func TestWiFiProvider(t *testing.T) {
 
 	p.setEnabled(false)
 	waitWiFi(t, p, "off again", func(st wifiStatus) bool { return st.Link == "off" })
-	if v, _ := readSysctl(soft); v != "1" || p.wpa.isRunning() || p.guarding() || exists(p.record) {
-		t.Fatalf("after off: radio %q, supplicant running %v, guarding %v", v, p.wpa.isRunning(), p.guarding())
+	// off: not used, the radio left on for the stock system
+	if v, _ := readSysctl(soft); v != "0" || p.wpa.isRunning() || p.guarding() || exists(p.record) {
+		t.Fatalf("after off: radio soft block %q, supplicant running %v, guarding %v", v, p.wpa.isRunning(), p.guarding())
 	}
 	p.stop()
 	stopped = true
@@ -192,33 +218,173 @@ func waitDone(t *testing.T, l *wifiLink, why string) {
 	l.Close()
 }
 
-// Someone else's wpa_supplicant on the interface: the provider leaves the
-// radio alone until it is gone.
-func TestWiFiBusy(t *testing.T) {
+// Names wpa_supplicant escapes (a curly apostrophe, quotes, a backslash)
+// are recognised once joined; a password with '"' and '#' that wpa.conf
+// keeps joins again after the supplicant restarts.
+func TestWiFiEscapes(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	name, psk := `Mario’s "Hot\spot"`, `pa"ss"#word1`
+	writeScan(t, scan, "0a:3c:ff:5b:bc:a7\t2437\t-40\t[WPA2-PSK-CCMP][ESS]\t"+name+"\t"+psk)
+	p, c, _ := testProvider(t, scan)
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "the network seen", func(st wifiStatus) bool { return len(st.Networks) == 1 && st.Networks[0].SSID == name })
+	if err := p.connect(name, psk); err != nil {
+		t.Fatal(err)
+	}
+	waitWiFi(t, p, "joined", func(st wifiStatus) bool {
+		return st.Link == "connected" && st.SSID == name && reflect.DeepEqual(st.Saved, []string{name}) &&
+			st.Networks[0].Current && st.Error == nil
+	})
+	if b, _ := os.ReadFile(c.wpaConf()); !strings.Contains(string(b), "\tpsk=\""+psk+"\"\n") {
+		t.Fatalf("wpa.conf:\n%s", b)
+	}
+	p.reqMu.Lock()
+	p.wpa.stop()
+	p.reqMu.Unlock()
+	waitWiFi(t, p, "joined after a restart", func(st wifiStatus) bool { return st.Link == "connected" && st.SSID == name })
+}
+
+// The stock system using the interface: the provider leaves it alone until
+// it is free.
+func TestWiFiUnavailable(t *testing.T) {
 	fastWiFi(t)
 	scan := filepath.Join(t.TempDir(), "scan")
 	writeScan(t, scan)
 	p, _, soft := testProvider(t, scan)
+	var mu sync.Mutex
+	iftype, dbusHas, dbusErr := uint32(3), false, error(nil)
+	p.iftype = func(string) (uint32, error) { mu.Lock(); defer mu.Unlock(); return iftype, nil }
+	p.dbusHas = func(string) (bool, error) { mu.Lock(); defer mu.Unlock(); return dbusHas, dbusErr }
+	set := func(t uint32, has bool, err error) { mu.Lock(); iftype, dbusHas, dbusErr = t, has, err; mu.Unlock() }
 	other := filepath.Join(p.proc, "77", "cmdline")
-	writeFile(t, other, "/usr/sbin/wpa_supplicant_nxp\x00-iwlant0\x00")
 	p.setEnabled(true)
 	p.start()
 	defer p.stop()
-	waitWiFi(t, p, "busy", func(st wifiStatus) bool {
-		return st.Link == "busy" && st.Error != nil && strings.Contains(*st.Error, "another wpa_supplicant")
-	})
-	if v, _ := readSysctl(soft); v != "1" || p.guarding() {
-		t.Fatal("took a radio someone else uses")
+	for _, step := range []struct {
+		setup func()
+		why   string
+	}{
+		{func() {}, "wlant0 is in access point mode"},
+		{func() { set(9, false, nil) }, "P2P group owner mode"},
+		{func() {
+			set(nl80211Station, false, nil)
+			writeFile(t, other, "/usr/sbin/wpa_supplicant_nxp\x00-iwlant0\x00")
+		}, "another wpa_supplicant"},
+		{func() { writeFile(t, other, "/usr/sbin/hostapd\x00-iwlant0\x00") }, "hostapd runs on wlant0"},
+		{func() { writeFile(t, other, "/usr/sbin/connmand\x00-n\x00") }, "connman manages wlant0"},
+		{func() {
+			writeFile(t, other, "/usr/sbin/wpa_supplicant_nxp\x00-u\x00-s\x00")
+			set(nl80211Station, true, nil)
+		}, "the D-Bus wpa_supplicant has wlant0"},
+		{func() { set(nl80211Station, false, errors.New("no reply")) }, "can't ask the D-Bus wpa_supplicant"},
+	} {
+		step.setup()
+		waitWiFi(t, p, step.why, func(st wifiStatus) bool {
+			return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, step.why)
+		})
+		if v, _ := readSysctl(soft); v != "1" || p.guarding() || p.wpa.isRunning() {
+			t.Fatalf("%s: took the interface", step.why)
+		}
+		if err := p.scan(); err == nil || !strings.Contains(err.Error(), step.why) {
+			t.Fatalf("scan while unavailable: %v", err)
+		}
 	}
-	if err := p.scan(); err == nil {
-		t.Fatal("scan while busy")
-	}
-	os.RemoveAll(filepath.Dir(other))
+	set(nl80211Station, false, nil) // the D-Bus supplicant has other interfaces only
 	waitWiFi(t, p, "idle once free", func(st wifiStatus) bool { return st.Link == "idle" })
+	if !p.guarding() {
+		t.Fatal("not taken once free")
+	}
 }
 
-// The preferred kind goes first, the others keep their order; Wi-Fi is a
-// candidate only while joined.
+// No radio: unavailable, nothing started.
+func TestWiFiNoRadio(t *testing.T) {
+	fastWiFi(t)
+	p, _, soft := testProvider(t, filepath.Join(t.TempDir(), "scan"))
+	os.RemoveAll(filepath.Join(p.sys, "wlant0"))
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "no radio", func(st wifiStatus) bool {
+		return st.Link == "unavailable" && st.Error != nil && *st.Error == "no Wi-Fi radio (wlant0)"
+	})
+	if exists(soft) || p.guarding() || p.wpa.isRunning() {
+		t.Fatal("took something without a radio")
+	}
+}
+
+// A supplicant that crashes, or an interface that won't come up, is tried
+// again later each time, and after wifiMaxFails in a row not again until
+// Wi-Fi is switched on again; the interface is given back meanwhile.
+func TestWiFiBackoff(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeFile(t, scan, "crash\n")
+	p, _, _ := testProvider(t, scan)
+	var mu sync.Mutex
+	ups := 0
+	taken := func() int { mu.Lock(); defer mu.Unlock(); return ups }
+	p.linkUp = func(string) (linkState, error) { mu.Lock(); defer mu.Unlock(); ups++; return linkState{}, nil }
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	var waits []string
+	st := waitWiFi(t, p, "failed for good", func(st wifiStatus) bool {
+		if st.Error != nil && strings.Contains(*st.Error, "trying again in") {
+			if w := (*st.Error)[strings.LastIndex(*st.Error, "in ")+3:]; len(waits) == 0 || waits[len(waits)-1] != w {
+				waits = append(waits, w)
+			}
+		}
+		return st.Link == "failed" && st.Error != nil && !strings.Contains(*st.Error, "trying again")
+	})
+	if !strings.Contains(*st.Error, "wpa_supplicant ended") || p.guarding() || p.wpa.isRunning() {
+		t.Fatalf("failed: %s, guarding %v", *st.Error, p.guarding())
+	}
+	// the waits double; the interface was taken once for the run
+	if want := []string{"100ms)", "200ms)", "400ms)", "800ms)"}; !reflect.DeepEqual(waits, want) || taken() != 1 {
+		t.Fatalf("waits %v (want %v), interface taken %d times", waits, want, taken())
+	}
+	time.Sleep(500 * time.Millisecond)
+	if p.status().Link != "failed" || taken() != 1 {
+		t.Fatal("tried again after the last failure")
+	}
+
+	// Switched on again: tried again, and joins once the supplicant runs.
+	writeScan(t, scan)
+	p.setEnabled(true)
+	waitWiFi(t, p, "idle after switching on again", func(st wifiStatus) bool { return st.Link == "idle" })
+
+	// An interface that won't come up: given back after each try.
+	p.setEnabled(false)
+	waitWiFi(t, p, "off", func(st wifiStatus) bool { return st.Link == "off" })
+	p.reqMu.Lock()
+	p.linkUp = func(string) (linkState, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		ups++
+		return linkState{}, errors.New("set wlant0 up: operation not possible due to RF-kill")
+	}
+	p.reqMu.Unlock()
+	mu.Lock()
+	ups = 0
+	mu.Unlock()
+	p.setEnabled(true)
+	waitWiFi(t, p, "failed for good", func(st wifiStatus) bool {
+		return st.Link == "failed" && st.Error != nil && strings.Contains(*st.Error, "RF-kill") && !strings.Contains(*st.Error, "trying again")
+	})
+	time.Sleep(500 * time.Millisecond)
+	if n := taken(); n != wifiMaxFails {
+		t.Fatalf("interface tried %d times", n)
+	}
+	if p.guarding() || exists(p.record) {
+		t.Fatal("interface kept after failing")
+	}
+}
+
+// The preferred group goes first, the others follow; each keeps the usual
+// order. Wi-Fi is a candidate only while joined.
 func TestPreferredOrder(t *testing.T) {
 	c := defaults()
 	u := newScanUplink(c)
@@ -227,17 +393,24 @@ func TestPreferredOrder(t *testing.T) {
 		sort.SliceStable(ks, func(i, j int) bool { return u.rank(ks[i]) < u.rank(ks[j]) })
 		return ks
 	}
-	if got := order(); !reflect.DeepEqual(got, []string{"usb", "usbecm", "wifi", "rndis", "ncm", "iphone"}) {
-		t.Fatalf("default order %v", got)
+	for _, tc := range []struct {
+		prefer string
+		want   []string
+	}{
+		{"", []string{"wifi", "usb", "usbecm", "rndis", "ncm", "iphone"}},
+		{"wifi", []string{"wifi", "usb", "usbecm", "rndis", "ncm", "iphone"}},
+		{"usb", []string{"usb", "usbecm", "wifi", "rndis", "ncm", "iphone"}},
+		{"phone", []string{"rndis", "ncm", "iphone", "wifi", "usb", "usbecm"}},
+	} {
+		u.setPreferred(tc.prefer)
+		if got := order(); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("preferred %q: %v", tc.prefer, got)
+		}
 	}
-	u.setPreferred("iphone")
-	if got := order(); !reflect.DeepEqual(got, []string{"iphone", "usb", "usbecm", "wifi", "rndis", "ncm"}) {
-		t.Fatalf("iphone preferred: %v", got)
-	}
-	c.Preferred = "wifi"
+	c.Preferred = "phone"
 	u = newScanUplink(c)
-	if got := order(); got[0] != "wifi" {
-		t.Fatalf("wifi preferred: %v", got)
+	if got := order(); got[0] != "rndis" {
+		t.Fatalf("phone preferred: %v", got)
 	}
 
 	p := newWiFiProvider(c, "")
@@ -305,15 +478,15 @@ func TestSettings(t *testing.T) {
 	dir := t.TempDir()
 	p, local, settings := filepath.Join(dir, "c.conf"), filepath.Join(dir, "local.conf"), filepath.Join(dir, "settings.conf")
 	writeFile(t, p, "local_conf = "+local+"\nsettings_conf = "+settings+"\napps = store\n")
-	writeFile(t, local, "preferred = iphone\nwifi = off\n")
+	writeFile(t, local, "preferred = phone\nwifi = off\n")
 	c, err := loadConfig(p)
-	if err != nil || c.WiFi || c.Preferred != "iphone" {
+	if err != nil || c.WiFi || c.Preferred != "phone" {
 		t.Fatalf("local only: %+v %v", c, err)
 	}
-	writeFile(t, settings, "# mine\nuplink = auto # kept\npreferred = usb\npreferred = rndis")
+	writeFile(t, settings, "# mine\nfuture = 1 # kept\npreferred = usb\npreferred = phone")
 	steps := []struct{ key, val, want string }{
-		{"preferred", "wifi", "# mine\nuplink = auto # kept\npreferred = wifi\n"},
-		{"wifi", "on", "# mine\nuplink = auto # kept\npreferred = wifi\nwifi = on\n"},
+		{"preferred", "wifi", "# mine\nfuture = 1 # kept\npreferred = wifi\n"},
+		{"wifi", "on", "# mine\nfuture = 1 # kept\npreferred = wifi\nwifi = on\n"},
 	}
 	for _, s := range steps {
 		if err := setSetting(settings, s.key, s.val); err != nil {
@@ -330,7 +503,7 @@ func TestSettings(t *testing.T) {
 	if b, _ := os.ReadFile(settings); strings.Contains(string(b), "preferred") {
 		t.Fatalf("preferred kept:\n%s", b)
 	}
-	if c, err = loadConfig(p); err != nil || c.Preferred != "iphone" {
+	if c, err = loadConfig(p); err != nil || c.Preferred != "phone" {
 		t.Fatalf("local's preferred after the setting went: %+v %v", c, err)
 	}
 	fresh := filepath.Join(dir, "new.conf")
@@ -343,11 +516,23 @@ func TestSettings(t *testing.T) {
 	if err := setSetting("", "wifi", "on"); err == nil {
 		t.Fatal("no settings_conf accepted")
 	}
-	for _, bad := range []string{"preferred = ppp\n", "wifi = yes\n", "settings_conf = /elsewhere\n", "local_conf = /x\n"} {
-		writeFile(t, settings, bad)
-		if _, err := loadConfig(p); err == nil {
-			t.Errorf("%q: accepted", bad)
+	// What this version can't take from settings_conf (a newer version's
+	// keys, after a rollback) is skipped, so it still starts.
+	for _, skip := range []string{"preferred = iphone\n", "wifi = auto\n", "future = 1\n", "settings_conf = /elsewhere\n",
+		"local_conf = /x\n", "uids = 0\n", "not a setting\n"} {
+		writeFile(t, settings, skip)
+		if c, err := loadConfig(p); err != nil || len(c.Skipped) != 1 || c.Preferred != "phone" || c.WiFi || c.LocalConf != local {
+			t.Errorf("%q: %+v %v", skip, c, err)
 		}
+	}
+	// A preferred value that is no group is ignored in any conf.
+	writeFile(t, local, "preferred = iphone\n")
+	if c, err := loadConfig(p); err != nil || c.Preferred != "" || len(c.Skipped) != 2 || !strings.Contains(c.Skipped[0], "none of wifi, usb, phone") {
+		t.Errorf("local preferred = iphone: %+v %v", c, err)
+	}
+	writeFile(t, local, "wifi = yes\n")
+	if _, err := loadConfig(p); err == nil {
+		t.Error("a bad value in local_conf accepted")
 	}
 }
 
@@ -387,7 +572,7 @@ func TestControlRequests(t *testing.T) {
 	}
 	for _, tc := range []struct{ req, err string }{
 		{`{"op":"prefer","kind":"wifi"}`, ""},
-		{`{"op":"prefer","kind":"ppp"}`, "none of"},
+		{`{"op":"prefer","kind":"iphone"}`, "none of wifi, usb, phone"},
 		{`{"op":"prefer"}`, "needs a kind"},
 		{`{"op":"wifi-enable"}`, "on: true or false"},
 		{`{"op":"wifi-enable","on":true}`, ""},
@@ -406,7 +591,7 @@ func TestControlRequests(t *testing.T) {
 	if b, _ := os.ReadFile(c.Settings); string(b) != "# the Store's\npreferred = wifi\nwifi = on\n" {
 		t.Fatalf("settings_conf:\n%s", b)
 	}
-	if u := su.rank(kindWiFi); u != 0 || !p.enabled {
+	if u := su.rank(kindWiFi); u != 0 || su.rank(kindUSB) != len(autoKinds)+1 || !p.enabled {
 		t.Fatalf("rank %d enabled %v", u, p.enabled)
 	}
 	if b, _ := os.ReadFile(c.statusFile()); !strings.Contains(string(b), `"preferred": "wifi"`) {

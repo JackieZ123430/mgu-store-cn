@@ -34,9 +34,9 @@ every 2 s:
 
 | Kind | Devices | How |
 |---|---|---|
+| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, joined by our wpa_supplicant (wifi.go, below) |
 | `usb` | a USB Ethernet adapter the kernel drives (`asix`, `ax88179_178a`, `smsc95xx` on the unit), for example an AX88179 cabled to an LTE router | the kernel's interface, renamed to `vethuplink` and given its name back on stop |
 | `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`) or any other ECM device | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode with the usb_modeswitch Huawei message |
-| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, joined by our wpa_supplicant (wifi.go, below) |
 | `rndis` | an Android phone in USB tethering: most phones (AOSP's default); control interface `e0/01/03`, `02/02/ff` or `ef/04/01` | usbfs, RNDIS (rndis.go) |
 | `ncm` | an Android phone in USB tethering presenting CDC-NCM: Pixel 6 and later | usbfs, NCM transfer blocks (ncm.go) |
 | `iphone` | an iPhone with Personal Hotspot on | usbfs: taken from the media daemon with the sysfs `authorized` toggle, configuration 4, paired over its usbmux interface (pairing.go), the hotspot interface as Linux's `ipheth` drives it (iphone.go) |
@@ -46,9 +46,10 @@ instead, under its own name (the emulator's second NIC).
 
 A device earlier in the order is preferred: while the uplink runs on a
 phone, a stick plugged in (or Wi-Fi joining) takes over within 5 s, and the
-phone comes back when the stick is unplugged. One kind can be preferred
-over all others (`preferred`, set by the Store through the `prefer`
-request); the rest follow in the order above, as fallbacks. An unplugged
+phone comes back when the stick is unplugged. One group can be tried
+first (`preferred`, set by the Store through the `prefer` request): `wifi`,
+`usb` (`usb` and `usbecm`) or `phone` (`rndis`, `ncm`, `iphone`); the
+other groups follow as fallbacks, each kind in the order above. An unplugged
 device ends its link, the service waits for the next one, and devices can
 be swapped while it runs. A USB device that a kernel driver or another
 process holds is left alone, except an iPhone, which the uplink takes from
@@ -121,30 +122,44 @@ The unit joins a saved Wi-Fi network (a phone's hotspot, an access point)
 with its own radio, and the uplink uses it like a plugged-in device: the
 Wi-Fi provider (wifi.go) only associates, and DHCP, routing, rules,
 firewall and lease are the ones above. Wi-Fi is off until switched on
-(`wifi = on`, or the Store through `wifi-enable`); while off, the provider
-leaves the radio and the interface alone.
+(`wifi = on`, or the Store through `wifi-enable`). Off means only that the
+uplink does not use Wi-Fi: the radio, and the car's own Wi-Fi, hotspot and
+wireless CarPlay, stay as they are.
 
-On iDrive 8 (checked on a car) the radio is `wlan1`, the second adapter of
-the NXP 88W9098: the first adapter's `wlan0` never sends an association
-request. Both radios come rfkill soft-blocked; switched on, the provider
-unblocks `wlan1`'s own phy only, turns IPv6 off on `wlan1` and brings it up,
-and puts all three back when Wi-Fi is switched off or the service stops.
-`wlan1` keeps its name: connman on the unit manages only the CarPlay
-interfaces (`connmand -i wfd0,p2p-wfd0-0,p2p-wfd0-1`). An iPhone's hotspot
-is seen with Settings → Personal Hotspot → Maximise Compatibility on
-(2.4 GHz).
+The radio is `wlan1` on iDrive 7 and iDrive 8 (on iDrive 8, checked on a
+car, the second adapter of the NXP 88W9098: the first adapter's `wlan0`
+never sends an association request). Switched on, the provider takes
+`wlan1` only while the car does not use it; otherwise Wi-Fi is
+`unavailable`, with the reason, and looked at again every 10 s:
+
+- `wlan1` in any mode but station (an access point, P2P), read through nl80211
+- hostapd on `wlan1`
+- another wpa_supplicant on `wlan1`, or the unit's D-Bus wpa_supplicant
+  (`wpa_supplicant -u`) having `wlan1` (asked with `dbus-send`)
+- connman managing `wlan1` (its `-i`/`-I` options and `main.conf`'s
+  `NetworkInterfaceBlacklist`); on the 88W9098 units connman manages only
+  the CarPlay interfaces (`connmand -i wfd0,p2p-wfd0-0,p2p-wfd0-1`)
+
+Once it has `wlan1`, the provider unblocks its radio when rfkill
+soft-blocks it (and leaves it unblocked), turns IPv6 off on `wlan1` and
+brings it up; it puts IPv6 and the link state back when Wi-Fi is switched
+off or the service stops. When taking `wlan1` or running wpa_supplicant
+fails, it is tried again after 30 s, waiting twice as long each time; after
+5 failures in a row Wi-Fi is `failed` until it is switched on again or the
+service restarts. An iPhone's hotspot is seen with Settings → Personal
+Hotspot → Maximise Compatibility on (2.4 GHz).
 
 The association is our own wpa_supplicant (`wpa_supplicant`, beside
 `mgu-uplink`): upstream 2.10 with [`wpa/wpa-mgu-sme-connect.patch`](wpa/wpa-mgu-sme-connect.patch).
 The unit's driver (moal, `host_mlme=1`) reports the association that
 wpa_supplicant's SME asked for as a connect event, which upstream ignores in
 SME mode; the patch takes it as the association result. It runs on `wlan1`
-only, never touches another wpa_supplicant (the stock one serves CarPlay on
-`wfd0`), and is not started while another one runs on `wlan1` (link
-`busy`). Saved networks are in `/var/opt/mgu-uplink/wifi/wpa.conf`, in a
-folder only root can read; a network is saved once it was joined. WPA2 and
-WPA3 personal (passwords of 8 to 63 characters) and open networks; no
-enterprise (EAP).
+only and never touches another wpa_supplicant. Saved networks are in `/var/opt/mgu-uplink/wifi/wpa.conf`,
+in a folder only root can read; a network is saved once it was joined with
+the password given, also when the password of the current network is
+entered again. WPA2 and WPA3 personal (passwords of 8 to 63 printable
+characters; a `#` after an odd number of `"` is refused, since wpa.conf
+can't keep it) and open networks; no enterprise (EAP).
 
 ### status.json
 
@@ -156,7 +171,7 @@ the Store and the phone page:
   "state": "trust-needed", "error": "Tap Trust on the iPhone and enter its passcode" }
 ```
 
-with `uplink = auto`, also `wifi`, and `preferred` while a kind is preferred:
+with `uplink = auto`, also `wifi`, and `preferred` while a group is preferred:
 
 ```json
 { "device": { "kind": "wifi", "name": "iPhone - Mario" }, "state": "online", "error": null,
@@ -169,9 +184,8 @@ with `uplink = auto`, also `wifi`, and `preferred` while a kind is preferred:
 | `wifi.link` | |
 |---|---|
 | `off` | Wi-Fi is switched off |
-| `nohw` | the unit has no `wlan1` |
-| `busy` | another wpa_supplicant runs on `wlan1`; left alone (`error`) |
-| `failed` | the radio or the supplicant did not start (`error`); tried again |
+| `unavailable` | no `wlan1`, or the car uses it (`error` says which); left alone |
+| `failed` | `wlan1` or wpa_supplicant did not start (`error`); tried again later (`error` says when), after 5 failures in a row not until switched on again |
 | `idle`, `scanning`, `connecting` | not joined; `ssid` is the network being joined |
 | `connected` | joined `ssid`; the uplink uses another device, or waits for DHCP |
 | `online` | the uplink has a lease through it (`ip`) |
@@ -202,7 +216,7 @@ updater only, which relays these; `status.json` shows the results.
 
 | Request | |
 |---|---|
-| `{"op": "prefer", "kind": "wifi"}` | the kind tried first (`usb`, `usbecm`, `wifi`, `rndis`, `ncm`, `iphone`; `""` for none); takes effect within 5 s |
+| `{"op": "prefer", "kind": "phone"}` | the group tried first (`wifi`, `usb`, `phone`; `""` for none); takes effect within 5 s |
 | `{"op": "wifi-enable", "on": true}` | Wi-Fi on or off |
 | `{"op": "wifi-scan"}` | scan now |
 | `{"op": "wifi-connect", "ssid": "…", "psk": "…"}` | join a network, with its password; saved once joined. Without `psk`: a saved network, or an open one |
@@ -220,15 +234,16 @@ replaced by every update. The unit's own settings go in
 replaces the shipped value, except `uids`, which adds to it), which updates keep.
 What the Store sets through requests goes in
 `/var/opt/mgu-uplink/mgu-uplink.settings.conf`, read after the local conf
-and kept by updates; versions before 0.7.0 do not read it, so a rollback
-still starts.
+and kept by updates. Only `preferred` and `wifi` are read from it; any other
+line, or a value this version does not know, is logged and skipped, so an
+older version still starts after a rollback.
 
 | Key | Value |
 |---|---|
 | `apps` | OAP app names, resolved through `oap_12201/security/uids.txt` every 5 s |
 | `uids` | numeric uids of non-app processes (the shipped list is empty); a local `uids` adds to the shipped one; 0 is refused |
 | `uplink` | `auto`, or `netdev:<ifname>` for an existing interface (no Wi-Fi, no `preferred`) |
-| `preferred` | the kind tried first; empty (shipped) for the order above |
+| `preferred` | `wifi`, `usb` or `phone`, tried first; empty (shipped) for the order above; any other value is logged and ignored |
 | `wifi` | `on` or `off` (shipped) |
 | `table`, `rule_pref` | routing table (110) and first rule priority (1100) |
 
@@ -274,12 +289,8 @@ the status file, iPhone pairing against a fake phone (usbmux, lockdown,
 Pair with the Trust wait and its notification, the TLS session, a phone
 that forgot the unit), and Wi-Fi: wpa_supplicant's control replies, and
 the provider against a fake wpa_supplicant (the test binary run as one,
-on its control socket) on a fake radio: off by default, radio unblocked
-and blocked again, scan, a wrong password not saved, a join saved in a
-root-only folder, the link ending when the supplicant joins another network
-or the network is gone, another wpa_supplicant left alone, no password in
-the log. Also the order with a preferred kind, the guarded interfaces, the
-requests and `settings_conf`. [`test/vm-gadget.sh`](test/vm-gadget.sh) runs the uplinks
+on its control socket) on a fake radio. Also the order with a preferred
+group, the guarded interfaces, the requests and `settings_conf`. [`test/vm-gadget.sh`](test/vm-gadget.sh) runs the uplinks
 against USB gadgets in a Linux VM: ECM, NCM and RNDIS (f_rndis, and as
 `e0/01/03` through a descriptor-rewriting usbip proxy) gadgets with a DHCP
 server and NAT behind them, and a FunctionFS fake iPhone (gadget_test.go:

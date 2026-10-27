@@ -23,10 +23,7 @@ import (
 	"time"
 )
 
-const (
-	restartSupplicant = 5 * time.Second // after it exited by itself
-	maxNetworks       = 20              // rows of the scan list
-)
+const maxNetworks = 20 // rows of the scan list
 
 type supplicant struct {
 	bin   string // the program
@@ -35,11 +32,17 @@ type supplicant struct {
 	ctrl  string // its control socket folder (ctrl_interface)
 	local string // our end of the control socket
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	exited  chan struct{}
-	crashAt time.Time
-	conn    *net.UnixConn
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	run       *supplicantRun
+	startedAt time.Time
+	conn      *net.UnixConn
+}
+
+// supplicantRun is one started supplicant: err is set before exited closes.
+type supplicantRun struct {
+	exited chan struct{}
+	err    error
 }
 
 func (s *supplicant) isRunning() bool {
@@ -53,29 +56,36 @@ func (s *supplicant) running() bool {
 		return false
 	}
 	select {
-	case <-s.exited:
+	case <-s.run.exited:
 		return false
 	default:
 		return true
 	}
 }
 
-// ensure starts the supplicant unless it runs; after it exited by itself,
-// at most every restartSupplicant.
+// upFor is how long the supplicant has been running (0: not running).
+func (s *supplicant) upFor() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running() {
+		return 0
+	}
+	return time.Since(s.startedAt)
+}
+
+// ensure starts the supplicant unless it runs. One that ended by itself is
+// reported as an error once; the next ensure starts it again.
 func (s *supplicant) ensure(proc string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running() {
 		return nil
 	}
+	s.closeConn()
 	if s.cmd != nil {
 		s.cmd = nil
-		s.crashAt = time.Now()
+		return fmt.Errorf("wpa_supplicant ended (%v)", s.run.err)
 	}
-	if time.Since(s.crashAt) < restartSupplicant {
-		return fmt.Errorf("wpa_supplicant ended; starting it again")
-	}
-	s.closeConn()
 	killOwnSupplicants(proc, s.conf)
 	if _, err := os.Stat(s.bin); err != nil {
 		return fmt.Errorf("wpa_supplicant: %v", err)
@@ -102,12 +112,13 @@ func (s *supplicant) ensure(proc string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start wpa_supplicant: %v", err)
 	}
-	s.cmd, s.exited = cmd, make(chan struct{})
-	go func(c *exec.Cmd, done chan struct{}) {
-		err := c.Wait()
-		logf("wpa_supplicant on %s ended: %v", s.iface, err)
-		close(done)
-	}(cmd, s.exited)
+	run := &supplicantRun{exited: make(chan struct{})}
+	s.cmd, s.run, s.startedAt = cmd, run, time.Now()
+	go func() {
+		run.err = cmd.Wait()
+		logf("wpa_supplicant on %s ended: %v", s.iface, run.err)
+		close(run.exited)
+	}()
 	logf("wpa_supplicant started on %s", s.iface)
 	return nil
 }
@@ -120,13 +131,13 @@ func (s *supplicant) stop() {
 	if s.running() {
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-s.exited:
+		case <-s.run.exited:
 		case <-time.After(3 * time.Second):
 			s.cmd.Process.Kill()
-			<-s.exited
+			<-s.run.exited
 		}
 	}
-	s.cmd, s.crashAt = nil, time.Time{}
+	s.cmd = nil
 }
 
 func (s *supplicant) closeConn() {
@@ -242,7 +253,10 @@ func (s *supplicant) networks() ([]wifiNetwork, []string) {
 
 // join adds the network (or updates a saved one's password), gives it the
 // highest priority and selects it, which keeps the others off until
-// joined or reloaded. Nothing is saved yet: joined saves, reload drops it.
+// joined or reloaded. With a password the supplicant disconnects first, so
+// that only an association with that password reaches COMPLETED: selecting
+// the network it is joined to would keep the old association. Nothing is
+// saved yet: joined saves, reload drops it.
 func (s *supplicant) join(ssid, psk string, open bool) error {
 	id, have := s.saved()[ssid]
 	if !have {
@@ -273,6 +287,7 @@ func (s *supplicant) join(ssid, psk string, open bool) error {
 			fmt.Sprintf("SET_NETWORK %d key_mgmt WPA-PSK WPA-PSK-SHA256 SAE", id),
 			fmt.Sprintf("SET_NETWORK %d ieee80211w 1", id),
 			fmt.Sprintf("SET_NETWORK %d psk \"%s\"", id, psk),
+			"DISCONNECT",
 		}
 	case !have:
 		cmds = []string{fmt.Sprintf("SET_NETWORK %d key_mgmt NONE", id)}
@@ -375,7 +390,8 @@ func parseScan(r string) []wifiNetwork {
 	return out
 }
 
-// unescape undoes wpa_supplicant's printf escaping of names (\xNN, \\, \").
+// unescape undoes wpa_supplicant's printf_encode of names (\xNN, \\, \",
+// \e, \n, \r, \t) in STATUS, LIST_NETWORKS and SCAN_RESULTS.
 func unescape(s string) string {
 	if !strings.Contains(s, `\`) {
 		return s
@@ -396,8 +412,8 @@ func unescape(s string) string {
 				b.WriteByte(s[i+1])
 				i++
 				continue
-			case 'n':
-				b.WriteByte('\n')
+			case 'e', 'n', 'r', 't':
+				b.WriteByte(map[byte]byte{'e': 033, 'n': '\n', 'r': '\r', 't': '\t'}[s[i+1]])
 				i++
 				continue
 			}

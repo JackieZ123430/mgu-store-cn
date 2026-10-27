@@ -84,6 +84,9 @@ func command(name string, args []string) int {
 		for _, s := range c.Ignored {
 			logf("ignoring %q: the uplink takes whatever is plugged in", s)
 		}
+		for _, s := range c.Skipped {
+			logf("ignoring %s", s)
+		}
 	}
 	if name == "status" {
 		status(c)

@@ -55,8 +55,10 @@ func TestParseSaved(t *testing.T) {
 	if kv := parseKV("wpa_state=COMPLETED\nssid=a=b\n"); kv["wpa_state"] != "COMPLETED" || kv["ssid"] != "a=b" {
 		t.Fatalf("kv: %v", kv)
 	}
-	if s := unescape(`a\\b\"c\x41`); s != `a\b"cA` {
-		t.Fatalf("unescape: %q", s)
+	for _, name := range []string{"Mario’s iPhone", `a\b"c`, "tab\there\x1b", "plain"} {
+		if s := unescape(printfEncode(name)); s != name {
+			t.Errorf("unescape(%q) = %q", printfEncode(name), s)
+		}
 	}
 }
 
@@ -65,8 +67,78 @@ func TestWiFiChecks(t *testing.T) {
 		checkPSK(strings.Repeat("a", 64)) == nil || checkPSK("päss-word") == nil {
 		t.Fatal("psk checks")
 	}
+	// wpa.conf gives these back as written (wpaConfValue reads it as
+	// wpa_supplicant does) ...
+	for _, ok := range []string{`pa"ss"#word1`, "pass#word1", `pa"ssword1`, `#"a"b#c"d"#`, `x"y"z"w"q#1`} {
+		if err := checkPSK(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+		if v, read := wpaConfValue("\tpsk=\"" + ok + "\""); !read || v != ok {
+			t.Errorf("%q read back as %q", ok, v)
+		}
+	}
+	// ... and not these, which are refused
+	for _, bad := range []string{`pa"ss#word1`, `"a#bcdefgh`, `a"b"c"#defgh`} {
+		if err := checkPSK(bad); err == nil || !strings.Contains(err.Error(), "can't be saved") {
+			t.Errorf("%q: %v", bad, err)
+		}
+		if v, _ := wpaConfValue("\tpsk=\"" + bad + "\""); v == bad {
+			t.Errorf("%q reads back whole", bad)
+		}
+	}
 	if checkSSID("") == nil || checkSSID(strings.Repeat("a", 33)) == nil || checkSSID("ok") != nil {
 		t.Fatal("ssid checks")
+	}
+}
+
+// The stock system's users of the interface.
+func TestStockUsers(t *testing.T) {
+	dir := t.TempDir()
+	conf := "/var/opt/mgu-uplink/wifi/wpa.conf"
+	main := filepath.Join(dir, "main.conf")
+	writeFile(t, main, "[General]\nNetworkInterfaceBlacklist=vlan,socnet0,wlan_bridge,eth,enp,veth\n")
+	hap := filepath.Join(dir, "hostapd.conf")
+	writeFile(t, hap, "ctrl_interface=/run/hostapd\ninterface=wlan1\nssid=car\n")
+	hapOther := filepath.Join(dir, "hostapd-wfd.conf")
+	writeFile(t, hapOther, "interface=wfd0\n")
+	// the unit's (connman.service, wpa_supplicant.service)
+	nxpConnman := []string{"/usr/sbin/connmand_nxp", "-n", "-d", "src/technology.c:plugins/wifi.c", "-i", "wfd0,p2p-wfd0-0,p2p-wfd0-1", "-r", "--nobacktrace"}
+	connman := []string{"/usr/sbin/connmand", "-n", "-d", "src/technology.c:plugins/wifi.c", "-r", "--nobacktrace"}
+	dbusWPA := []string{"/usr/sbin/wpa_supplicant_nxp", "-u", "-s", "-d"}
+	for _, tc := range []struct {
+		args [][]string
+		why  string
+		dbus bool
+	}{
+		{nil, "", false},
+		{[][]string{{"/var/opt/mgu-uplink/current/wpa_supplicant", "-i", "wlan1", "-D", "nl80211", "-c", conf}}, "", false},
+		{[][]string{{"/usr/sbin/wpa_supplicant_nxp", "-iwlan1", "-c/etc/wpa.conf"}}, "another wpa_supplicant", false},
+		{[][]string{{"/usr/sbin/wpa_supplicant_nxp", "-iwfd0", "-Dnl80211"}}, "", false},
+		{[][]string{dbusWPA, nxpConnman}, "", true},
+		{[][]string{dbusWPA, connman}, "connman manages", false},
+		{[][]string{{"/usr/sbin/wpa_supplicant", "-dsu"}}, "", true},
+		{[][]string{{"/usr/sbin/wpa_supplicant", "-c/etc/u.conf", "-iwfd0"}}, "", false},
+		{[][]string{{"/usr/sbin/connmand", "-n", "--device=wlan*"}}, "connman manages", false},
+		{[][]string{{"/usr/sbin/connmand", "-n", "-I", "wlan1"}}, "", false},
+		{[][]string{{"/usr/sbin/connmand", "-n", "-Pwifi"}}, "", false},
+		{[][]string{{"/usr/sbin/connmand", "-n", "--plugin=ethernet"}}, "", false},
+		{[][]string{{"/usr/sbin/hostapd", "-B", "-P", "/run/h.pid", hap}}, "hostapd runs", false},
+		{[][]string{{"/usr/sbin/hostapd", hapOther}}, "", false},
+		{[][]string{{"/usr/sbin/hostapd", "-i", "wfd0,wlan1", hapOther}}, "hostapd runs", false},
+		{[][]string{{"/bin/sleep", "-i", "wlan1", "-u"}}, "", false},
+	} {
+		proc := t.TempDir()
+		for i, a := range tc.args {
+			writeFile(t, filepath.Join(proc, strconv.Itoa(100+i), "cmdline"), strings.Join(a, "\x00")+"\x00")
+		}
+		u := stockUsers(proc, "wlan1", conf, main)
+		if tc.why == "" && u.why != "" || !strings.Contains(u.why, tc.why) || u.dbus != tc.dbus {
+			t.Errorf("%v: %+v, want %q dbus %v", tc.args, u, tc.why, tc.dbus)
+		}
+	}
+	writeFile(t, main, "[General]\nNetworkInterfaceBlacklist=vlan,wlan\n")
+	if connmanManages(connman[1:], "wlan1", main) {
+		t.Error("blacklisted in main.conf, managed")
 	}
 }
 
@@ -104,10 +176,92 @@ type fakeNet struct {
 	off                bool
 }
 
+// printfEncode escapes a name as wpa_supplicant's printf_encode does in
+// STATUS, LIST_NETWORKS and SCAN_RESULTS.
+func printfEncode(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"' || c == '\\':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case c == 033:
+			b.WriteString(`\e`)
+		case c == '\n':
+			b.WriteString(`\n`)
+		case c == '\r':
+			b.WriteString(`\r`)
+		case c == '\t':
+			b.WriteString(`\t`)
+		case c >= 32 && c <= 126:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		}
+	}
+	return b.String()
+}
+
+// wpaConfValue reads a "key=value" line of wpa.conf as wpa_supplicant 2.10
+// does: wpa_config_get_line cuts it at a '#' outside a pair of quotes, and
+// wpa_config_parse_string takes a quoted value up to its last quote and
+// an unquoted one as hex.
+func wpaConfValue(line string) (string, bool) {
+	pos := strings.TrimLeft(line, " \t\r")
+	end := strings.IndexByte(pos, '#')
+	for start := 0; end >= 0; {
+		q := strings.IndexByte(pos[start:], '"')
+		if q < 0 || start+q > end {
+			break
+		}
+		q2 := strings.IndexByte(pos[start+q+1:], '"')
+		if q2 < 0 {
+			break
+		}
+		start += q + 1 + q2 + 1
+		if start > end {
+			end = strings.IndexByte(pos[start:], '#')
+			if end >= 0 {
+				end += start
+			}
+		}
+	}
+	if end >= 0 {
+		pos = pos[:end]
+	}
+	_, v, _ := strings.Cut(strings.TrimRight(pos, " \t\r\n"), "=")
+	if !strings.HasPrefix(v, `"`) {
+		b, err := hex.DecodeString(v)
+		return string(b), err == nil
+	}
+	v = v[1:]
+	if i := strings.LastIndexByte(v, '"'); i >= 0 {
+		v = v[:i]
+	}
+	return v, true
+}
+
+// wpaConfString writes a name as SAVE_CONFIG does: hex when it has a byte
+// outside printable ASCII, else between quotes as it is.
+func wpaConfString(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 32 || s[i] >= 127 {
+			return hex.EncodeToString([]byte(s))
+		}
+	}
+	return `"` + s + `"`
+}
+
 // fakeWPA serves the control commands wpa.go sends, joining the enabled
 // network of the highest priority whose password matches an access point
-// of the scan file.
+// of the scan file. Like wpa_supplicant it refuses a config whose
+// passphrase reads back shorter than 8, and selecting the network it is
+// joined to keeps the association. A scan file starting with "crash"
+// makes it exit at once.
 func fakeWPA(scanFile string, args []string) int {
+	if b, _ := os.ReadFile(scanFile); strings.HasPrefix(string(b), "crash") {
+		return 1
+	}
 	var iface, conf string
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
@@ -118,7 +272,7 @@ func fakeWPA(scanFile string, args []string) int {
 		}
 	}
 	ctrl, nets, next := "", map[int]*fakeNet{}, 0
-	load := func() {
+	load := func() bool {
 		b, _ := os.ReadFile(conf)
 		nets, next = map[int]*fakeNet{}, 0
 		var n *fakeNet
@@ -132,15 +286,18 @@ func fakeWPA(scanFile string, args []string) int {
 				nets[next] = n
 				next++
 			case n != nil && k == "ssid":
-				n.ssid = strings.Trim(v, `"`)
+				n.ssid, _ = wpaConfValue(l)
 			case n != nil && k == "psk":
-				n.psk = strings.Trim(v, `"`)
+				if n.psk, _ = wpaConfValue(l); len(n.psk) < 8 {
+					return false
+				}
 			case n != nil && k == "key_mgmt":
 				n.keyMgmt = v
 			case n != nil && k == "priority":
 				n.prio, _ = strconv.Atoi(v)
 			}
 		}
+		return true
 	}
 	scanRows := func() [][]string {
 		b, _ := os.ReadFile(scanFile)
@@ -173,7 +330,9 @@ func fakeWPA(scanFile string, args []string) int {
 			state = "COMPLETED"
 		}
 	}
-	load()
+	if !load() {
+		return 255
+	}
 	try()
 	os.MkdirAll(ctrl, 0770)
 	srv, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: filepath.Join(ctrl, iface), Net: "unixgram"})
@@ -207,7 +366,7 @@ func fakeWPA(scanFile string, args []string) int {
 			}
 			reply = "wpa_state=" + state + "\n"
 			if state == "COMPLETED" {
-				reply += "ssid=" + nets[cur].ssid + "\n"
+				reply += "ssid=" + printfEncode(nets[cur].ssid) + "\n"
 			}
 		case "SIGNAL_POLL":
 			reply = "FAIL\n"
@@ -217,7 +376,7 @@ func fakeWPA(scanFile string, args []string) int {
 		case "SCAN_RESULTS":
 			reply = "bssid / frequency / signal level / flags / ssid\n"
 			for _, r := range scanRows() {
-				reply += strings.Join(r[:5], "\t") + "\n"
+				reply += strings.Join(r[:4], "\t") + "\t" + printfEncode(r[4]) + "\n"
 			}
 		case "LIST_NETWORKS":
 			reply = "network id / ssid / bssid / flags\n"
@@ -227,7 +386,7 @@ func fakeWPA(scanFile string, args []string) int {
 			}
 			sort.Ints(ids)
 			for _, i := range ids {
-				reply += fmt.Sprintf("%d\t%s\tany\t\n", i, nets[i].ssid)
+				reply += fmt.Sprintf("%d\t%s\tany\t\n", i, printfEncode(nets[i].ssid))
 			}
 		case "ADD_NETWORK":
 			nets[next] = &fakeNet{}
@@ -254,7 +413,11 @@ func fakeWPA(scanFile string, args []string) int {
 			for i, nn := range nets {
 				nn.off = i != id
 			}
-			try()
+			if state != "COMPLETED" || cur != id {
+				try()
+			}
+		case "DISCONNECT":
+			state, cur = "DISCONNECTED", -1
 		case "ENABLE_NETWORK":
 			for _, nn := range nets {
 				nn.off = false
@@ -263,14 +426,19 @@ func fakeWPA(scanFile string, args []string) int {
 			delete(nets, id)
 			try()
 		case "RECONFIGURE":
-			load()
+			if !load() {
+				return 255
+			}
 			try()
 		case "SAVE_CONFIG":
 			out := fmt.Sprintf("ctrl_interface=%s\nupdate_config=1\nap_scan=1\n", ctrl)
 			for i := 0; i < next; i++ {
 				if nn := nets[i]; nn != nil {
-					out += fmt.Sprintf("\nnetwork={\n\tssid=\"%s\"\n\tpsk=\"%s\"\n\tkey_mgmt=%s\n\tpriority=%d\n}\n",
-						nn.ssid, nn.psk, nn.keyMgmt, nn.prio)
+					out += fmt.Sprintf("\nnetwork={\n\tssid=%s\n", wpaConfString(nn.ssid))
+					if nn.psk != "" {
+						out += fmt.Sprintf("\tpsk=\"%s\"\n", nn.psk)
+					}
+					out += fmt.Sprintf("\tkey_mgmt=%s\n\tpriority=%d\n}\n", nn.keyMgmt, nn.prio)
 				}
 			}
 			os.WriteFile(conf, []byte(out), 0644) // the real one ignores the file's mode too
