@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * Keeps local-only apps out of oap-mainapp's off-car reporting.
+ * Keeps local-only apps out of oap-mainapp's off-car reporting and its
+ * crash recovery.
  *
  * oap-mainapp (the Online Apps Platform manager) reports the installed-app
  * inventory and per-app events to BMW's backend and queries BMW's app
  * repository by app name. This tool patches its two bundles so that every
  * such path skips local-only apps; genuine backend-delivered apps are
- * reported exactly as before.
+ * reported exactly as before. A crashed local-only app is only restarted
+ * (CRASH_GATE_JS), never wiped, reinstalled or disabled.
  *
  * An app is local-only when its installed package.json carries
  * "mguLocalOnly": true (stamped by this repository's packaging, see
@@ -42,7 +44,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '1.2.2';
+const VERSION = '1.3.0';
 const MARKER_KEY = 'mguLocalOnly';
 const OAP_ROOT = '/var/opt/public/oap/';
 const OVERRIDE_FILE = OAP_ROOT + 'oap_12201/data/local-only-apps.json';
@@ -123,6 +125,24 @@ function ins(before, insert, after, n) {
     return [before + after, before + insert + after, n];
 }
 
+// MainApp's CorruptAppsHandler restarts a crashed app, then wipes its data,
+// then uninstalls and reinstalls it, then blocks it and disables its tile.
+// For a local-only app every crash takes the first step, a plain restart,
+// by holding the handler's counter at 0. A crash beyond CRASH_RESTARTS
+// within CRASH_WINDOW_MS (a failed restart counts) leaves the app stopped:
+// installed, its data kept and its tile enabled, so starting it again from
+// the tile or a reboot runs it, and a crash loop ends after a few starts.
+const CRASH_RESTARTS = 5;
+const CRASH_WINDOW_MS = 10 * 60 * 1000;
+const CRASH_GATE_JS =
+    'if(isLocalOnlyApp(appId)){const now=Date.now(),' +
+    'restarts=appCorruptInfo.localOnlyRestarts=(appCorruptInfo.localOnlyRestarts||[])' +
+    '.filter(at=>now-at<' + CRASH_WINDOW_MS + ');' +
+    'if(restarts.length>=' + CRASH_RESTARTS + ')return logger.warn(`${logPrefix} ${appId} is local-only ' +
+    'and was restarted ' + CRASH_RESTARTS + ' times in ' + CRASH_WINDOW_MS / 60000 + ' minutes; ' +
+    'left stopped until it is started again.`),Promise.resolve();' +
+    'restarts.push(now),appCorruptInfo.recoveryAttemptsSinceCorruption=0}else ';
+
 const KEEP_APP = '.filter(app=>!isLocalOnlyApp(app.getAppId()))';
 const KEEP_APP_ID = '.filter(appId=>!isLocalOnlyApp(appId))';
 
@@ -143,8 +163,12 @@ const MAIN_PATCHES = [
     ins('this.appRegistry.getAll()', KEEP_APP, ',app=>{const appId', 1),
     // Platform analytics APP_INSTALL events, success and failure.
     ins('appId&&', '!isLocalOnlyApp(appId)&&', 'AnalyticsServiceBuilders_1', 2),
-    // Platform analytics APP_CRASH events and the corrupt-app report.
-    ins('Corruption:0});', 'isLocalOnlyApp(appId)||', 'buildAnalyticsService()', 1),
+    // Crash recovery: a local-only app is only restarted, at most
+    // CRASH_RESTARTS times per CRASH_WINDOW_MS, and sends no APP_CRASH
+    // analytics event. Other apps keep MainApp's recovery and its event.
+    ins('appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],{recoveryAttemptsSinceCorruption:0});',
+        CRASH_GATE_JS, 'buildAnalyticsService()', 1),
+    // The corrupt-app report.
     ins('()=>', 'isLocalOnlyApp(appId)?Promise.resolve():', 'this._backendTransport.reportCorruptApp(appId,version', 1),
     // Periodic autonomous update of every app, and the user-triggered
     // update of every app.
@@ -179,13 +203,19 @@ const PATCH_SETS = { main: MAIN_PATCHES, appmanagement: APPMANAGEMENT_PATCHES };
 // text an edit writes or HELPER_JS moves the outgoing sets here under the
 // last version that shipped them; an anchor that pins the same insertion
 // point needs no entry (tests: "the patch set is recorded", and the
-// reference firmware case). 1.1.0 (and 1.0.0) differ from this release in
-// the helper only.
+// reference firmware case). 1.2.2 (and 1.2.0, 1.2.1) differs from this
+// release in the crash-recovery edit only; 1.1.0 (and 1.0.0) in that edit
+// and the helper.
 function withHelper(patches, helper) {
     return patches.map((p) => [p[0], p[1].split(HELPER_JS).join(helper), p[2]]);
 }
+const CRASH_GATE_ANCHOR = 'appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],' +
+    '{recoveryAttemptsSinceCorruption:0});buildAnalyticsService()';
+const MAIN_PATCHES_1_2_2 = MAIN_PATCHES.map((p) => p[0] === CRASH_GATE_ANCHOR ?
+    ins('Corruption:0});', 'isLocalOnlyApp(appId)||', 'buildAnalyticsService()', 1) : p);
 const EARLIER_PATCH_SETS = [
-    { version: '1.1.0', main: withHelper(MAIN_PATCHES, HELPER_JS_1_1_0),
+    { version: '1.2.2', main: MAIN_PATCHES_1_2_2, appmanagement: APPMANAGEMENT_PATCHES },
+    { version: '1.1.0', main: withHelper(MAIN_PATCHES_1_2_2, HELPER_JS_1_1_0),
         appmanagement: withHelper(APPMANAGEMENT_PATCHES, HELPER_JS_1_1_0) }
 ];
 
