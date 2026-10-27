@@ -281,6 +281,51 @@ eq([own(f), text(f, 'status')], [['Try again', 'Back'], 'Offline']);
 eq(f.items[0].act, { do: 'pick-retry' });
 eq(text(screen('pick', { pick: { repo: 'o/r', probe: null } }), 'status'), 'Checking');
 
+// the type page (iDrive 8's text entry): the text, the keyboard's keys in focus order, each pressing what it types
+const { typeKey } = require(path.join(__dirname, '..', 'src', 'store_ui.js'));
+f = screen('type');
+eq([text(f, 'title'), text(f, 'field')], ['Add source', 'robertnisipeanu/mgu-store']);
+eq(own(f).slice(0, 11), ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'q']);
+eq(own(f).slice(-8), ['https://', 'github.com/', '.com', '-', '_', ':', 'OK', 'Back'], 'App Manager 2\'s URL keys, OK, Back');
+eq(f.items[0].act, { do: 'key', key: '1' });
+ok(own(f).indexOf('#+=') < 0, 'the URL keys have no symbols page');
+f = screen('type-token');
+eq(text(f, 'field'), '········3c4d', 'a token: its last 4 characters');
+ok(own(f).indexOf('Q') >= 0 && own(f).indexOf('q') < 0, 'Shift: capitals');
+eq(own(screen('type-symbols')).slice(10, 20), ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'], 'the symbols page');
+/* Presses keys by what they show on the page's frame in unit's box; true once its Enter key was pressed. */
+function typeOn(unit, page, keys) {
+    const p = UNITS[unit];
+    let done = false;
+    keys.forEach((label) => {
+        const items = frame(fixture.model({ tab: 'settings', stack: [{ name: 'main' }, page] }),
+            { textScale: p.scale, focus: -1, scroll: {}, layout: p.layout }).items;
+        const k = items.find((i) => i.label === label);
+        ok(k && k.act.do === 'key', `${unit}: a key ${label} (${items.map((i) => i.label)})`);
+        done = typeKey(page, k.act.key) || done;
+    });
+    return done;
+}
+Object.keys(UNITS).forEach((unit) => {
+    let page = { name: 'type', title: 'Add source', text: '' };
+    ok(!typeOn(unit, page, ['github.com/', 'Shift', 'O', 'Shift', '/', 'r', '_', '1', 'Delete', '2']), `${unit}: not done while typing`);
+    eq(page.text, 'github.com/O/r_2', `${unit}: URL keys, Shift, Delete`);
+    ok(typeOn(unit, page, ['OK']) && page.text === 'github.com/O/r_2', `${unit}: OK gives the text`);
+    page = { name: 'type', title: 'Password', text: '', layout: 'text', symbols: true, go: 'Connect' };
+    typeOn(unit, page, ['Shift', 'W', 'Shift', 'i', '#+=', '-', '\\', '"', '`', 'abc', 'Space', 'x', 'Delete', '!']);
+    eq(page.text, 'Wi-\\"` !', `${unit}: Shift, the symbols page and back, Space, Delete`);
+    ok(typeOn(unit, page, ['Connect']), `${unit}: its Enter key says Connect`);
+});
+// the word keys with their symbols page type every printable ASCII character
+const reach = new Set();
+[{ shift: false }, { shift: true }, { sym: true }].forEach((o) => own(screen('type-text',
+    { stack: [{ name: 'main' }, Object.assign({ name: 'type', layout: 'text', symbols: true, go: 'Connect' }, o)] }))
+    .forEach((l) => reach.add(l === 'Space' ? ' ' : l)));
+eq(Array.from({ length: 95 }, (x, i) => String.fromCharCode(32 + i)).filter((c) => !reach.has(c)), [], 'ASCII 32 to 126');
+const capped = { name: 'type', text: '', max: 3 };
+typeOn('iDrive 8', capped, ['a', 'b', 'c', 'd']);
+eq(capped.text, 'abc', 'no more than max');
+
 // sign-in, phone, no updater
 f = screen('login');
 eq([text(f, 'code'), text(f, 'status'), f.values.qr.text], ['WDJB-MJHT', 'Waiting for sign-in', 'https://github.com/login/device']);

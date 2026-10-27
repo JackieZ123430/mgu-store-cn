@@ -226,7 +226,7 @@ function vbutton(cv, t, b, o) {
     cv.text(String(o.text || ''), x1 + (hasIcon ? is + 18 : 0), b.y + b.h / 2 + s * 0.36, s, fg, { font: 'bold' });
 }
 
-// ---- on-screen keyboard (URLs and tokens) --------------------------------------------------------------------
+// ---- on-screen keyboard: URLs and tokens (layout 'url'), or words (layout 'text': a space bar) ----------------
 const ROWS = [
     ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
     ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
@@ -234,19 +234,34 @@ const ROWS = [
     [['Shift', 1.3, 'mod'], 'z', 'x', 'c', 'v', 'b', 'n', 'm', '.', '/'],
     [['https://', 1.6, 'mod'], ['github.com/', 2.1, 'mod'], ['.com', 1.2, 'mod'], ['-', 0.8], ['_', 0.8], [':', 0.8], ['Next', 1.7, 'go']],
 ];
-/** Every key's box: { text, kind, x, y, w, h } (design px). */
-function keyBoxes(b) {
-    const gap = 16, rh = (b.h - gap * (ROWS.length - 1)) / ROWS.length, out = [];
-    ROWS.forEach((r, ri) => {
+const TEXT_ROWS = ROWS.slice(0, 3).concat([
+    [['Shift', 1.3, 'mod'], 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.'],
+    [['-', 0.8], ["'", 0.8], ['Space', 5.2, 'mod'], ['?', 0.8], ['!', 0.8], ['Next', 1.7, 'go']],
+]);
+// o.symbols (word keyboard only): a '#+=' key opens the symbols page (o.sym), 'abc' goes back - all the printable ASCII
+// symbols (a Wi-Fi password may hold any), the digits stay on top
+const SYM_KEY = '#+=', ABC_KEY = 'abc';
+const TEXT_SYM_ROWS = TEXT_ROWS.slice(0, 4).concat([[[SYM_KEY, 1.3, 'mod'], ["'", 0.8], ['Space', 4.7, 'mod'], ['?', 0.8], ['!', 0.8], ['Next', 1.7, 'go']]]);
+const SYM_ROWS = [ROWS[0],
+    ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'],
+    ['-', '_', '=', '+', '[', ']', '{', '}', '\\', ['Delete', 1.3, 'mod']],
+    [';', ':', '"', "'", ',', '.', '/', '<', '>', '?'],
+    [[ABC_KEY, 1.3, 'mod'], ['`', 0.8], ['|', 0.8], ['Space', 4.7, 'mod'], ['~', 0.8], ['Next', 1.7, 'go']]];
+/** Every key's box: { text, kind, x, y, w, h } (design px). o.layout 'text': the word keyboard (+ o.symbols, o.sym). */
+function keyBoxes(b, o) {
+    const rows = o && o.layout === 'text' ? (o.symbols ? (o.sym ? SYM_ROWS : TEXT_SYM_ROWS) : TEXT_ROWS) : ROWS;
+    const gap = 16, rh = (b.h - gap * (rows.length - 1)) / rows.length, out = [];
+    rows.forEach((r, ri) => {
         const ks = r.map((k) => (Array.isArray(k) ? k : [k, 1])), tw = ks.reduce((a, k) => a + k[1], 0), unit = (b.w - gap * (ks.length - 1)) / tw;
         let kx = b.x;
         ks.forEach(([text, wt, kind]) => { out.push({ text, kind, x: kx, y: b.y + ri * (rh + gap), w: unit * wt, h: rh }); kx += unit * wt + gap; });
     });
     return out;
 }
-const shown = (k, o) => (o.shift && !k.kind && /^[a-z]$/.test(k.text) ? k.text.toUpperCase() : k.text);
+// the Enter key says o.go (e.g. 'Search') and types that; default 'Next'
+const shown = (k, o) => (k.kind === 'go' ? o.go || k.text : o.shift && !k.kind && /^[a-z]$/.test(k.text) ? k.text.toUpperCase() : k.text);
 function keyboard(cv, t, b, o) {
-    keyBoxes(b).forEach((k, i) => {
+    keyBoxes(b, o).forEach((k, i) => {
         const press = i === o.pressed;
         const fill = k.kind === 'go' ? [[0, '#5fb4ff'], [1, '#1f5fd0']] : press ? [[0, '#4a5568'], [1, '#3a4352']]
             : k.kind === 'mod' ? (k.text === 'Shift' && o.shift ? [[0, '#3d4a5e'], [1, '#2e3949']] : [[0, '#232b38'], [1, '#18202b']]) : [[0, '#2a3341'], [1, '#1d2430']];
@@ -309,12 +324,15 @@ const TRY = {
         tapped(o, items[i].id, 'nav');
     },
     keyboard: Object.assign((cv, b, o, p) => {
-        const ks = keyBoxes(b), i = ks.findIndex((k) => p.x >= k.x && p.x < k.x + k.w && p.y >= k.y && p.y < k.y + k.h);
+        const ks = keyBoxes(b, o), i = ks.findIndex((k) => p.x >= k.x && p.x < k.x + k.w && p.y >= k.y && p.y < k.y + k.h);
         if (i < 0) return false;
         const text = shown(ks[i], o);
         if (text === 'Shift') o.shift = !o.shift;
+        if (text === SYM_KEY || text === ABC_KEY) o.sym = text === SYM_KEY;
         o.pressed = i; o.keyN = (o.keyN || 0) + 1; o.key = { text, n: o.keyN };
-    }, { up: (cv, b, o) => { if (o.pressed == null) return false; o.pressed = null; } }),
+    // the release only un-presses: the key was typed at the touch (o.key cleared, or the app's 'change' types it twice)
+    }, { up: (cv, b, o) => { if (o.pressed == null) return false; o.pressed = null; o.key = null; } }),
 };
 
-module.exports = { DRAW, TRY, appIcon, chip, visibleIds, keyBoxes, gridView, listView, rightBoxes, navItems, GREEN, BLUE, AMBER };
+// (the Store: shown is what a key types, store_frame.js's items)
+module.exports = { DRAW, TRY, appIcon, chip, visibleIds, keyBoxes, shown, gridView, listView, rightBoxes, navItems, GREEN, BLUE, AMBER };

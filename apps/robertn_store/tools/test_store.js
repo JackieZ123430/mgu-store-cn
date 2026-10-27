@@ -6,7 +6,8 @@
  * speller (a fake use case factory answering with scripted text, Back or
  * OK) and mgu-render's client (records placement, frames, claims). The
  * widget screens first, then the drawn ones: the renderer coming and
- * going, proxies and focus, presses, touch, BACK, the confirm steps. The
+ * going, proxies and focus, presses, touch, BACK, the confirm steps, the
+ * drawn keyboard (iDrive 8's text entry, typed by touch). The
  * app runs from a copy of src/ in a temp folder, whose data/ holds
  * updater-secret and web-url. STORE_HMI=ID8 runs it on iDrive 8's
  * description. Node 8+.
@@ -858,6 +859,13 @@ function runDrawn() {
     const host = (d) => `ST_OnlineApps_Store${mode === 'embed' ? 'Embed' : 'Layer'}${d}`;
     const proxy = (d, i) => `store${mode === 'embed' ? 'Embed' : 'Layer'}${d}P${i}`;
     const lastText = (name) => (last(new RegExp(`^${name}\\.0\\.Text=`)) || '').split('=').slice(1).join('=');
+    // a tap (down and up) on the drawn key showing label
+    const tap = (label) => {
+        const k = drawn.items.find((i) => i.label === label);
+        eq(!!k, true, `a key ${label}: ${drawn.items.map((i) => i.label)}`);
+        gpu.emit('touch', 'down', k.x + 5, k.y + 5);
+        gpu.emit('touch', 'up', k.x + 5, k.y + 5);
+    };
     const st = Object.assign({}, ST, { unit: { hmi: HMI }, busy: null, signin: true, rebooting: false,
         components: [comp({ id: 'doom', title: 'DOOM', version: '1.0.1', installed: '1.0.0', status: 'update' }),
             comp({ id: 'gauges', title: 'Gauges', version: '1.2.0', installed: null, status: 'available' }),
@@ -960,11 +968,27 @@ function runDrawn() {
         eq(drawn.top(), { name: 'accounts' });
         eq(drawn.items.some((i) => i.label === 'Sign in with GitHub'), true, 'Sign in with GitHub with state.signin');
         eq(drawn.items.find((i) => i.label === 'Add token').act, { do: 'add-token' });
-        // the speller hides the renderer's picture while it is up (Add source)
+        // Add source: iDrive 7 types in the HMI's speller, which hides the renderer's picture while it is up; iDrive 8
+        // on the drawn keyboard's page, the next host state
         drawn.setTab('settings');
-        spellerAnswers.push('o/r');
+        if (HMI === 'ID7') {
+            spellerAnswers.push('o/r');
+            app._act({ do: 'add-source' });
+            eq(gpu.visible, false, 'hidden under the speller');
+            return tick();
+        }
+        reset();
         app._act({ do: 'add-source' });
-        eq(gpu.visible, false, 'hidden under the speller');
+        eq([states, drawn.top().title, gpu.visible], [[`open ${host(2)}`], 'Add source', true], 'the keyboard\'s page over Settings');
+        app._states[host(1)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: true });
+        app._states[host(2)].emit('focus', { focus: true });
+        ['o', '/', 'r'].forEach(tap);
+        eq(drawn.top().text, 'o/r', 'a tap types one character');
+        tap('OK');
+        eq(states.slice(-1), [`close ${host(2)}`], 'OK closes the page');
+        app._states[host(2)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: false });
         return tick();
     }).then(() => {
         eq(gpu.visible, true, 'back after it');
@@ -973,7 +997,7 @@ function runDrawn() {
         app._client.emit('probe', { type: 'probe', repo: 'o/r', status: 'auth-needed' });
         return tick();
     }).then(() => {
-        eq(drawn.stack.length, 1, 'no page opened under the closing speller');
+        eq(drawn.stack.length, 1, 'no page opened under the closing speller or keyboard page');
         reset();
         app._states[host(1)].emit('visible', { visible: true });
         app._states[host(1)].emit('focus', { focus: true });
@@ -988,11 +1012,24 @@ function runDrawn() {
     }).then(() => {
         eq(drawn.items.map((i) => i.label).filter((l) => /Sign in|Add token|Try again/.test(l)), ['Sign in with GitHub', 'Add token'],
             'a repo no account reaches: Sign in, Add token');
-        // Add token from the picker: the speller, then the focus back on the picker, which stays
+        // Add token from the picker: the speller (iDrive 8: the keyboard's page, the token hidden but its last 4
+        // characters), then the focus back on the picker, which stays
         reset();
-        spellerAnswers.push('ghp_drawn');
+        if (HMI === 'ID7') {
+            spellerAnswers.push('ghp_drawn');
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            app._states[host(2)].emit('focus', { focus: false });
+            return tick();
+        }
         app._act(drawn.items.find((i) => i.label === 'Add token').act);
+        eq([states, drawn.top().title, drawn.top().secret], [[`open ${host(3)}`], 'GitHub token', true]);
         app._states[host(2)].emit('focus', { focus: false });
+        app._states[host(3)].emit('visible', { visible: true });
+        app._states[host(3)].emit('focus', { focus: true });
+        ['g', 'h', 'p', '_', 'd', 'r', 'a', 'w', 'n', 'OK'].forEach(tap);
+        eq(states.slice(-1), [`close ${host(3)}`]);
+        app._states[host(3)].emit('focus', { focus: false });
+        app._states[host(3)].emit('visible', { visible: false });
         return tick();
     }).then(() => {
         eq(sent.map(secretless), [{ op: 'token-add', token: 'ghp_drawn' }]);
@@ -1002,7 +1039,7 @@ function runDrawn() {
             login: 'drawn', addedAt: 1, rejected: false, usedBy: [] }]) }));
         return tick();
     }).then(() => {
-        eq(drawn.top(), { name: 'pick' }, 'the picker survives the speller');
+        eq(drawn.top().name, 'pick', 'the picker survives the speller or keyboard page');
         eq(sent.map(secretless).slice(-1), [{ op: 'source-probe', repo: 'o/r' }], 'asked again with the new account');
         app._client.emit('probe', { type: 'probe', repo: 'o/r', name: 'Owner/R', status: 'ok', releases: true, tags: true, defaultBranch: 'main',
             branches: ['main', 'dev'], more: false });
@@ -1018,6 +1055,34 @@ function runDrawn() {
             'the pick adds it, as GitHub spells it');
         eq(states, [`close ${host(2)}`]);
         eq(drawn.stack.length, 1);
+        // the drawn keyboard for any text (_type): Shift, the symbols page and back, Space, Delete; its Enter key
+        // gives the text as typed
+        reset();
+        const typed = app._type({ title: 'Password', layout: 'text', symbols: true, go: 'Connect', max: 63 });
+        eq(states, [`open ${host(2)}`]);
+        app._states[host(1)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: true });
+        app._states[host(2)].emit('focus', { focus: true });
+        ['Shift', 'W', 'Shift', 'i', '#+=', '-', '\\', '"', '`', 'abc', 'Space', 'x', 'Delete', '!', 'Connect'].forEach(tap);
+        return typed;
+    }).then((text) => {
+        eq(text, 'Wi-\\"` !', 'typed as shown');
+        eq(states.slice(-1), [`close ${host(2)}`]);
+        app._states[host(2)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: false });
+        app._states[host(1)].emit('focus', { focus: true });
+        // BACK leaves it with nothing
+        const left = app._type({ title: 'Password', layout: 'text', symbols: true, go: 'Connect' });
+        app._states[host(1)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: true });
+        app._states[host(2)].emit('focus', { focus: true });
+        tap('a');
+        app._states[host(2)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: false });
+        app._states[host(1)].emit('focus', { focus: true });
+        return left;
+    }).then((text) => {
+        eq([text, drawn.stack.length, sent], [null, 1, []], 'BACK: no text, nothing sent');
         app._client.emit('state', st);
         app._endTokenAdd(null);
         // embed: FrontCCU's dial moves the focus and its push presses (the template's buttons get neither)

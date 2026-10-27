@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.5
+
+Typing works on iDrive 8: while the renderer draws the Store, Add source
+and Add token open a page with the text and an on-screen keyboard (from
+IterioDev App Manager 2.0.6 keyboard): digits, letters with Shift,
+`. / - _ :`, `https://`, `github.com/` and `.com`, Delete and OK, typed
+by touch, one character per tap. A token shows only its last four
+characters. OK takes the text as the speller's OK does; BACK or a tab
+leaves the page and sends nothing. The keyboard also has word keys with
+a symbols page (`#+=` / `abc`) holding every printable ASCII symbol, for
+text that needs them. iDrive 7 and the widget screens keep the HMI's
+speller.
+
 ## 0.9.4
 
 Touch scrolling of the Store's grids and lists follows the finger and

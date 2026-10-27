@@ -5,8 +5,8 @@
  * screens out for iDrive 7's). store,
  * app, confirm (the sheet), installed, usb and settings are IterioDev's App
  * Manager 2 screens (mgu-app-store apps/oap-appmanager/renderer/screens.json
- * @ 4d5f508, the HMI UI builder's export of projects/app-manager.json) with the Store's labels; source, pick, accounts, login and phone
- * are the Store's own in the same frame. Each element is drawn by
+ * @ 4d5f508, the HMI UI builder's export of projects/app-manager.json) with the Store's labels; source, pick, accounts, login, phone
+ * and type (his Add repository page's text box and keyboard) are the Store's own in the same frame. Each element is drawn by
  * am_gpu.js; src/store_ui.js gives their values.
  */
 module.exports = {
@@ -1593,6 +1593,86 @@ module.exports = {
      "h": 600,
      "opts": {
       "text": ""
+     }
+    }
+   ]
+  },
+  {
+   "kind": "gpu",
+   "name": "type",
+   "theme": "m_tricolour",
+   "bg": "theme",
+   "components": [
+    {
+     "name": "nav",
+     "rtype": "gpu",
+     "gpu": "sideNav",
+     "x": 126,
+     "y": 114,
+     "w": 300,
+     "h": 726,
+     "opts": {
+      "items": "Store, grid\nInstalled, check\nUSB, usb\nSettings, gear",
+      "sel": 0
+     }
+    },
+    {
+     "name": "back",
+     "rtype": "gpu",
+     "gpu": "vbutton",
+     "x": 480,
+     "y": 138,
+     "w": 96,
+     "h": 96,
+     "opts": {
+      "text": "",
+      "vicon": "back",
+      "style": "round",
+      "color": "#f4f7fb"
+     },
+     "onTap": "event:back"
+    },
+    {
+     "name": "title",
+     "rtype": "gpu",
+     "gpu": "text",
+     "x": 610,
+     "y": 138,
+     "w": 2200,
+     "h": 90,
+     "opts": {
+      "text": "",
+      "size": 72,
+      "font": "bold",
+      "align": "left",
+      "color": "text"
+     }
+    },
+    {
+     "name": "field",
+     "rtype": "gpu",
+     "gpu": "field",
+     "x": 480,
+     "y": 258,
+     "w": 2360,
+     "h": 96,
+     "opts": {
+      "text": "",
+      "caret": true,
+      "focus": true,
+      "size": 40
+     }
+    },
+    {
+     "name": "keyboard",
+     "rtype": "gpu",
+     "gpu": "keyboard",
+     "x": 480,
+     "y": 372,
+     "w": 2360,
+     "h": 462,
+     "opts": {
+      "shift": false
      }
     }
    ]

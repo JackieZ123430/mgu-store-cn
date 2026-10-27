@@ -4,7 +4,7 @@
  * download, an update, a branch's new commit, a queued install, a failure,
  * a restart pending, a component for the other head unit, a second
  * renderer, a USB stick, a source that needs a sign-in, accounts, the phone
- * page), and the Store's drawn screens over it, for tools/test_screens.js
+ * page), and the Store's drawn screens over it (the keyboard's pages too), for tools/test_screens.js
  * and tools/shots.js.
  */
 
@@ -103,6 +103,14 @@ function screens() {
         ['pick-private', { tab: 'settings', stack: main.concat([{ name: 'pick' }]), pick: { repo: 'someone/private-apps',
             probe: { status: 'auth-needed' } } }],
         ['pick-offline', { tab: 'settings', stack: main.concat([{ name: 'pick' }]), pick: { repo: 'someone/apps', probe: { status: 'offline' } } }],
+        // the drawn keyboard's pages: URL keys; a token; word keys and their symbols page
+        ['type', { tab: 'settings', stack: main.concat([{ name: 'type', title: 'Add source', text: 'robertnisipeanu/mgu-store' }]) }],
+        ['type-token', { tab: 'settings', stack: main.concat([{ name: 'accounts' }, { name: 'type', title: 'GitHub token', text: 'ghp_1a2b3c4d',
+            secret: true, shift: true }]) }],
+        ['type-text', { tab: 'settings', stack: main.concat([{ name: 'type', title: 'Password', text: 'Wi', layout: 'text', symbols: true,
+            go: 'Connect' }]) }],
+        ['type-symbols', { tab: 'settings', stack: main.concat([{ name: 'type', title: 'Password', text: 'Wi-\\"`', layout: 'text', symbols: true,
+            sym: true, go: 'Connect' }]) }],
         ['offline', { tab: 'store', stack: main, connected: false, st: null, secret: false }]
     ];
 }
