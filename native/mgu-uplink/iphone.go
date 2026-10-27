@@ -11,8 +11,8 @@ package main
 //	/sys/.../authorized 0    deauthorize: the kernel tears the device down and
 //	                         drops every claim, so the media daemon loses it
 //	(500 ms)
-//	/sys/.../authorized 1    reauthorize: the device re-enumerates at its
-//	                         default configuration with a new device number
+//	/sys/.../authorized 1    reauthorize: the device is set up again at its
+//	                         default configuration (same device number)
 //	open /dev/bus/usb/...    on the re-enumerated node
 //	SET_CONFIGURATION 4      the configuration holding the hotspot interface
 //	CLAIM_INTERFACE          the hotspot interface (ff/fd/01, Linux's ipheth),
@@ -96,7 +96,8 @@ const (
 	// iphoneStallAfter: a phone that trusts the unit and shares its hotspot
 	// but has sent nothing this long after the session is taken again, as
 	// unplugging and replugging it would; the wait doubles with each retake
-	// in a row, up to iphoneStallMax.
+	// in a row, up to iphoneStallMax, and a link whose usbmux session ended
+	// waits as long before the phone is taken again.
 	iphoneStallAfter = 20 * time.Second
 	iphoneStallMax   = 5 * time.Minute
 
@@ -116,14 +117,14 @@ func openIPhoneLink(ctx context.Context, info usbDeviceInfo, fn netFunction, pai
 		return nil, err
 	}
 	claimed := []int{fn.dataIface}
-	var mux *usbPipe
+	var mux muxPipe
 	if fn.muxIface < 0 {
 		logf("iPhone %s: no usbmux interface, so no pairing", cur)
 	} else if err := dev.claimInterface(fn.muxIface); err != nil {
 		logf("iPhone %s: %v; no pairing", cur, err)
 	} else {
 		claimed = append(claimed, fn.muxIface)
-		mux = &usbPipe{dev: dev, in: fn.muxIn, out: fn.muxOut, outPacket: fn.muxOutPacket}
+		mux = usbPipe{dev: dev, in: fn.muxIn, out: fn.muxOut, outPacket: fn.muxOutPacket}
 	}
 	iface := uint16(fn.dataIface)
 	// The hotspot interface carries its bulk endpoints on an alternate
@@ -257,8 +258,8 @@ func claimHotspot(sysName string, config int) (*usbDevice, usbDeviceInfo, netFun
 	return dev, cur, fn, true
 }
 
-// appleDevice re-reads the device at sysName, whose bus/device number
-// changes on each re-enumeration.
+// appleDevice re-reads the device at sysName, whose configuration changes
+// as it is set up again.
 func appleDevice(sysName string) (usbDeviceInfo, bool) {
 	for _, info := range scanUSBDevices() {
 		if info.sysName == sysName {
@@ -286,9 +287,9 @@ type iphethFramer struct {
 	iface    uint16
 	ncm      bool
 	authPath string
-	sysName  string   // USB position
-	devnum   int      // device number of this attachment
-	mux      *usbPipe // the usbmux interface, nil when it could not be claimed
+	sysName  string  // USB position
+	devnum   int     // device number of this attachment
+	mux      muxPipe // the usbmux interface, nil when it could not be claimed
 	pairDir  string
 	gotRx    int32 // a transfer has arrived, or the phone trusts the unit: carrier checks begin
 	rxData   int32 // a transfer with data has arrived
@@ -383,7 +384,7 @@ func (f *iphethFramer) background(stop <-chan struct{}, fail func(error)) {
 			return
 		case <-trusted:
 			atomic.StoreInt32(&f.gotRx, 1)
-			trusted, trustedAt, stallWait = nil, time.Now(), iphoneStallWait(f.sysName)
+			trusted, trustedAt, stallWait = nil, time.Now(), iphoneStallWait(f.sysName, f.devnum)
 			continue
 		case <-t.C:
 		}
@@ -392,11 +393,11 @@ func (f *iphethFramer) background(stop <-chan struct{}, fail func(error)) {
 		}
 		if !dataSeen && atomic.LoadInt32(&f.rxData) == 1 {
 			dataSeen = true
-			iphoneStalled(f.sysName, false)
+			iphoneDataFlows(f.sysName, f.devnum)
 		}
 		if !trustedAt.IsZero() && !dataSeen && atomic.LoadInt32(&f.carrier) != 2 &&
 			time.Since(trustedAt) > stallWait {
-			iphoneStalled(f.sysName, true)
+			iphoneFailed(f.sysName, f.devnum, false)
 			fail(fmt.Errorf("the iPhone trusts the unit but sent nothing in %s; taking it again", stallWait))
 			return
 		}
@@ -433,7 +434,7 @@ func (f *iphethFramer) trust(ctx context.Context, trusted chan<- struct{}, fail 
 	var m *usbMux
 	for {
 		var err error
-		if m, err = openMux(*f.mux); err == nil {
+		if m, err = openMux(f.mux); err == nil {
 			break
 		}
 		if ctx.Err() != nil {
@@ -455,65 +456,113 @@ func (f *iphethFramer) trust(ctx context.Context, trusted chan<- struct{}, fail 
 	case errors.Is(err, errTrustDenied):
 		declineIPhone(f.sysName, f.devnum)
 		fail(fmt.Errorf("%w; it goes back to media until it is plugged in again", err))
-	default:
+	default: // usbmux ended
+		iphoneFailed(f.sysName, f.devnum, true)
 		fail(err)
 	}
 }
 
-// iphoneDeclined is, per USB position, the device number of an iPhone whose
-// owner declined Trust. It is left to the media daemon until it is plugged
-// in again, which gives it a new device number (the authorized toggle keeps
-// it).
-var iphoneDeclined = struct {
+// iphoneMemos is what the uplink remembers about the iPhone at each USB
+// position for as long as that phone stays plugged in: whether its owner
+// declined Trust, and how many times in a row its link failed (nothing
+// received, usbmux ended), which spaces out the next takes. A memo is
+// forgotten once the phone has left: its sysfs entry gone in a scan, or a
+// new device number (a replug gives one; the authorized toggle keeps it).
+var iphoneMemos = struct {
 	sync.Mutex
-	dev map[string]int
-}{dev: map[string]int{}}
+	m map[string]*iphoneMemo
+}{m: map[string]*iphoneMemo{}}
+
+type iphoneMemo struct {
+	devnum    int
+	declined  bool
+	fails     int       // failed links in a row
+	notBefore time.Time // no take before this
+}
+
+// iphoneMemoFor returns the memo for this attachment, a fresh one when the
+// phone at sysName has another device number. The caller holds the lock.
+func iphoneMemoFor(sysName string, devnum int) *iphoneMemo {
+	m := iphoneMemos.m[sysName]
+	if m == nil || m.devnum != devnum {
+		m = &iphoneMemo{devnum: devnum}
+		iphoneMemos.m[sysName] = m
+	}
+	return m
+}
+
+// iphoneForgetGone drops the memos of phones no longer in devs.
+func iphoneForgetGone(devs []usbDeviceInfo) {
+	iphoneMemos.Lock()
+	defer iphoneMemos.Unlock()
+	for sys, m := range iphoneMemos.m {
+		present := false
+		for _, d := range devs {
+			if d.sysName == sys && d.dev == m.devnum {
+				present = true
+			}
+		}
+		if !present {
+			delete(iphoneMemos.m, sys)
+		}
+	}
+}
 
 func declineIPhone(sysName string, devnum int) {
-	iphoneDeclined.Lock()
-	iphoneDeclined.dev[sysName] = devnum
-	iphoneDeclined.Unlock()
+	iphoneMemos.Lock()
+	iphoneMemoFor(sysName, devnum).declined = true
+	iphoneMemos.Unlock()
 }
 
-// iphoneIsDeclined reports whether info is an iPhone whose owner declined
-// Trust and that has not been plugged in again since.
-func iphoneIsDeclined(info usbDeviceInfo) bool {
-	iphoneDeclined.Lock()
-	defer iphoneDeclined.Unlock()
-	d, ok := iphoneDeclined.dev[info.sysName]
-	if ok && d != info.dev {
-		delete(iphoneDeclined.dev, info.sysName)
-		return false
+// iphoneHeldBack reports why the iPhone at info is not taken now: declined
+// (its owner declined Trust), or wait (its last link failed and the backoff
+// runs).
+func iphoneHeldBack(info usbDeviceInfo) (declined, wait bool) {
+	iphoneMemos.Lock()
+	defer iphoneMemos.Unlock()
+	m := iphoneMemos.m[info.sysName]
+	if m == nil || m.devnum != info.dev {
+		return false, false
 	}
-	return ok
+	return m.declined, time.Now().Before(m.notBefore)
 }
 
-// iphoneStalls counts, per USB position, the times in a row a trusted
-// iPhone was taken again for sending nothing: each one doubles the wait
-// before the next, up to iphoneStallMax; data from the phone resets it.
-var iphoneStalls = struct {
-	sync.Mutex
-	n map[string]int
-}{n: map[string]int{}}
+// iphoneStallWait is how long a trusted phone may send nothing before it is
+// taken again: iphoneStallAfter, doubled for each failed link in a row, up
+// to iphoneStallMax. A link that ended for another reason waits as long
+// before the phone is taken again.
+func iphoneStallWait(sysName string, devnum int) time.Duration {
+	iphoneMemos.Lock()
+	defer iphoneMemos.Unlock()
+	return stallWait(iphoneMemoFor(sysName, devnum).fails)
+}
 
-func iphoneStallWait(sysName string) time.Duration {
-	iphoneStalls.Lock()
-	defer iphoneStalls.Unlock()
+func stallWait(fails int) time.Duration {
 	d := iphoneStallAfter
-	for i := 0; i < iphoneStalls.n[sysName] && d < iphoneStallMax; i++ {
+	for i := 0; i < fails && d < iphoneStallMax; i++ {
 		d *= 2
 	}
 	return min(d, iphoneStallMax)
 }
 
-func iphoneStalled(sysName string, stalled bool) {
-	iphoneStalls.Lock()
-	defer iphoneStalls.Unlock()
-	if stalled {
-		iphoneStalls.n[sysName]++
-	} else {
-		delete(iphoneStalls.n, sysName)
+// iphoneFailed counts a failed link; with holdOff the phone is not taken
+// again before the backoff has passed (a stalled link already waited it).
+func iphoneFailed(sysName string, devnum int, holdOff bool) {
+	iphoneMemos.Lock()
+	defer iphoneMemos.Unlock()
+	m := iphoneMemoFor(sysName, devnum)
+	if holdOff {
+		m.notBefore = time.Now().Add(stallWait(m.fails))
 	}
+	m.fails++
+}
+
+// iphoneDataFlows resets the backoff: the phone sends data.
+func iphoneDataFlows(sysName string, devnum int) {
+	iphoneMemos.Lock()
+	defer iphoneMemos.Unlock()
+	m := iphoneMemoFor(sysName, devnum)
+	m.fails, m.notBefore = 0, time.Time{}
 }
 
 // halt reauthorizes the device on stop, so it re-enumerates at its default

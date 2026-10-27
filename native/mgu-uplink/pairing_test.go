@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"syscall"
@@ -508,18 +509,73 @@ func TestIPhoneTrustDenied(t *testing.T) {
 	if phone.pairs() != 2 || phone.pairedHost() != "" || !reflect.DeepEqual(notes, []string{trustTapNote}) {
 		t.Fatalf("pairs %d, paired %q, notes %q", phone.pairs(), phone.pairedHost(), notes)
 	}
-	info := usbDeviceInfo{sysName: "1-3.1", dev: 9}
-	declineIPhone(info.sysName, info.dev)
-	if !iphoneIsDeclined(info) || !iphoneIsDeclined(info) {
-		t.Fatal("the declined phone is taken again")
+}
+
+// fakeIPhoneSysfs puts an iPhone at sysBusUSB/1-3.1 with device number dev
+// (on its media configuration), or removes it when dev is 0.
+func fakeIPhoneSysfs(t *testing.T, dev int) {
+	dir := filepath.Join(sysBusUSB, "1-3.1")
+	if dev == 0 {
+		os.RemoveAll(dir)
+		return
 	}
-	info.dev = 10 // plugged in again
-	if iphoneIsDeclined(info) {
-		t.Fatal("a replugged phone stays declined")
+	for name, v := range map[string]string{"idVendor": "05ac", "idProduct": "12a8", "busnum": "1",
+		"devnum": fmt.Sprint(dev), "bConfigurationValue": "2", "manufacturer": "Apple Inc.", "product": "iPhone"} {
+		writeFile(t, filepath.Join(dir, name), v+"\n")
 	}
-	info.dev = 9
-	if iphoneIsDeclined(info) {
-		t.Fatal("the mark outlived the replug")
+	writeFile(t, filepath.Join(dir, "descriptors"), string(iphoneDesc(true)))
+}
+
+func iphoneCandidate(u *scanUplink) (candidate, bool) {
+	for _, c := range u.candidates() {
+		if c.kind == kindIPhone {
+			return c, true
+		}
+	}
+	return candidate{}, false
+}
+
+// "Don't Trust" through the link's trust(): the link fails with
+// errTrustDenied, the scan then reports the phone busy and does not take
+// it, until it is plugged in again (a new device number, or gone from
+// sysfs and back).
+func TestIPhoneDeclinedNotRetaken(t *testing.T) {
+	defer func(d time.Duration, s string) { pairRetry, sysBusUSB = d, s }(pairRetry, sysBusUSB)
+	pairRetry, sysBusUSB = 200*time.Millisecond, t.TempDir()
+	fakeIPhoneSysfs(t, 9)
+	phone := newFakePhone(t)
+	go func() { // the owner answers "Don't Trust" once the dialog shows
+		for phone.pairs() == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		phone.deny()
+	}()
+	f := &iphethFramer{sysName: "1-3.1", devnum: 9, mux: phone.pipe(), pairDir: t.TempDir()}
+	trusted := make(chan struct{})
+	var failed error
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f.trust(ctx, trusted, func(err error) { failed = err })
+	if !errors.Is(failed, errTrustDenied) {
+		t.Fatalf("link failed with %v, want errTrustDenied", failed)
+	}
+	u := newScanUplink(defaults())
+	for i := 0; i < 2; i++ {
+		if c, ok := iphoneCandidate(u); !ok || c.busy != iphoneDeclinedNote {
+			t.Fatalf("declined phone: %+v %v", c, ok)
+		}
+	}
+	fakeIPhoneSysfs(t, 10) // plugged in again
+	if c, ok := iphoneCandidate(u); !ok || c.busy != "" {
+		t.Fatalf("replugged phone: %+v %v", c, ok)
+	}
+	// Gone from a scan and back under the same number: also plugged in again.
+	declineIPhone("1-3.1", 10)
+	fakeIPhoneSysfs(t, 0)
+	u.candidates()
+	fakeIPhoneSysfs(t, 10)
+	if c, ok := iphoneCandidate(u); !ok || c.busy != "" {
+		t.Fatalf("phone back after leaving: %+v %v", c, ok)
 	}
 }
 
@@ -551,20 +607,34 @@ func TestIPhoneTrustRetrySameMux(t *testing.T) {
 	}
 }
 
-func TestIPhoneStallWait(t *testing.T) {
-	const sys = "test-stall"
-	defer iphoneStalled(sys, false)
+// Failed links in a row space out the takes: 20 s doubling to 5 min,
+// reset by data and by a replug. A link whose usbmux ended also holds the
+// phone back from the scan for that long.
+func TestIPhoneBackoff(t *testing.T) {
+	defer func(s string) { sysBusUSB = s }(sysBusUSB)
+	sysBusUSB = t.TempDir()
+	fakeIPhoneSysfs(t, 9)
 	var got []time.Duration
 	for i := 0; i < 6; i++ {
-		got = append(got, iphoneStallWait(sys))
-		iphoneStalled(sys, true)
+		got = append(got, iphoneStallWait("1-3.1", 9))
+		iphoneFailed("1-3.1", 9, false)
 	}
 	want := []time.Duration{20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("waits %v", got)
 	}
-	iphoneStalled(sys, false)
-	if iphoneStallWait(sys) != 20*time.Second {
+	iphoneDataFlows("1-3.1", 9)
+	if iphoneStallWait("1-3.1", 9) != 20*time.Second {
 		t.Fatal("data did not reset the wait")
+	}
+	u := newScanUplink(defaults())
+	iphoneFailed("1-3.1", 9, true) // usbmux ended
+	if _, ok := iphoneCandidate(u); ok {
+		t.Fatal("taken again during the backoff")
+	}
+	iphoneFailed("1-3.1", 9, false)
+	fakeIPhoneSysfs(t, 10) // plugged in again
+	if _, ok := iphoneCandidate(u); !ok || iphoneStallWait("1-3.1", 10) != 20*time.Second {
+		t.Fatal("a replugged phone keeps the backoff")
 	}
 }

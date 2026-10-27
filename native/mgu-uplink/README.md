@@ -87,7 +87,9 @@ deleting it makes the unit a new computer for every phone. When the owner
 answers "Don't Trust", the phone goes back to media and is left alone
 until it is plugged in again. A phone that trusts the unit but sends
 nothing for 20 s is taken again, waiting twice as long each time in a row
-(up to 5 minutes) until data flows.
+(up to 5 minutes); a link whose usbmux session ended waits as long before
+the phone is taken again. Data from the phone, or plugging it in again,
+starts the wait over at 20 s.
 
 On the head unit a stock media daemon grabs a
 connected iPhone and holds it on configuration 2 (iAP/iPod media); the uplink

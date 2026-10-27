@@ -89,7 +89,9 @@ func (u *scanUplink) candidates() []candidate {
 		idx, _ := readSysctl(sysClassNet + "/" + n + "/ifindex")
 		out = append(out, candidate{kind: kindUSB, key: "netdev:" + n + "#" + idx, netdev: n, dev: netdevDevice(sysClassNet, n)})
 	}
-	for _, info := range scanUSBDevices() {
+	devs := scanUSBDevices()
+	iphoneForgetGone(devs)
+	for _, info := range devs {
 		apple := strings.HasPrefix(info.vidpid, "05ac:")
 		for _, kind := range []string{kindECM, kindRNDIS, kindNCM, kindIPhone} {
 			// An Apple device's own CDC functions (a Mac's, an iPhone's reverse
@@ -118,10 +120,16 @@ func (u *scanUplink) candidates() []candidate {
 			c.fn = fn
 			// The uplink takes an iPhone from the media daemon itself
 			// (iphone.go), so a held iPhone is not left alone, unless its
-			// owner declined Trust.
-			if kind == kindIPhone && iphoneIsDeclined(info) {
-				c.busy = iphoneDeclinedNote
-			} else if kind != kindIPhone {
+			// owner declined Trust; one whose last link failed waits for
+			// its backoff.
+			if kind == kindIPhone {
+				declined, wait := iphoneHeldBack(info)
+				if declined {
+					c.busy = iphoneDeclinedNote
+				} else if wait {
+					continue
+				}
+			} else {
 				var held []string
 				for _, n := range []int{fn.commIface, fn.dataIface} {
 					if d := info.ifaceDriver(n); d != "" {
