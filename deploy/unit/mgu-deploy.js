@@ -2229,15 +2229,16 @@ function unbindCertCopy() {
  * restarted, the run was stopped) leaves the app listed in custom_apps.json
  * with its package in preinstalled_apps, and the manager tries to install
  * it again at every start. Each app install is recorded in state.json
- * (inflight: the app, its version and package checksum, the run) until it
- * finishes or is rolled back. Before the next install, an app that is
- * listed without a registry entry (one that cannot be read counts as
- * there) is unlisted and its package removed only when this tool put both
- * there: the newest snapshot holding the app's registry entry is this
- * tool's install of it, which found the app unlisted, without a registry
- * entry or package; the one package on disk is the one that install
- * placed (and, when the inflight record names the app, its run is gone and
- * the package has the recorded checksum). A snapshot of the listing and
+ * until it finishes or is rolled back: inflight names the app and the run,
+ * placed[<id>] the version and checksum of the package placed, kept while
+ * an interrupted install's leftover is listed. Before the next install, an
+ * app that is listed without a registry entry (one that cannot be read
+ * counts as there) is unlisted and its package removed only when this tool
+ * put both there: the newest snapshot holding the app's registry entry is
+ * this tool's install of it, which found the app unlisted, without a
+ * registry entry or package; the one package on disk is the one that
+ * install placed, with the recorded checksum when there is one; a run
+ * inflight names is gone. A snapshot of the listing and
  * the packages is taken first. Anything else stays, said in the output. */
 /* The install snapshot that placed id's leftover, as { dir, names: the
  * package names it placed }, or null. */
@@ -2267,14 +2268,25 @@ function placedBy(id) {
 function entryPresent(id) {
     try { fs.lstatSync(appEntryFile(id)); return true; } catch (e) { return e.code !== 'ENOENT'; }
 }
+function endAppRecord(state, id) {
+    delete state.inflight;
+    if (state.placed) delete state.placed[id];
+    if (state.placed && !Object.keys(state.placed).length) delete state.placed;
+}
 function cleanInterrupted(state) {
     var fl = state.inflight, gone = !!fl && (fl.boot !== bootId() || !pidAlive(fl.pid)), clean = [];
-    Object.keys(readCustomApps()).forEach(function (id) {
+    var placed = state.placed || {}, listed = readCustomApps(), left = {};
+    Object.keys(listed).forEach(function (id) {
         if (entryPresent(id)) return;
-        var rec = fl && fl.id === id ? fl : null, by = placedBy(id), pkgs = preinstalledFor(id);
+        left[id] = true;
+        if (fl && fl.id === id && !gone) {
+            warn(id + ' is being installed by a run of this tool that is still going; left as it is');
+            return;
+        }
+        var rec = placed[id] || (fl && fl.id === id ? fl : null), by = placedBy(id), pkgs = preinstalledFor(id);
         var name = pkgs.length === 1 ? path.basename(pkgs[0]) : null;
-        var ours = !!by && !!name && by.names.indexOf(name) >= 0 && (!rec || (gone &&
-            name === id + '@' + rec.version + '.tgz' && (!rec.sha256 || sha256File(pkgs[0]) === rec.sha256)));
+        var ours = !!by && !!name && by.names.indexOf(name) >= 0 && (!rec ||
+            (name === id + '@' + rec.version + '.tgz' && (!rec.sha256 || sha256File(pkgs[0]) === rec.sha256)));
         if (!ours) {
             warn(id + ' is listed for the app manager without being installed, and this tool cannot show it put it there; left as it is');
             return;
@@ -2288,10 +2300,13 @@ function cleanInterrupted(state) {
     }
     clean.forEach(function (c) {
         customAppsRemove(c.id);
+        delete left[c.id];
         rootfsWindow(c.pkgs.map(function (p) { return { type: 'delete', path: p }; }));
         say('removed what an interrupted install of ' + c.id + ' left (snapshot ' + c.from + '): its listing and ' +
             c.pkgs.map(function (p) { return path.basename(p); }).join(', ') + ', which the app manager tried to install at every start');
     });
+    Object.keys(placed).forEach(function (id) { if (!left[id]) delete placed[id]; });
+    if (Object.keys(placed).length) state.placed = placed; else delete state.placed;
     if (gone) delete state.inflight;
 }
 
@@ -4146,7 +4161,9 @@ function cmdInstall(args) {
             attempted = true;
             if (a.kind === 'app' && !id8) {
                 beginAppTx(tx);
-                state.inflight = { id: a.id, version: a.version, sha256: sha256File(a.file), pid: process.pid, boot: bootId() };
+                state.inflight = { id: a.id, version: a.version, pid: process.pid, boot: bootId() };
+                state.placed = Object.assign({}, state.placed);
+                state.placed[a.id] = { version: a.version, sha256: sha256File(a.file) };
                 saveState(state);
             }
             try {
@@ -4154,7 +4171,7 @@ function cmdInstall(args) {
                 else if (id8) installAppId8(a, state, decisions[a.id]);
                 else installApp(a, state, decisions[a.id]);
                 syncDropIns();
-                delete state.inflight;
+                endAppRecord(state, a.id);
                 done.push(a.id + ' ' + a.version);
             } catch (e) {
                 process.stderr.write(a.id + ' ' + a.version + ' failed: ' + e.message + '\n');
@@ -4162,7 +4179,7 @@ function cmdInstall(args) {
                     if (a.kind === 'tool') rollbackTool(a, tx, backup, e, state);
                     else if (id8) { restoreSnapshot(backup); pruneCreatedDirs(state); }
                     else rollbackApp(a, tx, backup, state);
-                    delete state.inflight;
+                    endAppRecord(state, a.id);
                 } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
                 if (done.length) {
                     say('installed before this failure, and kept: ' + done.join(', '));

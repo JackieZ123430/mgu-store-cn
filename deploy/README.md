@@ -907,17 +907,18 @@ installs the same way, and its packages get the entry too. A package with
 no manifest is left as it is.
 
 **Interrupted installs.** Each app install is recorded in `state.json`
-(`inflight`: the app, its version, its package's checksum and the run)
-until it finishes or is rolled back. Before an app install, an app listed
+until it finishes or is rolled back: `inflight` names the app and the run,
+`placed` the version and checksum of the package placed, kept while what
+an interrupted install left is listed. Before an app install, an app listed
 in `custom_apps.json` without a registry entry (one that cannot be read
 counts as there) is unlisted and its `preinstalled_apps` package removed
 only when this tool provably put them there: the newest snapshot holding
 the app's registry entry is this tool's install of it, which found the app
 not listed, not registered and without a package; the one package on disk
-is the one that install placed; and when the record names the app, its
-run is gone (or from another boot) and the package has the recorded
-checksum. A `cleanup` snapshot of the listing and the package is taken
-first. Anything else stays, and the output says so.
+is the one that install placed, with the recorded checksum when there is
+one; and a run `inflight` names is gone (or from another boot). A
+`cleanup` snapshot of the listing and the package is taken first.
+Anything else stays, and the output says so.
 
 `uninstall <id>` removes the app from `custom_apps.json` first, so the
 manager does not install it again meanwhile, then asks the running manager

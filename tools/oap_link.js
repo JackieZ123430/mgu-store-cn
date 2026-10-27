@@ -620,7 +620,8 @@ function nodeCheck(file) {
  * scratch copy of its tree (opts.workDir, default the system's). opts.donors
  * lists donor files in search order; opts.epoch (seconds) is build.json's
  * buildTimestamp, the time of the build without it. The certification
- * proxy the tree's SOME/IP manifest lacks is added (completeCertification). */
+ * proxy the tree's SOME/IP manifest lacks is added; `certification` names
+ * that manifest when the package carries it. */
 function build(srcDir, outFile, opts) {
     opts = opts || {};
     const m = readManifest(srcDir);
@@ -651,7 +652,7 @@ function build(srcDir, outFile, opts) {
             pkg.mguInternet = true;
             fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + (/\n$/.test(raw) ? '\n' : ''));
         }
-        const certification = completeCertification(work);
+        const completed = completeCertification(work);
         const moduleCount = donor.closure.length + modules.length;
         fs.writeFileSync(path.join(work, 'javascript', 'build.json'), JSON.stringify({
             name: m.id,
@@ -660,7 +661,8 @@ function build(srcDir, outFile, opts) {
             bundle: { entryModule: ENTRY_ID, moduleCount, appModules: modules.length, sdkModulesFrom: donor.label },
             main: entry ? { path: main, from: entry } : undefined
         }, null, 2) + '\n');
-        pack(work, outFile);
+        const packed = pack(work, outFile);
+        const certification = completed && packed.indexOf(completed.split(path.sep).join('/')) >= 0 ? completed : null;
         return { file: outFile, id: m.id, version: m.version, donor: donor.label, entry, moduleCount,
             bytes: Buffer.byteLength(bundle), certification };
     } finally {

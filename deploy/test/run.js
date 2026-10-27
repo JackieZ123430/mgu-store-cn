@@ -1253,8 +1253,9 @@ function testInterrupted() {
         fs.writeFileSync(file, JSON.stringify(st));
     };
     const record = (root, id, extra) => setState(root, (st) => {
-        st.inflight = Object.assign({ id, version: '1.0.0', sha256: sha256(fs.readFileSync(pre(root, id))), pid: 999999,
+        st.inflight = Object.assign({ id, version: '1.0.0', pid: 999999,
             boot: fs.readFileSync(root.p('proc/boot_id'), 'utf8').trim() }, extra);
+        st.placed = { [id]: { version: '1.0.0', sha256: sha256(fs.readFileSync(pre(root, id))) } };
     });
     const next = (root) => root.run(['install', '--artifact', appArtifact('second_app', '1.0.0', true), '--yes']);
     const kept = (root, id, r, v) => r.status === 0 && id in readJson(listFile(root)) && fs.existsSync(pre(root, id, v)) &&
@@ -1272,7 +1273,7 @@ function testInterrupted() {
     check('interrupted: an install whose run is gone is unlisted and its package removed, before the next install',
         ar.status === 0 && /removed what an interrupted install of ghost_app left \(snapshot \S+-install\)/.test(ar.out) &&
         !('ghost_app' in readJson(listFile(a))) && !fs.existsSync(pre(a, 'ghost_app')) &&
-        'second_app' in readJson(listFile(a)) && !('inflight' in a.state()), ar.out);
+        'second_app' in readJson(listFile(a)) && !('inflight' in a.state()) && !('placed' in a.state()), ar.out);
     check('interrupted: the listing and the package are snapshotted before they are removed', !!cleanup &&
         cpkg && cpkg.kind === 'file' && clist && clist.kind === 'file' &&
         'ghost_app' in readJson(a.p(`var/opt/mgu-deploy/backups/${cleanup}/${clist.stored}`)), JSON.stringify(cman));
@@ -1291,6 +1292,10 @@ function testInterrupted() {
     fs.copyFileSync(appArtifact('ghost_app', '1.0.0', false), pre(c, 'ghost_app'));
     const cr = next(c);
     check('interrupted: a package that is not the one recorded is left, with a warning', kept(c, 'ghost_app', cr), cr.out);
+    // the manager has not installed it (its registry entry is not there) by the install after that
+    if (fs.existsSync(c.entry('ghost_app'))) fs.unlinkSync(c.entry('ghost_app'));
+    const cr2 = c.run(['install', '--artifact', appArtifact('third_app', '1.0.0', true), '--yes']);
+    check('interrupted: and it is still left at the install after that', kept(c, 'ghost_app', cr2), cr2.out);
     // another version than the one our install placed
     const v = fakeRoot();
     interrupted(v, 'ghost_app');

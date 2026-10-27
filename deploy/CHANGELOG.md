@@ -4,7 +4,7 @@
 
 - Source packages (`mgu-app.json`) are built with the certification service in their SOME/IP manifest, so one whose manifest lacks it installs on iDrive 7 and iDrive 8.
 - iDrive 8 packages get the certification service in their SOME/IP manifest when they lack it, as on iDrive 7: MainApp-21 has cadaemon create the app's keychain as the app's uid in the same way.
-- What an interrupted app install left is removed only when this tool provably put it there: the newest snapshot holding the app is this tool's install of it, which found the app absent; the package on disk is the one that install placed, with the recorded checksum when there is a record. Another installer's app of the same id, placed after our uninstall, stays. A registry entry that cannot be read counts as installed. The listing and the package are snapshotted (`cleanup`) before they are removed.
+- What an interrupted app install left is removed only when this tool provably put it there: the newest snapshot holding the app is this tool's install of it, which found the app absent; the package on disk is the one that install placed, with the checksum recorded for it (`placed` in `state.json`) when there is one. Another installer's app of the same id, placed after our uninstall, stays. A registry entry that cannot be read counts as installed. The listing and the package are snapshotted (`cleanup`) before they are removed.
 
 ## 0.5.8
 
