@@ -152,6 +152,13 @@ const dooms = (o) => Object.assign({}, two, { components: [Object.assign({}, two
 eq(sub(Object.assign(dooms({}), { busy: { id: 'doom2', op: 'install', phase: 'download', progress: 42, total: 100 } })),
     'Downloading 42 % · DOOM (idrive7-apps)');
 eq(sub(dooms({ error: 'the build failed (exit 3)' })), 'DOOM (idrive7-apps): the build failed (exit 3)');
+// Remove? names which of two installed DOOMs; with one DOOM, its title alone
+const confirmOf = (st) => text(frame(fixture.model({ stack: [{ name: 'main' }, { name: 'app', id: 'doom2' }, { name: 'confirm', kind: 'remove', id: 'doom2' }] }, st),
+    { textScale: 1, focus: 0, scroll: {} }), 'title');
+const both = dooms({ installed: '1.0.0', status: 'installed' });
+both.components[1] = Object.assign({}, both.components[1], { installed: '1.0.1', status: 'installed' });
+eq(confirmOf(both), 'Remove DOOM (idrive7-apps) 1.0.0?');
+eq(confirmOf(Object.assign({}, both, { components: [both.components[0]] })), 'Remove DOOM 1.0.0?');
 // one DOOM listed: its title alone
 eq(sub(Object.assign({}, dooms({}), { components: [dooms({}).components[0]], busy: { id: 'doom2', op: 'install', phase: 'download', progress: 42, total: 100 } })),
     'Downloading 42 % · DOOM');
@@ -201,7 +208,9 @@ Object.keys(UNITS).forEach((unit) => {
     // the first row's texts but the letter tiles' letters
     const row0 = texts.filter((t) => t.y < def.y + th && t.str.length > 1);
     eq(row0.slice(0, 3).map((t) => t.str), ['Store', 'mgu-store', 'Installed'], `${unit}: title, source, state`);
-    ok(row0.every((t) => t.y + t.size * 0.3 <= def.y + th), `${unit}: the state line inside its tile (${row0.map((t) => t.y)} of ${def.y + th})`);
+    // the tile's bottom 8 px hold the focus rings (store_frame.js): every line, descenders included, ends above them
+    ok(row0.every((t) => t.y + 0.25 * t.size <= def.y + th - 8),
+        `${unit}: the lines clear of the focus rings (${row0.map((t) => Math.round(t.y + 0.25 * t.size))} of ${def.y + th - 8})`);
     ok(row0[1].size >= (def.opts.subSize || 30) * 0.85, `${unit}: the source line readable (${row0[1].size} px)`);
     // owner/repo too long for the tile: the owner shortened, the repo whole
     texts.length = 0;

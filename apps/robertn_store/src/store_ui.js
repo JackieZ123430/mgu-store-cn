@@ -58,7 +58,6 @@ const rawComps = (m) => (m.connected && m.st && Array.isArray(m.st.components) ?
 function comps(m) {
     return rawComps(m).filter(listed);
 }
-/* The short name of a component's source, '' when the updater names none. */
 const srcName = (m, c) => (c.source && sourceNames(sources(m))[c.source]) || '';
 /* Its title, with its source's short name where another listed row has the same title (two sources' DOOM). */
 const named = (m, c) => (srcName(m, c) && comps(m).some((o) => o !== c && o.title === c.title) ? `${c.title} (${srcName(m, c)})` : c.title);
@@ -325,7 +324,7 @@ function confirmView(m, page) {
     let line = '';
     let now = null;
     if (page.kind === 'remove') {
-        title = c ? `Remove ${c.title} ${c.installed || ''}?`.replace(' ?', '?') : 'Remove?';
+        title = c ? `Remove ${named(m, c)} ${c.installed || ''}?`.replace(' ?', '?') : 'Remove?';
         now = button('Remove', { do: 'remove', id: page.id }, { vicon: 'trash', style: 'primary', color: RED });
     } else if (page.kind === 'restart') {
         title = 'Restart head unit?';
