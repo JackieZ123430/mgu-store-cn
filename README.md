@@ -17,6 +17,28 @@ It installs:
 iDrive 8 is tested in an emulator only, not yet on a real car. On iDrive 8,
 installs and removals take effect at the next head-unit restart.
 
+## Screenshots
+
+The Store: apps and head-unit tools from every source.
+
+![The Store page, listing installed tools and the apps available from the sources](docs/screenshots/store.png)
+
+An app's page, with its source, version and Install.
+
+![The page of the M Vitals app, with its version, source and an Install button](docs/screenshots/app.png)
+
+Installed: the apps and tools on the head unit.
+
+![The Installed page, listing the installed apps and head-unit tools with their versions](docs/screenshots/installed.png)
+
+Settings: sources, accounts and phone access.
+
+![Settings, with the two default sources, Accounts, Phone access and Check now](docs/screenshots/settings.png)
+
+Adding a GitHub repository: pick its releases, tags or a branch.
+
+![Adding a GitHub repository as a source, offering Releases, Tags and its branches](docs/screenshots/add-source.png)
+
 ## Requirements
 
 - A computer (Windows 10/11, macOS or Linux) with
