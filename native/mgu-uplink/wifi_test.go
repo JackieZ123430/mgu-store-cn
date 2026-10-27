@@ -84,6 +84,9 @@ func TestWiFiProvider(t *testing.T) {
 		}
 	}()
 	waitWiFi(t, p, "off at start", func(st wifiStatus) bool { return st.Link == "off" && !st.Enabled })
+	if b, _ := os.ReadFile(c.statusFile()); !strings.Contains(string(b), `"link": "off"`) {
+		t.Fatalf("status.json without Wi-Fi off: %s", b)
+	}
 	if err := p.scan(); err == nil || err.Error() != "Wi-Fi is off" {
 		t.Fatalf("scan while off: %v", err)
 	}

@@ -142,7 +142,11 @@ func newWiFiProvider(c config, bin string) *wifiProvider {
 	}
 }
 
-func (p *wifiProvider) start() { go p.loop() }
+func (p *wifiProvider) start() {
+	st := p.status()
+	setStatusWiFi(&st)
+	go p.loop()
+}
 
 // stop ends the provider and puts the interface back.
 func (p *wifiProvider) stop() {
