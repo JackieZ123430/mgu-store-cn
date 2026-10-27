@@ -25,8 +25,7 @@ typedef struct gfx_image {
 
 /* pictures: per app at most GFX_IMG_MAX of them / GFX_IMG_BYTES of pixels, all apps together GFX_IMG_ALL
    (the kit keeps under the per-app limits by itself: it drops the least recently drawn). Upstream images
-   (sides up to GFX_UPSTREAM_SIDE) and pixmaps (GFX_PIXMAP_SIDE) count towards the count and the all-apps total.
-   Videos count towards both byte limits: w*h*3 a frame size (its copy in memory and its textures). */
+   (sides up to GFX_UPSTREAM_SIDE) and pixmaps (GFX_PIXMAP_SIDE) count towards the count and the all-apps total. */
 #define GFX_IMG_SIDE 1024
 #define GFX_UPSTREAM_SIDE 4096
 #define GFX_PIXMAP_SIDE 2048
@@ -39,13 +38,19 @@ typedef struct gfx_image {
 typedef struct gfx_video {
     uint32_t id; int fd; unsigned tex[3]; int w, h, matrix, full; uint32_t seq;
     uint8_t *buf; size_t cap;            /* the frame being uploaded */
-    size_t bytes;                        /* counted towards the picture limits */
-    uint32_t bad_seq;                    /* a frame that could not be read or had no room: not pending */
+    size_t bytes;                        /* counted towards the video limits */
+    uint32_t bad_seq;                    /* a frame that could not be read or had no room: not pending (= seq once a
+                                            frame is read) */
     uint32_t refused_w, refused_h;       /* the size last refused for room (logged once) */
     struct gfx_video *next;
 } gfx_video;
 #define GFX_VIDEO_MAX 4
 #define GFX_VIDEO_SIDE 2048
+/* video bytes, apart from the pictures' (a kit keeps its pictures under GFX_IMG_BYTES by itself): w*h*3 a video (its
+   newest frame in memory and as textures). An app: one video of the largest size (2048x2048, 12 MiB), or two 1080p
+   (6 MiB each); all apps: five 1080p. */
+#define GFX_VIDEO_BYTES (12u << 20)
+#define GFX_VIDEO_ALL (32u << 20)
 
 typedef struct gfx_xf { float s, ox, oy; } gfx_xf;      /* device = logical * s + (ox, oy) */
 
@@ -58,10 +63,11 @@ typedef struct gfx_client {
     gfx_layer *layers;
     gfx_image *images;
     int nimage;
-    size_t image_bytes;                   /* pictures and videos (GFX_IMG_BYTES) */
+    size_t image_bytes;                   /* pictures only (GFX_IMG_BYTES) */
     int upstream_ops;                     /* OP_IMAGE in upstream's layout */
     gfx_video *videos;
     int nvideo;
+    size_t video_bytes;                   /* GFX_VIDEO_BYTES */
     const char *name;                     /* the app, for the log */
 } gfx_client;
 

@@ -137,9 +137,7 @@ Daemon to client:
 Pixmaps share the id space of IMAGE pictures. Pictures, upstream images and
 pixmaps count towards 64 per app and 96 MiB for all apps; pictures also
 towards 32 MiB per app. An upload past them gets an ERROR and draws nothing.
-Videos count towards both byte limits, w×h×3 bytes for each (the newest frame
-in memory and on the GPU), from their first frame and at each new size; a
-frame size past them is not shown (the renderer logs it) until there is room.
+Videos have limits of their own (below).
 
 ## Video
 
@@ -179,8 +177,12 @@ taken for hung and hidden until it talks again, as IterioDev's kit does.
   renderer reads the header, then that slot. With 3 slots the writer is two
   frames away from the one being read. A header that does not fit these
   bounds, or a file shorter than its header says, draws the frame read before
-  (or nothing); a frame that could not be read is not looked for again until
-  seq moves on.
+  (or nothing), and the app is not drawn again for it until seq changes.
+- **Limits**: a video counts w×h×3 bytes (its newest frame in memory and on
+  the GPU), from its first frame and at each new size: at most 12 MiB per app
+  (one 2048×2048 video, or two 1080p) and 32 MiB for all apps, apart from the
+  pictures' limits. A frame size past them is not shown: the frame shown before
+  stays (or nothing), and the renderer logs it, until there is room.
 - A new size (PLACE with another w or h) drops the videos with the other
   resources; the client sends VIDEO again.
 

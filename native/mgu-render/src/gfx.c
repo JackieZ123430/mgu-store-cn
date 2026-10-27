@@ -254,6 +254,7 @@ void gfx_layer_drop(gfx_client *c, uint32_t id) {
 }
 
 static size_t images_all;                                /* picture bytes of all apps */
+static size_t videos_all;                                /* video bytes of all apps (GFX_VIDEO_ALL) */
 
 static gfx_image *find_image(gfx_client *c, uint32_t id) {
     for (gfx_image *m = c->images; m; m = m->next) if (m->id == id) return m;
@@ -456,7 +457,7 @@ void gfx_video_drop(gfx_client *c, uint32_t id) {
         if ((*pp)->id == id) {
             gfx_video *v = *pp; *pp = v->next;
             for (int k = 0; k < 3; k++) if (v->tex[k]) glDeleteTextures(1, &v->tex[k]);
-            c->nvideo--; c->image_bytes -= v->bytes; images_all -= v->bytes;
+            c->nvideo--; c->video_bytes -= v->bytes; videos_all -= v->bytes;
             close(v->fd); free(v->buf); free(v);
             return;
         }
@@ -518,30 +519,27 @@ static void video_update(gfx_client *c, gfx_video *v) {
     struct mgu_video_head h;
     if (!video_head(v, &h) || h.seq == v->seq) return;
     size_t ysz = (size_t)h.w * h.h, csz = (size_t)(h.w / 2) * (h.h / 2), fsz = ysz + 2 * csz;
-    if (fsz != v->cap) {             /* a new size: the frame's copy and its textures (fsz each) must fit the limits */
+    if (fsz != v->cap) {             /* a new size: the frame's copy and its textures (fsz each) must fit the limits;
+                                        refused, the frame shown before stays */
         size_t bytes = 2 * fsz;
-        if (c->image_bytes - v->bytes + bytes > GFX_IMG_BYTES || images_all - v->bytes + bytes > GFX_IMG_ALL) {
-            if (h.w != v->refused_w || h.h != v->refused_h) {
-                if (c->image_bytes - v->bytes + bytes > GFX_IMG_BYTES)
-                    log_warn("%s: video %u: %ux%u frames not shown: an app's pictures and videos hold at most %u MB",
-                             c->name ? c->name : "app", v->id, h.w, h.h, GFX_IMG_BYTES >> 20);
-                else
-                    log_warn("%s: video %u: %ux%u frames not shown: all apps' pictures and videos use %u MB already",
-                             c->name ? c->name : "app", v->id, h.w, h.h, GFX_IMG_ALL >> 20);
-            }
+        int app = c->video_bytes - v->bytes + bytes > GFX_VIDEO_BYTES;
+        if (app || videos_all - v->bytes + bytes > GFX_VIDEO_ALL) {
+            if (h.w != v->refused_w || h.h != v->refused_h)
+                log_warn("%s: video %u: %ux%u frames not shown: %s %u MB of video", c->name ? c->name : "app", v->id, h.w,
+                         h.h, app ? "an app holds at most" : "all apps hold at most", (app ? GFX_VIDEO_BYTES : GFX_VIDEO_ALL) >> 20);
             v->refused_w = h.w; v->refused_h = h.h; v->bad_seq = h.seq;
             return;
         }
         uint8_t *b = realloc(v->buf, fsz);
         if (!b) { v->bad_seq = h.seq; return; }
         v->buf = b; v->cap = fsz;
-        c->image_bytes += bytes - v->bytes; images_all += bytes - v->bytes; v->bytes = bytes;
+        c->video_bytes += bytes - v->bytes; videos_all += bytes - v->bytes; v->bytes = bytes;
     }
     v->refused_w = v->refused_h = 0;
     /* short: the file is shorter than its header says (written in that order, or cut); not pending until seq moves on */
     if (pread(v->fd, v->buf, fsz, (off_t)sizeof h + (off_t)h.slot * (off_t)fsz) != (ssize_t)fsz) { v->bad_seq = h.seq; return; }
     int resize = (int)h.w != v->w || (int)h.h != v->h;
-    v->seq = h.seq; v->w = (int)h.w; v->h = (int)h.h; v->matrix = h.matrix == 1; v->full = h.full == 1;
+    v->seq = v->bad_seq = h.seq; v->w = (int)h.w; v->h = (int)h.h; v->matrix = h.matrix == 1; v->full = h.full == 1;
     const uint8_t *pl[3] = { v->buf, v->buf + ysz, v->buf + ysz + csz };
     for (int k = 0; k < 3; k++) {
         int pw = k ? v->w / 2 : v->w, ph = k ? v->h / 2 : v->h;

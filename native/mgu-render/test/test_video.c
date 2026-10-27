@@ -1,6 +1,6 @@
 /*
- * Video frame files (gfx.c) on Mesa's surfaceless EGL: a file shorter than its header says is not looked for again
- * until its next frame, and videos count towards the picture limits (32 MB an app, 96 MB all apps).
+ * Video frame files (gfx.c) on Mesa's surfaceless EGL: a file shorter than its header says is not pending until seq
+ * changes, the owner check, and the video limits (12 MiB an app, 32 MiB all apps; pictures keep their own).
  *   EGL_PLATFORM=surfaceless build/host/test_video
  */
 #include <EGL/egl.h>
@@ -45,11 +45,6 @@ static int shown(gfx_client *c) {
     return n;
 }
 
-static uint32_t first_refused(gfx_client *c) {
-    for (gfx_video *v = c->videos; v; v = v->next) if (!v->w) return v->id;
-    return 0;
-}
-
 int main(void) {
     EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLint ca[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE }, n;
@@ -74,8 +69,10 @@ int main(void) {
     CHECK(gfx_video_pending(&c), "the next frame is pending");
     draw(&c);
     CHECK(!gfx_video_pending(&c) && video(&c, 1)->w == 64, "the next frame is shown");
+    write_file(64, 32, 1, 1);
+    CHECK(gfx_video_pending(&c), "a player that starts again at the seq once refused is not skipped");
     gfx_client_free(&c);
-    CHECK(c.image_bytes == 0, "dropping the video frees its bytes");
+    CHECK(c.video_bytes == 0, "dropping the video frees its bytes");
 
     /* owner */
     if (me != 0) {
@@ -84,30 +81,37 @@ int main(void) {
         gfx_client_free(&c);
     }
 
-    /* limits: a 2048x2048 video counts 12 MiB (6 MiB in memory, 6 on the GPU) */
-    write_file(2048, 2048, 1, 1);
-    size_t one = (size_t)2048 * 2048 * 3;
-    for (uint32_t id = 1; id <= 3; id++) gfx_video_def(&c, id, PATH, me);
+    /* limits: a video counts w*h*3 (its frame in memory and on the GPU): 1080p 5.9 MiB, 2048x2048 12 MiB */
+    static const char *P2 = "/dev/shm/mgu-video-test-video-2";
+    write_file(1920, 1080, 1, 1);
+    rename(PATH, P2);
+    write_file(1920, 1080, 1, 1);
+    gfx_video_def(&c, 1, PATH, me); gfx_video_def(&c, 2, P2, me);
     draw(&c);
-    uint32_t refused = first_refused(&c);
-    CHECK(shown(&c) == 2 && refused, "an app's third 2048x2048 video is past 32 MB");
-    CHECK(c.image_bytes == 2 * one, "two counted");
+    CHECK(shown(&c) == 2 && c.video_bytes == (size_t)2 * 1920 * 1080 * 3, "an app shows two 1080p videos");
+    write_file(2048, 2048, 2, 1);
+    draw(&c);
+    CHECK(video(&c, 1)->w == 1920 && c.video_bytes == (size_t)2 * 1920 * 1080 * 3,
+          "a size past the app's 12 MiB of video: the frame shown before stays");
     CHECK(!gfx_video_pending(&c), "the refused frame is not pending");
-    gfx_video_drop(&c, refused == 1 ? 2 : 1);
+    for (uint32_t id = 1; id <= 8; id++) if (gfx_image_def(&c, 100 + id, 1024, 1024, NULL) < 0) printf("     %s\n", gfx_error());
+    CHECK(c.image_bytes == (size_t)32 << 20, "the app's 32 MiB of pictures are its own");
+    gfx_video_drop(&c, 2);
     draw(&c);
-    CHECK(video(&c, refused)->w == 2048 && c.image_bytes == 2 * one, "shown once another is dropped");
+    CHECK(video(&c, 1)->w == 2048 && c.video_bytes == (size_t)2048 * 2048 * 3, "shown once the other video is dropped");
     gfx_client_free(&c);
+    unlink(P2);
 
-    gfx_client k[5]; memset(k, 0, sizeof k);
+    gfx_client k[3]; memset(k, 0, sizeof k);
     int all = 0;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
         k[i].name = "test";
-        for (uint32_t id = 1; id <= 2; id++) gfx_video_def(&k[i], id, PATH, me);
+        gfx_video_def(&k[i], 1, PATH, me);
         draw(&k[i]);
         all += shown(&k[i]);
     }
-    CHECK(all == 8, "all apps show eight 2048x2048 videos, 96 MB, and no more");
-    for (int i = 0; i < 5; i++) gfx_client_free(&k[i]);
+    CHECK(all == 2, "all apps show two 2048x2048 videos (32 MiB of video) and no third");
+    for (int i = 0; i < 3; i++) gfx_client_free(&k[i]);
 
     unlink(PATH);
     printf("%s\n", fails ? "FAILURES" : "video: all ok");
