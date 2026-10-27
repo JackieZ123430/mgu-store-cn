@@ -1,4 +1,4 @@
-# robertn_store 0.9.2
+# robertn_store 0.9.3
 
 The Store: every app and head-unit tool of every source, each with its
 state, the progress of the running install, the sources and the phone page.
@@ -24,7 +24,8 @@ USB, Settings) beside:
 - **Store**: All / Apps / Tools, Online / Offline / Checking, the status line
   (or the running install), a grid of tiles: the package's picture when the
   updater names one (`components[].icon`, a PNG file), else a letter tile
-  (round for a tool), its state (`Installed`, `Update 1.0.1`, `Downloading
+  (round for a tool), its name, its source under it (the repo's name,
+  `owner/repo` where two sources share a repo name, a catalog's host), its state (`Installed`, `Update 1.0.1`, `Downloading
   42 %`, `Waiting`, `Not for this head unit`, `Failed`, `Restart pending`,
   version and size) and a badge or progress ring. A component for another
   head unit only (the updater's `compat: "no"`) is listed only while
@@ -39,8 +40,8 @@ USB, Settings) beside:
   iDrive 8` (that version is not offered), the failure, `Restart pending`; and what can be done:
   Install, Update to, Try again, Restart head unit, Remove (a confirm step). A second renderer
   installs beside the first.
-- **Installed**: apps and head-unit tools, each with its update (a press on
-  Update installs it) or state, and Update all.
+- **Installed**: apps and head-unit tools, each with its version and
+  source, its update (a press on Update installs it) or state, and Update all.
 - **USB**: the components of the sticks' sources.
 - **Settings**: the sources (each opens its page: channel, account,
   components, error, Remove with a confirm step, and while a sign-in does
@@ -266,15 +267,15 @@ tools/test_screens.js      every drawn screen in iDrive 7's and 8's boxes: in th
 tools/test_store.js        src/store.js's flows against stand-in SDK, RHMI, updater, speller and renderer
 tools/shots.js             screenshots of the drawn screens through mgu-render --replay
 tools/make_icon.py         the 140x140 tile icon
-robertn_store@0.9.2/       staged package tree (no javascript/: the build writes it)
+robertn_store@0.9.3/       staged package tree (no javascript/: the build writes it)
 ```
 
 ## Build
 
 ```sh
 cd apps/robertn_store
-node tools/build.js                                # robertn_store@0.9.2.src.tgz
-node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.2.tgz (MGU_SDK_DONOR)
+node tools/build.js                                # robertn_store@0.9.3.src.tgz
+node tools/build.js --sdk <donor .tgz|.js>         # and robertn_store@0.9.3.tgz (MGU_SDK_DONOR)
 node tools/test_view.js && node tools/test_rhmi.js && node tools/test_qr.js && node tools/test_speller.js &&
     node tools/test_screens.js && node tools/test_store.js && STORE_HMI=ID8 node tools/test_store.js
 (cd ../../native/mgu-render && make test) && node tools/shots.js <out dir>     # screenshots

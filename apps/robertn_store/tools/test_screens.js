@@ -140,8 +140,11 @@ f = frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} });
 eq(f.values.grid.items[1].sub, 'Not installable');
 // two sources' Doom: two tiles, each named with its source; a page follows its row when the install gives it another id
 two.sources = [{ id: 'idrive7-apps', label: 'cauliflowermossgrape/idrive7-apps' }, { id: 'iterio', label: 'https://apps.example.org/index.json' }];
-eq(frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} }).values.grid.items.map((t) => t.title),
-    [`${two.components[0].title} (idrive7-apps)`, `${two.components[1].title} (apps.example.org)`]);
+eq(frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} }).values.grid.items.map((t) => [t.title, t.src]),
+    [['DOOM', 'idrive7-apps'], ['DOOM', 'apps.example.org']]);
+// two sources of the same repo name: owner/repo on each
+two.sources = [{ id: 'idrive7-apps', label: 'one/apps' }, { id: 'iterio', label: 'two/apps' }];
+eq(frame(fixture.model({}, two), { textScale: 1, focus: 0, scroll: {} }).values.grid.items.map((t) => t.src), ['one/apps', 'two/apps']);
 const moved = Object.assign({}, two, { components: [Object.assign({}, two.components[1], { id: 'doom', listedId: null, blocked: null,
     status: 'installed', installed: two.components[1].version })] });
 const followed = frame(fixture.model({ stack: [{ name: 'main' }, { name: 'app', id: 'doom@iterio', source: 'iterio', listed: 'doom' }] }, moved),
@@ -169,6 +172,33 @@ f = screen('installed');
 eq(f.labels[4], 'Update all (1)', 'DOOM downloads and Extended dashboard waits: one update left');
 eq(f.items.find((i) => i.label === 'Update').act, { do: 'install', id: 'gauges' });
 ok(f.labels.indexOf('Display bridge') >= 0 && f.labels.indexOf('M Vitals') < 0, 'installed ones only');
+eq(f.values.apps.items.filter((i) => i.id === 'gauges' || i.id === 'robertn_store').map((i) => i.sub),
+    ['0.7.0 · mgu-store', '1.2.0 → a1b2c3d · idrive7-apps'], 'a row names its source');
+
+// a tile's three lines (title, source, state) stay inside it, in either unit's box
+const { DRAW } = require(path.join(__dirname, '..', 'src', 'am_store_widgets.js'));
+Object.keys(UNITS).forEach((unit) => {
+    const p = UNITS[unit];
+    const def = (p.layout || SCREENS).screens.find((x) => x.name === 'store').components.find((c) => c.name === 'grid');
+    const items = frame(fixture.model({}), { textScale: p.scale, focus: -1, scroll: {}, layout: p.layout }).values.grid.items;
+    const texts = [];
+    const shapes = [];
+    const cv = new Proxy({}, { get: (o, k) => (k === 'text' ? (str, x, y, size) => texts.push({ str, y, size })
+        : k === 'textWidth' ? (str, size) => String(str).length * size * 0.55
+            : (x, y, w, h) => shapes.push({ y, h: h === undefined ? 0 : h })) });
+    DRAW.appGrid(cv, { text: '#fff', dim: '#888' }, { x: def.x, y: def.y, w: def.w, h: def.h }, Object.assign({}, def.opts, { items }));
+    const th = def.opts.tileH;
+    // the first row's texts but the letter tiles' letters
+    const row0 = texts.filter((t) => t.y < def.y + th && t.str.length > 1);
+    eq(row0.slice(0, 3).map((t) => t.str), ['Store', 'mgu-store', 'Installed'], `${unit}: title, source, state`);
+    ok(row0.every((t) => t.y + t.size * 0.3 <= def.y + th), `${unit}: the state line inside its tile (${row0.map((t) => t.y)} of ${def.y + th})`);
+    ok(row0[1].size >= (def.opts.subSize || 30) * 0.85, `${unit}: the source line readable (${row0[1].size} px)`);
+    // owner/repo too long for the tile: the owner shortened, the repo whole
+    texts.length = 0;
+    DRAW.appGrid(cv, { text: '#fff', dim: '#888' }, { x: def.x, y: def.y, w: def.w, h: def.h },
+        Object.assign({}, def.opts, { items: [Object.assign({}, items[0], { src: 'cauliflowermossgrape-and-friends/idrive7-apps' })] }));
+    ok(/^c.*…\/idrive7-apps$/.test(texts.find((t) => /idrive7/.test(t.str)).str), `${unit}: ${texts.map((t) => t.str)}`);
+});
 
 // USB: the stick's components
 f = screen('usb');

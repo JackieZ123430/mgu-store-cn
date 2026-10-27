@@ -27,7 +27,7 @@
  */
 const { PHASE, percent, rowAction, statusLine, sourceLabel, sourceState, sourceActions, sourceChannel, sourceAccount,
     tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress, hmiNames,
-    notForUnit, removable, pickOptions, probeStatus, withSources, listed } = require('./store_view.js');
+    notForUnit, removable, pickOptions, probeStatus, sourceNames, listed } = require('./store_view.js');
 
 const GREEN = '#35d07f';
 const BLUE = '#3d9bff';
@@ -56,8 +56,10 @@ const target = (c) => (c.revision && c.version === c.installed ? c.revision : c.
 const rawComps = (m) => (m.connected && m.st && Array.isArray(m.st.components) ? m.st.components : []);
 /* The components the Store lists (store_view.js listed). */
 function comps(m) {
-    return withSources(rawComps(m).filter(listed), m.st && m.st.sources);
+    return rawComps(m).filter(listed);
 }
+/* The short name of a component's source, '' when the updater names none. */
+const srcName = (m, c) => (c.source && sourceNames(sources(m))[c.source]) || '';
 /* A component's page: its row, else (its row's id changed with an install)
  * the row of the same source and listed id, else (its source turned to a
  * stick copying it, or back) the row of its id. */
@@ -129,8 +131,8 @@ function tileState(c, busy) {
     return { sub: 'Installed', subColor: GREEN, badge: 'installed', progress: -1 };
 }
 
-function tile(c, busy) {
-    return Object.assign(iconOf(c), { id: c.id, title: c.title, act: { do: 'open', page: pageOf(c) } }, tileState(c, busy));
+function tile(m, c, busy) {
+    return Object.assign(iconOf(c), { id: c.id, title: c.title, src: srcName(m, c), act: { do: 'open', page: pageOf(c) } }, tileState(c, busy));
 }
 
 function nav(m, sel) {
@@ -160,7 +162,7 @@ function storeView(m) {
         filter: { sel: Math.max(0, FILTERS.indexOf(m.filter)), acts: FILTERS.map((f) => ({ do: 'filter', filter: f })) },
         online: { items: !m.connected ? [] : checking ? [{ text: 'Checking', color: BLUE, dot: true }]
             : online ? [{ text: 'Online', color: GREEN, dot: true }] : [{ text: 'Offline', color: AMBER, dot: true }] },
-        grid: { items: list.map((c) => tile(c, busy)), empty: m.connected ? 'Nothing here' : '' }
+        grid: { items: list.map((c) => tile(m, c, busy)), empty: m.connected ? 'Nothing here' : '' }
     };
 }
 
@@ -175,7 +177,7 @@ function installedView(m) {
         const up = c.status === 'update' && s.badge === 'update';
         const open = { do: 'open', page: pageOf(c) };
         return Object.assign(iconOf(c), { id: c.id, title: c.title, act: open,
-            sub: up ? `${c.installed} → ${target(c)}` : `${c.installed}${isTool(c) ? ' · tool' : ''}`, subColor: up ? BLUE : DIM,
+            sub: [up ? `${c.installed} → ${target(c)}` : `${c.installed}${isTool(c) ? ' · tool' : ''}`, srcName(m, c)].filter(Boolean).join(' · '), subColor: up ? BLUE : DIM,
             right: up ? 'chip:Update' : s.sub !== 'Installed' ? `chip:${s.sub}` : 'chevron', chipColor: up ? BLUE : s.subColor,
             chipAct: up ? { do: 'install', id: c.id } : null });
     };
@@ -196,7 +198,7 @@ function usbView(m) {
     return {
         title: { text: 'USB' },
         subtitle: { text: usb.length ? `${usb.map(sourceLabel).join(', ')} · ${plural(list.length, 'package')}` : '' },
-        grid: { items: list.map((c) => tile(c, busy)), empty: usb.length ? 'Nothing here' : 'No USB stick' }
+        grid: { items: list.map((c) => tile(m, c, busy)), empty: usb.length ? 'Nothing here' : 'No USB stick' }
     };
 }
 

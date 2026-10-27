@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3
+
+Each Store and USB tile names its source under the title: the repo's
+name, owner/repo where two sources share a repo name, a catalog's host.
+Installed rows name it after the version.
+
 ## 0.9.2
 
 The Store lists only what is for this head unit: an app or tool for the
