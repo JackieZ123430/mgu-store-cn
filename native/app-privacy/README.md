@@ -59,7 +59,9 @@ times in the last 10 minutes, the next crash leaves it stopped, with
 MainApp logging `<appId> is local-only and was restarted 5 times in 10
 minutes; left stopped until it is started again`: an app that crashes on
 every start stops after a few tries. Opening it from its tile starts it
-again, and so does the next boot. A restart that fails counts as a restart.
+again, MainApp may start it again on its own (as it does an app it keeps
+running), and the next boot starts it too. A restart that fails counts;
+a death while the head unit shuts down does not.
 
 Other apps keep the stock ladder.
 
@@ -126,10 +128,5 @@ node native/app-privacy/test/test_patch_mainapp.js
 node native/app-privacy/patch_mainapp.js check-apps apps
 ```
 
-The tests cover the check/apply/revert state machine, fail-closed
-behaviour on a mismatched bundle, composition with other edits, the
-runtime marker and override decision, build-time stamping, `check-apps`
-over this repository's apps, and — when `FIRMWARE_MAINAPP_DIR` names a decoded oap-mainapp —
-patching, parsing and exactly reverting the reference firmware
-bundles, and running the patched crash recovery for a local-only and a
-stock app.
+Set `FIRMWARE_MAINAPP_DIR` to a decoded oap-mainapp folder to also test
+against its bundles; `run.sh` passes it into the container.

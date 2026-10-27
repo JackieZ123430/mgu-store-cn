@@ -127,21 +127,38 @@ function ins(before, insert, after, n) {
 
 // MainApp's CorruptAppsHandler restarts a crashed app, then wipes its data,
 // then uninstalls and reinstalls it, then blocks it and disables its tile.
-// For a local-only app every crash takes the first step, a plain restart,
-// by holding the handler's counter at 0. A crash beyond CRASH_RESTARTS
-// within CRASH_WINDOW_MS (a failed restart counts) leaves the app stopped:
-// installed, its data kept and its tile enabled, so starting it again from
-// the tile or a reboot runs it, and a crash loop ends after a few starts.
+// For a local-only app every crash takes the first step, a plain restart:
+// the handler's counter stays at 0 between crashes. An app found local-only
+// once stays so for that MainApp's life (its localOnlyRestarts list), so a
+// failed read of its files cannot send its next crash down the ladder.
+// Only restarts MainApp goes on to make count (not a death while the head
+// unit shuts down; a failed restart does count): after CRASH_RESTARTS of
+// them within CRASH_WINDOW_MS, the next crash leaves the app stopped,
+// installed, its data kept and its tile enabled. Starting it again (its
+// tile, MainApp's own start of an app it keeps running, a reboot) runs it,
+// and a crash loop ends after a few starts. The gate logs through MainApp's
+// logger when that binding is there, else the console.
 const CRASH_RESTARTS = 5;
 const CRASH_WINDOW_MS = 10 * 60 * 1000;
+const CRASH_GATE_BEFORE =
+    'appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],{recoveryAttemptsSinceCorruption:0});';
 const CRASH_GATE_JS =
-    'if(isLocalOnlyApp(appId)){const now=Date.now(),' +
+    'if(appCorruptInfo.localOnlyRestarts||isLocalOnlyApp(appId)){const now=Date.now(),' +
     'restarts=appCorruptInfo.localOnlyRestarts=(appCorruptInfo.localOnlyRestarts||[])' +
     '.filter(at=>now-at<' + CRASH_WINDOW_MS + ');' +
-    'if(restarts.length>=' + CRASH_RESTARTS + ')return logger.warn(`${logPrefix} ${appId} is local-only ' +
+    'if(restarts.length>=' + CRASH_RESTARTS + '){' +
+    'const log=typeof logger==="object"&&logger&&typeof logger.warn==="function"?logger:console;' +
+    'return log.warn(`CorruptAppsHandler::_tryRecoverApp ${appId} is local-only ' +
     'and was restarted ' + CRASH_RESTARTS + ' times in ' + CRASH_WINDOW_MS / 60000 + ' minutes; ' +
-    'left stopped until it is started again.`),Promise.resolve();' +
-    'restarts.push(now),appCorruptInfo.recoveryAttemptsSinceCorruption=0}else ';
+    'left stopped until it is started again.`),Promise.resolve()}' +
+    'appCorruptInfo.recoveryAttemptsSinceCorruption=0}else ';
+// At the restart, after MainApp's head-unit-shutdown check.
+const CRASH_COUNT_JS = 'appCorruptInfo.localOnlyRestarts&&(appCorruptInfo.recoveryAttemptsSinceCorruption=0,' +
+    'appCorruptInfo.localOnlyRestarts.push(Date.now())),';
+const CRASH_EDITS = [
+    ins(CRASH_GATE_BEFORE, CRASH_GATE_JS, 'buildAnalyticsService()', 1),
+    ins('appCorruptInfo.recoveryAttemptsSinceCorruption++,', CRASH_COUNT_JS, 'app.updateStartableCouncil(', 1)
+];
 
 const KEEP_APP = '.filter(app=>!isLocalOnlyApp(app.getAppId()))';
 const KEEP_APP_ID = '.filter(appId=>!isLocalOnlyApp(appId))';
@@ -163,11 +180,9 @@ const MAIN_PATCHES = [
     ins('this.appRegistry.getAll()', KEEP_APP, ',app=>{const appId', 1),
     // Platform analytics APP_INSTALL events, success and failure.
     ins('appId&&', '!isLocalOnlyApp(appId)&&', 'AnalyticsServiceBuilders_1', 2),
-    // Crash recovery: a local-only app is only restarted, at most
-    // CRASH_RESTARTS times per CRASH_WINDOW_MS, and sends no APP_CRASH
-    // analytics event. Other apps keep MainApp's recovery and its event.
-    ins('appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],{recoveryAttemptsSinceCorruption:0});',
-        CRASH_GATE_JS, 'buildAnalyticsService()', 1),
+    // Crash recovery, and no APP_CRASH analytics event for local-only apps.
+    CRASH_EDITS[0],
+    CRASH_EDITS[1],
     // The corrupt-app report.
     ins('()=>', 'isLocalOnlyApp(appId)?Promise.resolve():', 'this._backendTransport.reportCorruptApp(appId,version', 1),
     // Periodic autonomous update of every app, and the user-triggered
@@ -209,9 +224,7 @@ const PATCH_SETS = { main: MAIN_PATCHES, appmanagement: APPMANAGEMENT_PATCHES };
 function withHelper(patches, helper) {
     return patches.map((p) => [p[0], p[1].split(HELPER_JS).join(helper), p[2]]);
 }
-const CRASH_GATE_ANCHOR = 'appCorruptInfo=_.defaults(this._appIdToCorruptAppInfo[appId],' +
-    '{recoveryAttemptsSinceCorruption:0});buildAnalyticsService()';
-const MAIN_PATCHES_1_2_2 = MAIN_PATCHES.map((p) => p[0] === CRASH_GATE_ANCHOR ?
+const MAIN_PATCHES_1_2_2 = MAIN_PATCHES.filter((p) => p !== CRASH_EDITS[1]).map((p) => p === CRASH_EDITS[0] ?
     ins('Corruption:0});', 'isLocalOnlyApp(appId)||', 'buildAnalyticsService()', 1) : p);
 const EARLIER_PATCH_SETS = [
     { version: '1.2.2', main: MAIN_PATCHES_1_2_2, appmanagement: APPMANAGEMENT_PATCHES },

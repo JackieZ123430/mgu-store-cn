@@ -203,7 +203,7 @@ test('boot exits 0 on a mismatch and leaves the files', () => withBundles((b) =>
 
 // sha256 of JSON.stringify(PATCH_SETS) as shipped by 1.3.0, and of the
 // earlier entries of EARLIER_PATCH_SETS.
-const PATCH_SETS_SHA256 = '06c9bd5e5a1cc9aa85f77579fdc688f34d2655d2589beab20a3de59519b5d452';
+const PATCH_SETS_SHA256 = 'a83ed0b557ee2ab52871388768f6e06bad255fbcb08c947e378db2872a310eed';
 const EARLIER_SETS_SHA256 = {
     '1.2.2': 'd494bf13326a07a6275f762b25d0639efb6eb12258718289000bb05ecbca5d8c',
     '1.1.0': '65fdf5a71cb95d465b37811cb2f326495686d4edcbd33566c07bad6c3ddc484e'
@@ -213,7 +213,7 @@ const EARLIER_SETS_SHA256 = {
 // (and 1.0.0's).
 const PATCHED_SHA256 = {
     current: {
-        main: 'bad6cd0b7ee0ab5a1b928bc32b4aa76059eb2c7d856c8e5dbb444672d61b4a85',
+        main: '51d714ea0cd3e1127924fd1779b3cac82938715ee89c9e89e83351c80f347c8e',
         appmanagement: '4582ab2a6a674a9fb6e1d544dd10674f9785d0906d4478b1dae625734d609997'
     },
     '1.2.2': {
@@ -737,17 +737,20 @@ test('reference firmware bundles patch, upgrade, parse and revert exactly', () =
 
 /* The reference firmware's CorruptAppsHandler module, patched, run against
  * fake collaborators. apps maps appId to { start } (start(args) returns a
- * promise); local-only apps are named by the override list. Returns the
- * handler, what it did (events) and the clock. */
+ * promise); local-only apps are named by the override list, which reads
+ * as missing while state.unreadable is set. Returns the handler, what it
+ * did (events), the clock and state (shuttingDown: the head unit shuts
+ * down). */
 function crashHandler(root, apps, localOnly) {
     const main = patcher.applyPatches(fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8'),
         patcher.PATCH_SETS.main);
     const source = main.split('\n').filter((l) => l.indexOf('class CorruptAppsHandler{') >= 0)[0];
     const events = [];
     const clock = { now: 1e12 };
+    const state = { unreadable: false, shuttingDown: false };
     const log = (kind) => (id) => { events.push([kind, id]); return Promise.resolve(); };
     const fakeFs = { readFileSync: (file) => {
-        if (file === patcher.OVERRIDE_FILE) {
+        if (file === patcher.OVERRIDE_FILE && !state.unreadable) {
             return JSON.stringify(localOnly);
         }
         const e = new Error('ENOENT: ' + file);
@@ -771,7 +774,7 @@ function crashHandler(root, apps, localOnly) {
     Object.keys(apps).forEach((id) => {
         registry[id] = {
             getAppId: () => id, getSettings: () => ({ version: '1.0.0' }), getUserId: () => Promise.resolve(id),
-            unregisterAllParticipantIds: () => Promise.resolve(), isHeadUnitShuttingDown: () => false,
+            unregisterAllParticipantIds: () => Promise.resolve(), isHeadUnitShuttingDown: () => state.shuttingDown,
             council: {}, updateStartableCouncil(k, v) { this.council[k] = v; },
             isStartable() { return Object.keys(this.council).every((k) => this.council[k]); },
             getLastStartArguments: () => [], on() {},
@@ -799,7 +802,7 @@ function crashHandler(root, apps, localOnly) {
     });
     const crash = (id) => handler._handleAppTerminated(registry[id]);
     const kinds = (id) => events.filter((e) => e[1] === id).map((e) => e[0]);
-    return { events, clock, crash, kinds, registry };
+    return { events, clock, state, crash, kinds, registry, handler };
 }
 
 /* n crashes of appId, one after the other. */
@@ -853,6 +856,33 @@ test('reference firmware: a local-only app whose restart fails is tried 5 times'
     return h.crash('ours').then(() => {
         assert.deepStrictEqual(h.kinds('ours'), ['start', 'start', 'start', 'start', 'start', 'warn']);
         assert.strictEqual(h.registry.ours.isStartable(), true);
+    });
+});
+
+test('reference firmware: a local-only app stays so through a failed read, and shutdown deaths do not count', () => {
+    const root = firmwareDir();
+    if (!root) {
+        return 'skipped: decoded oap-mainapp not available';
+    }
+    const ok = () => Promise.resolve();
+    const h = crashHandler(root, { ours: { start: ok } }, ['ours']);
+    const starts = () => h.kinds('ours').filter((k) => k === 'start').length;
+    return h.crash('ours').then(() => {
+        assert.strictEqual(h.handler.getRecoveryAttempt('ours'), 0);
+        h.state.unreadable = true;
+        return crashes(h, 'ours', 2);
+    }).then(() => {
+        assert.strictEqual(starts(), 3);
+        h.state.unreadable = false;
+        h.state.shuttingDown = true;
+        return crashes(h, 'ours', 4);
+    }).then(() => {
+        assert.strictEqual(starts(), 3);
+        h.state.shuttingDown = false;
+        return crashes(h, 'ours', 3);
+    }).then(() => {
+        assert.strictEqual(starts(), 5);
+        assert.deepStrictEqual(h.kinds('ours').filter((k) => k !== 'start'), ['warn']);
     });
 });
 
