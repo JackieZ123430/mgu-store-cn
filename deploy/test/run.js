@@ -1832,14 +1832,14 @@ function testPrivacyTool() {
     fs.writeFileSync(path.join(root.R, 'usr/lib/oap-mainapp/package.json'), JSON.stringify({ version: '7.9.9' }));
     r = root.run(['install', '--artifact', privacyTool('1.0.0', 0, 0, true), '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
     check('privacy tool: a first install on a MainApp it does not fit is refused before anything changes, naming why',
-        r.status === 2 && r.out.includes("app-privacy 1.0.0: this head unit's MainApp 7.9.9 is a version it does not support " +
+        r.status === 2 && r.out.includes("app-privacy 1.0.0: its edits do not fit this head unit's MainApp 7.9.9 " +
             '(main.js: anchor "class AppsAutoupdater{...": 0 occurrence(s), expected 1); nothing was installed') &&
         JSON.stringify(plog(root)) === JSON.stringify(['1.0.0 check --json']) && !fs.existsSync(root.tool('app-privacy')) &&
         !fs.existsSync(root.tool('mgu-deploy')), `${r.out}\n${plog(root).join('\n')}`);
-    r = root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
+    root.run(['install', '--artifact', privacyTool('1.0.0', 0), '--yes']);
     r = root.run(['install', '--artifact', privacyTool('1.0.1', 0, 0, true), '--yes']);
     check('privacy tool: an update that does not fit the MainApp is refused, the installed version stays',
-        r.status === 2 && r.out.includes('app-privacy 1.0.1: this head unit\'s MainApp 7.9.9 is a version it does not support') &&
+        r.status === 2 && r.out.includes('app-privacy 1.0.1: its edits do not fit this head unit\'s MainApp 7.9.9') &&
         fs.readlinkSync(path.join(root.tool('app-privacy'), 'current')) === 'versions/1.0.0' &&
         !fs.existsSync(path.join(root.tool('app-privacy'), 'versions/1.0.1')), r.out);
 

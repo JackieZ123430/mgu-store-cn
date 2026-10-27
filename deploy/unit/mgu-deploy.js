@@ -1487,7 +1487,8 @@ function privacyApplyAndBounce(state) {
     return { ok: true };
 }
 /* app-privacy's JSON result of a refusal: the MainApp bundles do not
- * match its edits, as on a MainApp version it was not made for. */
+ * match its edits (a MainApp version it was not made for, or bundles
+ * carrying a newer app-privacy's edits). */
 function privacyMismatch(result) {
     if (result.state !== 'mismatch' || !Array.isArray(result.files)) return '';
     var problems = [];
@@ -1495,8 +1496,8 @@ function privacyMismatch(result) {
         (f.problems || []).forEach(function (p) { problems.push(path.basename(f.path || f.kind || '') + ': ' + p); });
     });
     var pkg = readJsonOrNull(path.join(mainappRoot(), 'package.json'));
-    return ': this head unit\'s MainApp' + (pkg && pkg.version ? ' ' + pkg.version : '') +
-        ' is a version it does not support (' + problems.join('; ') + ')';
+    return ': its edits do not fit this head unit\'s MainApp' + (pkg && pkg.version ? ' ' + pkg.version : '') +
+        ' (' + problems.join('; ') + ')';
 }
 /* Before anything changes: the app-privacy this install brings must fit
  * this head unit's MainApp, else the install is refused and the car stays
@@ -4135,16 +4136,6 @@ function cmdInstall(args) {
             }
         });
         if (!unitInfo().hmi) warn('which head unit this is is unknown (' + unitInfo().basis + '): mguHmi is not checked');
-        var decisions = {};
-        validated.forEach(function (a) {
-            if (a.kind === 'app') decisions[a.id] = appDecision(a, args.skipOlder);
-            /* the installed version again on iDrive 8: a queued removal of it is dropped */
-            if (id8 && a.kind === 'app' && decisions[a.id].action === 'current' &&
-                readPending().some(function (c) { return c.id === a.id && c.action === 'remove'; })) {
-                queueId8({ id: a.id });
-                say('the queued removal of ' + a.id + ' is dropped');
-            }
-        });
         if (args.skipOlder) {
             var tools = installedTools();
             validated = validated.filter(function (a) {
@@ -4155,6 +4146,16 @@ function cmdInstall(args) {
             });
         }
         preflightPrivacy(validated);
+        var decisions = {};
+        validated.forEach(function (a) {
+            if (a.kind === 'app') decisions[a.id] = appDecision(a, args.skipOlder);
+            /* the installed version again on iDrive 8: a queued removal of it is dropped */
+            if (id8 && a.kind === 'app' && decisions[a.id].action === 'current' &&
+                readPending().some(function (c) { return c.id === a.id && c.action === 'remove'; })) {
+                queueId8({ id: a.id });
+                say('the queued removal of ' + a.id + ' is dropped');
+            }
+        });
         var work = validated.filter(function (a) {
             return a.kind !== 'app' || ['current', 'older'].indexOf(decisions[a.id].action) < 0;
         }).map(function (a) { return a.kind !== 'app' ? a : id8 ? id8Package(a, stage) : prepareApp(a, stage); });
