@@ -35,7 +35,7 @@ every 2 s:
 | Kind | Devices | How |
 |---|---|---|
 | `usb` | a USB Ethernet adapter the kernel drives (`asix`, `ax88179_178a`, `smsc95xx` on the unit), for example an AX88179 cabled to an LTE router | the kernel's interface, renamed to `vethuplink` and given its name back on stop |
-| `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`), any ECM device in `auto` | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode with the usb_modeswitch Huawei message |
+| `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`) or any other ECM device | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode with the usb_modeswitch Huawei message |
 | `rndis` | an Android phone in USB tethering: most phones (AOSP's default); control interface `e0/01/03`, `02/02/ff` or `ef/04/01` | usbfs, RNDIS (rndis.go) |
 | `ncm` | an Android phone in USB tethering presenting CDC-NCM: Pixel 6 and later | usbfs, NCM transfer blocks (ncm.go) |
 | `iphone` | an iPhone with Personal Hotspot on | usbfs: taken from the media daemon with the sysfs `authorized` toggle, configuration 4, paired over its usbmux interface (pairing.go), the hotspot interface as Linux's `ipheth` drives it (iphone.go) |
@@ -83,8 +83,11 @@ or has forgotten it (Settings → General → Transfer or Reset iPhone → Reset
 Location & Privacy), is paired again. The unit's host identity (keys and
 certificates, HostID, SystemBUID) is made once and kept in
 `/var/opt/mgu-uplink/pairing/host.json` (root only), which updates keep;
-deleting it makes the unit a new computer for every phone. A phone that
-trusts the unit but sends nothing for 20 s is taken again.
+deleting it makes the unit a new computer for every phone. When the owner
+answers "Don't Trust", the phone goes back to media and is left alone
+until it is plugged in again. A phone that trusts the unit but sends
+nothing for 20 s is taken again, waiting twice as long each time in a row
+(up to 5 minutes) until data flows.
 
 On the head unit a stock media daemon grabs a
 connected iPhone and holds it on configuration 2 (iAP/iPod media); the uplink
@@ -120,7 +123,7 @@ the Store and the phone page:
 | `searching` | no usable device (`device` null) |
 | `connecting` | the device is being set up, or waits for its DHCP lease; `error` may say why (`"Personal Hotspot is off"`) |
 | `trust-needed` | an iPhone waits for its owner to tap Trust and enter the passcode, or to unlock it; `error` says what to do |
-| `busy` | another driver or process holds the device; it is left alone |
+| `busy` | another driver or process holds the device, or the owner declined Trust on the iPhone (until it is plugged in again); it is left alone |
 | `online` | there is a lease |
 | `error` | setting the device up failed (`error`); it is tried again after 15 s |
 

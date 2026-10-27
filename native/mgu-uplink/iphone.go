@@ -54,9 +54,11 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -67,9 +69,8 @@ const (
 	iphethCarrier     = 0x45
 	iphethCarrierOn   = 0x04
 	iphethRx          = 65536
-	iphethRxTimeout   = 1000          // ms
-	iphethNCMMin      = nth16Len + 8  // NTH16 and the NDP16 header
-	iphethNCMHeader   = nth16Len + 96 // NTH16 and the fixed-size NDP16 the phone sends
+	iphethRxTimeout   = 1000         // ms
+	iphethNCMMin      = nth16Len + 8 // NTH16 and the NDP16 header
 	iphethNDPMaxDPE   = 22
 	iphethCarrierPoll = time.Second
 
@@ -94,8 +95,14 @@ const (
 
 	// iphoneStallAfter: a phone that trusts the unit and shares its hotspot
 	// but has sent nothing this long after the session is taken again, as
-	// unplugging and replugging it would.
+	// unplugging and replugging it would; the wait doubles with each retake
+	// in a row, up to iphoneStallMax.
 	iphoneStallAfter = 20 * time.Second
+	iphoneStallMax   = 5 * time.Minute
+
+	// iphoneDeclinedNote is the status while a phone whose owner declined
+	// Trust is left alone.
+	iphoneDeclinedNote = "Trust was declined: plug the iPhone in again"
 )
 
 // openIPhoneLink takes the iPhone from the media daemon, brings its hotspot
@@ -146,7 +153,7 @@ func openIPhoneLink(ctx context.Context, info usbDeviceInfo, fn netFunction, pai
 	dev.clearHalt(fn.bulkIn)
 	dev.clearHalt(fn.bulkOut)
 	logf("iPhone %s: hotspot interface %d, MAC %s, NCM receive %v, carrier %v", cur, fn.dataIface, net.HardwareAddr(mac), ncm, carrier)
-	fr := &iphethFramer{dev: dev, iface: iface, ncm: ncm, authPath: authorizedPath(cur),
+	fr := &iphethFramer{dev: dev, iface: iface, ncm: ncm, authPath: authorizedPath(cur), sysName: cur.sysName, devnum: cur.dev,
 		p: usbPipe{dev: dev, in: fn.bulkIn, out: fn.bulkOut, outPacket: fn.outPacket}, mux: mux, pairDir: pairDir}
 	setLinkNote("")
 	setLinkTrust(false, "")
@@ -279,6 +286,8 @@ type iphethFramer struct {
 	iface    uint16
 	ncm      bool
 	authPath string
+	sysName  string   // USB position
+	devnum   int      // device number of this attachment
 	mux      *usbPipe // the usbmux interface, nil when it could not be claimed
 	pairDir  string
 	gotRx    int32 // a transfer has arrived, or the phone trusts the unit: carrier checks begin
@@ -355,7 +364,7 @@ func (f *iphethFramer) background(stop <-chan struct{}, fail func(error)) {
 		ended := make(chan struct{})
 		go func() {
 			defer close(ended)
-			f.trust(ctx, trusted)
+			f.trust(ctx, trusted, fail)
 		}()
 		defer func() {
 			cancel()
@@ -366,22 +375,29 @@ func (f *iphethFramer) background(stop <-chan struct{}, fail func(error)) {
 	defer t.Stop()
 	buf := make([]byte, 64)
 	var trustedAt time.Time
+	var stallWait time.Duration
+	dataSeen := false
 	for {
 		select {
 		case <-stop:
 			return
 		case <-trusted:
 			atomic.StoreInt32(&f.gotRx, 1)
-			trusted, trustedAt = nil, time.Now()
+			trusted, trustedAt, stallWait = nil, time.Now(), iphoneStallWait(f.sysName)
 			continue
 		case <-t.C:
 		}
 		if atomic.LoadInt32(&f.gotRx) == 0 {
 			continue
 		}
-		if !trustedAt.IsZero() && atomic.LoadInt32(&f.rxData) == 0 && atomic.LoadInt32(&f.carrier) != 2 &&
-			time.Since(trustedAt) > iphoneStallAfter {
-			fail(fmt.Errorf("the iPhone trusts the unit but sent nothing in %s; taking it again", iphoneStallAfter))
+		if !dataSeen && atomic.LoadInt32(&f.rxData) == 1 {
+			dataSeen = true
+			iphoneStalled(f.sysName, false)
+		}
+		if !trustedAt.IsZero() && !dataSeen && atomic.LoadInt32(&f.carrier) != 2 &&
+			time.Since(trustedAt) > stallWait {
+			iphoneStalled(f.sysName, true)
+			fail(fmt.Errorf("the iPhone trusts the unit but sent nothing in %s; taking it again", stallWait))
 			return
 		}
 		n, err := f.dev.control(0xc0, iphethCarrier, 0, f.iface, buf, 5000)
@@ -405,17 +421,20 @@ func (f *iphethFramer) background(stop <-chan struct{}, fail func(error)) {
 	}
 }
 
-// trust runs the lockdown session (pairing first when needed) on the
-// usbmux interface until it succeeds or ctx ends, and closes trusted when
-// it succeeds. It is the only writer of the Trust note.
-func (f *iphethFramer) trust(ctx context.Context, trusted chan<- struct{}) {
+// trust sets usbmux up on the phone's usbmux interface (asked again while
+// the phone does not answer) and gets the phone to trust the unit on that
+// one usbmux session, retrying until it does or ctx ends; trusted is
+// closed when it does. A declined Trust, or a usbmux session that ended,
+// ends the link through fail, which hands the phone back to the media
+// daemon; a declined phone is then left alone until it is plugged in
+// again. trust is the only writer of the Trust note.
+func (f *iphethFramer) trust(ctx context.Context, trusted chan<- struct{}, fail func(error)) {
 	defer setLinkTrust(false, "")
+	var m *usbMux
 	for {
-		err := f.trustOnce(ctx)
-		if err == nil {
-			logf("iPhone: trusted (lockdown session as the paired host)")
-			close(trusted)
-			return
+		var err error
+		if m, err = openMux(*f.mux); err == nil {
+			break
 		}
 		if ctx.Err() != nil {
 			return
@@ -425,16 +444,76 @@ func (f *iphethFramer) trust(ctx context.Context, trusted chan<- struct{}) {
 			return
 		}
 	}
-}
-
-func (f *iphethFramer) trustOnce(ctx context.Context) error {
-	m, err := openMux(*f.mux)
-	if err != nil {
-		return err
-	}
 	defer m.Close()
 	defer context.AfterFunc(ctx, m.Close)() // a stop ends any request in flight
-	return iphoneTrust(ctx, m, f.pairDir, func(msg string) { setLinkTrust(msg != "", msg) })
+	err := iphoneTrustRetrying(ctx, m, f.pairDir, func(msg string) { setLinkTrust(msg != "", msg) }, iphoneTrustRetry)
+	switch {
+	case err == nil:
+		logf("iPhone: trusted (lockdown session as the paired host)")
+		close(trusted)
+	case ctx.Err() != nil:
+	case errors.Is(err, errTrustDenied):
+		declineIPhone(f.sysName, f.devnum)
+		fail(fmt.Errorf("%w; it goes back to media until it is plugged in again", err))
+	default:
+		fail(err)
+	}
+}
+
+// iphoneDeclined is, per USB position, the device number of an iPhone whose
+// owner declined Trust. It is left to the media daemon until it is plugged
+// in again, which gives it a new device number (the authorized toggle keeps
+// it).
+var iphoneDeclined = struct {
+	sync.Mutex
+	dev map[string]int
+}{dev: map[string]int{}}
+
+func declineIPhone(sysName string, devnum int) {
+	iphoneDeclined.Lock()
+	iphoneDeclined.dev[sysName] = devnum
+	iphoneDeclined.Unlock()
+}
+
+// iphoneIsDeclined reports whether info is an iPhone whose owner declined
+// Trust and that has not been plugged in again since.
+func iphoneIsDeclined(info usbDeviceInfo) bool {
+	iphoneDeclined.Lock()
+	defer iphoneDeclined.Unlock()
+	d, ok := iphoneDeclined.dev[info.sysName]
+	if ok && d != info.dev {
+		delete(iphoneDeclined.dev, info.sysName)
+		return false
+	}
+	return ok
+}
+
+// iphoneStalls counts, per USB position, the times in a row a trusted
+// iPhone was taken again for sending nothing: each one doubles the wait
+// before the next, up to iphoneStallMax; data from the phone resets it.
+var iphoneStalls = struct {
+	sync.Mutex
+	n map[string]int
+}{n: map[string]int{}}
+
+func iphoneStallWait(sysName string) time.Duration {
+	iphoneStalls.Lock()
+	defer iphoneStalls.Unlock()
+	d := iphoneStallAfter
+	for i := 0; i < iphoneStalls.n[sysName] && d < iphoneStallMax; i++ {
+		d *= 2
+	}
+	return min(d, iphoneStallMax)
+}
+
+func iphoneStalled(sysName string, stalled bool) {
+	iphoneStalls.Lock()
+	defer iphoneStalls.Unlock()
+	if stalled {
+		iphoneStalls.n[sysName]++
+	} else {
+		delete(iphoneStalls.n, sysName)
+	}
 }
 
 // halt reauthorizes the device on stop, so it re-enumerates at its default

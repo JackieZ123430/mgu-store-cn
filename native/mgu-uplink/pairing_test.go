@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -22,9 +24,9 @@ import (
 
 func TestPlistRoundTrip(t *testing.T) {
 	in := map[string]any{
-		"Request": "Pair", "ProtocolVersion": "2", "Flag": true, "Off": false, "Port": int64(62078),
+		"Request": "Pair", "ProtocolVersion": "2", "Flag": true, "Off": false,
 		"Data": []byte{0, 1, 2, 0xff}, "Esc": "a<b>&c",
-		"PairRecord": map[string]any{"HostID": "ABC"}, "List": []any{"x", int64(1)},
+		"PairRecord": map[string]any{"HostID": "ABC"},
 	}
 	doc, err := plistEncode(in)
 	if err != nil {
@@ -41,6 +43,14 @@ func TestPlistRoundTrip(t *testing.T) {
 	v, err := plistDecode([]byte("<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>Value</key>\n\t<data>\n\tAAEC\n\t/w==\n\t</data>\n</dict>\n</plist>\n"))
 	if err != nil || !bytes.Equal(v.(map[string]any)["Value"].([]byte), []byte{0, 1, 2, 0xff}) {
 		t.Fatalf("pretty data: %v %v", v, err)
+	}
+	// Integers and arrays only come from the phone.
+	v, err = plistDecode([]byte(`<plist><dict><key>Port</key><integer> 62078 </integer><key>L</key><array><string>x</string><integer>1</integer></array></dict></plist>`))
+	if err != nil || !reflect.DeepEqual(v, map[string]any{"Port": int64(62078), "L": []any{"x", int64(1)}}) {
+		t.Fatalf("integer and array: %v %v", v, err)
+	}
+	if _, err := plistEncode(map[string]any{"Port": 1}); err == nil {
+		t.Fatal("encoded a type no request carries")
 	}
 	if _, err := plistDecode([]byte("bplist00")); err == nil {
 		t.Fatal("binary plist accepted")
@@ -159,6 +169,9 @@ type fakePhone struct {
 	v2       bool
 	conns    map[uint16]*fakeConn // by the host's port
 	tapped   bool
+	denied   bool // the owner answered "Don't Trust"
+	failSess int  // StartSession requests still to refuse with a transient error
+	nVersion int
 	host     string // paired HostID
 	hostCert []byte
 	nSession int
@@ -197,6 +210,13 @@ func (p *fakePhone) tap() {
 	}
 }
 
+// deny is the owner answering "Don't Trust": the next Pair is refused.
+func (p *fakePhone) deny() {
+	p.mu.Lock()
+	p.denied = true
+	p.mu.Unlock()
+}
+
 // pipe is a fresh connection of the cable: usbmux starts over.
 func (p *fakePhone) pipe() muxPipe {
 	p.mu.Lock()
@@ -227,6 +247,9 @@ func (f fakePipe) write(b []byte, zlp bool) error {
 	p.mu.Unlock()
 	switch proto {
 	case muxProtoVersion:
+		p.mu.Lock()
+		p.nVersion++
+		p.mu.Unlock()
 		if v2 || len(b) != 20 || binary.BigEndian.Uint32(b[8:]) != 2 {
 			p.t.Errorf("VERSION % x", b)
 		}
@@ -357,7 +380,7 @@ func (p *fakePhone) lockdown(conn net.Conn) {
 		}
 		resp, startTLS := p.answer(req)
 		resp["Request"] = req["Request"]
-		plistSend(rw, resp)
+		fakePlistSend(rw, resp)
 		if startTLS {
 			tc := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{p.tlsKey}, ClientAuth: tls.RequireAnyClientCert})
 			if err := tc.Handshake(); err != nil {
@@ -394,12 +417,19 @@ func (p *fakePhone) answer(req map[string]any) (map[string]any, bool) {
 			return map[string]any{"Port": int64(4000)}, false
 		}
 	case "StartSession":
+		if p.failSess > 0 {
+			p.failSess--
+			return map[string]any{"Error": "SessionInactive"}, false
+		}
 		if p.host == "" || req["HostID"] != p.host {
 			return map[string]any{"Error": "InvalidHostID"}, false
 		}
 		return map[string]any{"SessionID": "S1", "EnableSessionSSL": true}, true
 	case "Pair":
 		p.nPair++
+		if p.denied {
+			return map[string]any{"Error": "UserDeniedPairing"}, false
+		}
 		if !p.tapped {
 			return map[string]any{"Error": "PairingDialogResponsePending"}, false
 		}
@@ -424,4 +454,117 @@ func mustCertNoT(p []byte) *x509.Certificate {
 	}
 	c, _ := x509.ParseCertificate(b.Bytes)
 	return c
+}
+
+// fakePlistSend is plistSend for the phone's answers, which also carry
+// integers (StartService's Port).
+func fakePlistSend(w io.Writer, resp map[string]any) error {
+	ints := map[string]int64{}
+	for k, v := range resp {
+		if i, ok := v.(int64); ok {
+			ints[k] = i
+			resp[k] = fmt.Sprintf("@int%d@", i)
+		}
+	}
+	doc, err := plistEncode(resp)
+	if err != nil {
+		return err
+	}
+	for _, i := range ints {
+		doc = bytes.ReplaceAll(doc, []byte(fmt.Sprintf("<string>@int%d@</string>", i)), []byte(fmt.Sprintf("<integer>%d</integer>", i)))
+	}
+	msg := make([]byte, 4+len(doc))
+	binary.BigEndian.PutUint32(msg, uint32(len(doc)))
+	copy(msg[4:], doc)
+	_, err = w.Write(msg)
+	return err
+}
+
+// "Don't Trust": pairing ends with errTrustDenied after the next Pair
+// asks, the phone is not asked again on this connection, and the declined
+// phone is left alone until it comes back with a new device number.
+func TestIPhoneTrustDenied(t *testing.T) {
+	defer func(d time.Duration) { pairRetry = d }(pairRetry)
+	pairRetry = 200 * time.Millisecond
+	phone := newFakePhone(t)
+	m, err := openMux(phone.pipe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	var notes []string
+	note := func(s string) {
+		notes = append(notes, s)
+		if s == trustTapNote {
+			phone.deny()
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = iphoneTrustRetrying(ctx, m, t.TempDir(), note, 50*time.Millisecond)
+	if !errors.Is(err, errTrustDenied) {
+		t.Fatalf("got %v, want errTrustDenied", err)
+	}
+	if phone.pairs() != 2 || phone.pairedHost() != "" || !reflect.DeepEqual(notes, []string{trustTapNote}) {
+		t.Fatalf("pairs %d, paired %q, notes %q", phone.pairs(), phone.pairedHost(), notes)
+	}
+	info := usbDeviceInfo{sysName: "1-3.1", dev: 9}
+	declineIPhone(info.sysName, info.dev)
+	if !iphoneIsDeclined(info) || !iphoneIsDeclined(info) {
+		t.Fatal("the declined phone is taken again")
+	}
+	info.dev = 10 // plugged in again
+	if iphoneIsDeclined(info) {
+		t.Fatal("a replugged phone stays declined")
+	}
+	info.dev = 9
+	if iphoneIsDeclined(info) {
+		t.Fatal("the mark outlived the replug")
+	}
+}
+
+// A failed session is retried on the same usbmux session: VERSION is sent
+// once.
+func TestIPhoneTrustRetrySameMux(t *testing.T) {
+	phone := newFakePhone(t)
+	dir := t.TempDir()
+	id, _ := loadHostIdentity(dir)
+	phone.mu.Lock()
+	phone.host, phone.failSess = id.HostID, 2
+	hb, _ := pem.Decode([]byte(id.HostCertificate))
+	phone.hostCert = hb.Bytes
+	phone.mu.Unlock()
+	m, err := openMux(phone.pipe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := iphoneTrustRetrying(ctx, m, dir, func(string) {}, 20*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	phone.mu.Lock()
+	defer phone.mu.Unlock()
+	if phone.nVersion != 1 || phone.nSession != 1 || phone.nPair != 0 {
+		t.Fatalf("VERSION %d, sessions %d, pairs %d", phone.nVersion, phone.nSession, phone.nPair)
+	}
+}
+
+func TestIPhoneStallWait(t *testing.T) {
+	const sys = "test-stall"
+	defer iphoneStalled(sys, false)
+	var got []time.Duration
+	for i := 0; i < 6; i++ {
+		got = append(got, iphoneStallWait(sys))
+		iphoneStalled(sys, true)
+	}
+	want := []time.Duration{20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("waits %v", got)
+	}
+	iphoneStalled(sys, false)
+	if iphoneStallWait(sys) != 20*time.Second {
+		t.Fatal("data did not reset the wait")
+	}
 }

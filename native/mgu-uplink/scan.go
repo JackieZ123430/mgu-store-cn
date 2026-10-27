@@ -98,9 +98,8 @@ func (u *scanUplink) candidates() []candidate {
 			if apple && kind != kindIPhone {
 				continue
 			}
-			// The iPhone path reauthorizes the device, which changes its
-			// device number, so key its attempt on the stable bus position
-			// instead; otherwise a failed open would never back off.
+			// The iPhone's attempt is keyed on its bus position, so a
+			// failed open backs off however the device re-enumerates.
 			key := kind + ":" + info.key()
 			if kind == kindIPhone {
 				key = kind + ":" + info.sysName
@@ -118,8 +117,11 @@ func (u *scanUplink) candidates() []candidate {
 			}
 			c.fn = fn
 			// The uplink takes an iPhone from the media daemon itself
-			// (iphone.go), so a held iPhone is not left alone.
-			if kind != kindIPhone {
+			// (iphone.go), so a held iPhone is not left alone, unless its
+			// owner declined Trust.
+			if kind == kindIPhone && iphoneIsDeclined(info) {
+				c.busy = iphoneDeclinedNote
+			} else if kind != kindIPhone {
 				var held []string
 				for _, n := range []int{fn.commIface, fn.dataIface} {
 					if d := info.ifaceDriver(n); d != "" {
