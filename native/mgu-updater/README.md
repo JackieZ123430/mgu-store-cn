@@ -95,12 +95,30 @@ when one is given, kept in `state/icons/<sha256>.png` (named by the
 source's sha256, else by source, id, version and URL; 0644, the folder
 0755, for the Store to read) and fetched again only when no kept file has
 that name. A component's `icon` in the state is that file, null without
-one; an icon that cannot be fetched or is not such a PNG is logged, left
-out and asked for again a day later. Kept icons no component names go
-after each check. A repo tree's components have none. A package read for
-what it is (a stick's `oap/`, a version 1 index) gives its own
-`icon.png` (beside `package.json`, the same limits), `author` (a string
-or `author.name`) and `store.description` over `description`.
+one; an icon that cannot be fetched or is not such a PNG is logged and left
+out. One that is missing, larger than 128 KiB, not a PNG or not its
+sha256 is not asked for again for that version of the component and that
+icon (a new version, URL or sha256 is asked for once); one that could not
+be fetched for another reason is asked for again a day later; both are
+recorded in `state/icon-failures.json`. Kept icons and failures no
+component names go after each check. A repo tree's app has as icon a
+build-script app's `icon.png` in its folder (or the file its
+`mgu-repo.json` entry's `icon` names there), or a source package's
+entry-point icon (the file its staged tree's `rhmiData/application.json`
+names, looked for in each variant group's `resourcesPath`, then
+`resources/`), read from the listed commit when it is fetched: one
+request per version (for a source package, its `application.json` and
+one per place looked in), none for an unchanged source. A package read
+for what it is (a stick's `oap/`, a version 1 index) gives its own
+`icon.png` (beside `package.json`, the same limits), else its entry
+point's icon, `author` (a string or `author.name`) and
+`store.description` over `description`. An installed app's `icon` is its
+installed package's entry-point icon (`rhmiData/resources/`, read through
+no link), copied into `state/icons/` and read again only when the package
+changes. The row of the installed app has its source's icon fetched only
+once its installed package has none; the other sources' rows of that id
+show their own. Once a check has read every source, the icons of each
+source read without error are looked at again.
 
 **Channels** (a `github` source's `channel`): `releases` (the catalog
 release, else the releases layout), `branch:<name>` (`mgu-repo.json` at

@@ -25,7 +25,7 @@ The Store: apps and head-unit tools from every source.
 
 An app's page, with its source, version and Install.
 
-![The page of the M Vitals app, with its version, source and an Install button](docs/screenshots/app.png)
+![The page of the Drag Timer app, with its version, source and an Install button](docs/screenshots/app.png)
 
 Installed: the apps and tools on the head unit.
 
