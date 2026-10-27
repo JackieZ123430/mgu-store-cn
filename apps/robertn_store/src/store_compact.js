@@ -193,7 +193,16 @@ function compact(W, H) {
         text('error', X, HEAD + 264, phoneW, 130, '', 26, 'label', AMBER, { wrap: true }),
         el('qr', 'qr', R - PQR, M, PQR, PQR, { text: '' })
     ]);
-    return { design: { w: W, h: H }, screens: [store, app, confirm, installed, usb, settings, source, accounts, pick, login, phone] };
+    // text typed on the drawn keyboard: the text box under the title, the keyboard below
+    const FIELD_H = 64;
+    const keysY = HEAD + 14 + FIELD_H + 16;
+    const type = screen('type', 3, [
+        back(),
+        title('', titleX),
+        el('field', 'field', X, HEAD + 14, CW, FIELD_H, { text: '', caret: true, focus: true, size: 30 }),
+        el('keyboard', 'keyboard', X, keysY, CW, B - keysY, { shift: false })
+    ]);
+    return { design: { w: W, h: H }, screens: [store, app, confirm, installed, usb, settings, source, accounts, pick, login, phone, type] };
 }
 
 module.exports = { compact };

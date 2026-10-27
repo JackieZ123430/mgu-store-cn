@@ -2,7 +2,8 @@
 """Writes src/am_screens.js from IterioDev's App Manager 2 screens.json
 (mgu-app-store apps/oap-appmanager/renderer/screens.json): his store, app,
 restart (as confirm), installed, usb and settings screens with the Store's
-labels, and the Store's own pages in the same frame.
+labels, and the Store's own pages in the same frame (type: his Add
+repository page's text box and keyboard under a title).
 
     python3 tools/gen_screens.py <screens.json> src/am_screens.js <mgu-app-store commit>
 """
@@ -108,6 +109,13 @@ st['components'] += [copy.deepcopy(BACK),
     comp('qr', 'qr', 1900, 220, 600, 600, {'text': ''}),
 ]
 screens.append(st)
+# text typed on the drawn keyboard: his Add repository page's text box and keyboard under a title
+field = copy.deepcopy(get(S['addrepo'], 'url')); field.pop('onTap')
+field.update({'name': 'field', 'x': 480, 'y': 258, 'w': 2360})
+keys = copy.deepcopy(get(S['addrepo'], 'keyboard')); keys.update({'y': 372, 'h': 462})
+st = base('type')
+st['components'] += [copy.deepcopy(BACK), text('title', 610, 138, 2200, 90, '', 72, 'bold'), field, keys]
+screens.append(st)
 body = json.dumps({'design': d['design'], 'screens': screens}, indent=1)
 open(out, 'w').write("""'use strict';
 /**
@@ -116,8 +124,8 @@ open(out, 'w').write("""'use strict';
  * screens out for iDrive 7's). store,
  * app, confirm (the sheet), installed, usb and settings are IterioDev's App
  * Manager 2 screens (mgu-app-store apps/oap-appmanager/renderer/screens.json
- * @ %s, the HMI UI builder's export of projects/app-manager.json) with the Store's labels; source, pick, accounts, login and phone
- * are the Store's own in the same frame. Each element is drawn by
+ * @ %s, the HMI UI builder's export of projects/app-manager.json) with the Store's labels; source, pick, accounts, login, phone
+ * and type (his Add repository page's text box and keyboard) are the Store's own in the same frame. Each element is drawn by
  * am_gpu.js; src/store_ui.js gives their values.
  */
 module.exports = %s;

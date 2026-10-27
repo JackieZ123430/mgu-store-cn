@@ -23,7 +23,13 @@
  * { do: 'remove', id }, { do: 'restart' },
  * { do: 'source-remove', id }, { do: 'account-remove', id }, { do: 'add-source' },
  * { do: 'add-token' }, { do: 'sign-in' }, { do: 'sign-in-cancel' }, { do: 'phone' },
- * { do: 'pick', channel }, { do: 'pick-retry' }, { do: 'pick-add-token' }.
+ * { do: 'pick', channel }, { do: 'pick-retry' }, { do: 'pick-add-token' }, { do: 'key', key } (typeKey).
+ *
+ * The type page ({ name: 'type', title, text, shift, sym, layout, symbols,
+ * go, secret, max }) is text typed on the drawn keyboard: layout 'url'
+ * (URLs and tokens, the default) or 'text' (words; with symbols its '#+='
+ * page has every printable ASCII symbol), go the Enter key's text, secret
+ * shows only the last 4 characters, max the length (300).
  */
 const { PHASE, percent, rowAction, statusLine, sourceLabel, sourceState, sourceActions, sourceChannel, sourceAccount,
     tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress, hmiNames,
@@ -419,6 +425,35 @@ function loginView(m) {
     };
 }
 
+const masked = (t) => (t.length <= 4 ? t : '·'.repeat(Math.min(24, t.length - 4)) + t.slice(-4));
+
+function typeView(m, page) {
+    const text = page.text || '';
+    return {
+        title: { text: page.title || '' },
+        field: { text: page.secret ? masked(text) : text },
+        keyboard: { layout: page.layout || 'url', shift: !!page.shift, symbols: !!page.symbols, sym: !!page.sym, go: page.go || 'OK' }
+    };
+}
+
+/* A key pressed on the type page: its text, Shift and the symbols page
+ * follow it; true for the Enter key. */
+function typeKey(page, key) {
+    if (key === (page.go || 'OK')) {
+        return true;
+    }
+    if (key === 'Shift') {
+        page.shift = !page.shift;
+    } else if (key === '#+=' || key === 'abc') {
+        page.sym = key === '#+=';
+    } else if (key === 'Delete') {
+        page.text = (page.text || '').slice(0, -1);
+    } else if ((page.text || '').length < (page.max || 300)) {
+        page.text = (page.text || '') + (key === 'Space' ? ' ' : key);
+    }
+    return false;
+}
+
 function phoneView(m) {
     const web = m.connected && m.st && m.st.web && typeof m.st.web === 'object' ? m.st.web : null;
     const address = web ? phoneAddress(web, m.webText) : { qr: '', text: '' };
@@ -449,6 +484,7 @@ function view(m) {
     case 'pick': values = pickView(m); break;
     case 'login': values = loginView(m); break;
     case 'phone': values = phoneView(m); break;
+    case 'type': values = typeView(m, page); break;
     default: screen = 'store'; values = storeView(m);
     }
     values.nav = nav(m, tabSel);
@@ -474,4 +510,4 @@ function icons(v) {
     return out.filter((f, i) => out.indexOf(f) === i);
 }
 
-module.exports = { view, icons, TABS, FILTERS, canRestart };
+module.exports = { view, icons, typeKey, TABS, FILTERS, canRestart };

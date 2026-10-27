@@ -34,7 +34,8 @@
  * Sources has a status line (a source typed wrong, the updater's refusal to
  * add or remove one), lists each source with its status or the account that
  * reads it and opens its page (Channel, Account, Components, Remove). Add
- * source opens the HMI's speller (src/speller.js) for owner/repo, a
+ * source opens the HMI's speller (src/speller.js; on iDrive 8's drawn
+ * screens the drawn keyboard's page, _type) for owner/repo, a
  * github.com address of a repo (.../tree/<branch>: that branch) or another
  * https address (a catalog), and adds it. A repo without a branch is first
  * asked about ("source-probe"): it is added on the one thing it has, else
@@ -63,6 +64,7 @@ const { UpdaterClient } = require('./client.js');
 const { qrPng } = require('./qr.js');
 const { spell } = require('./speller.js');
 const { Drawn } = require('./store_drawn.js');
+const { typeKey } = require('./store_ui.js');
 const { PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState,
     loginStatus, loginCode, phoneState, phoneAddress, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage,
@@ -220,6 +222,7 @@ class Store extends OnlineApp {
          * token's status shows there until the next answer) }. */
         this._pick = null;
         this._spelling = false;         // the HMI's speller is up
+        this._typing = null;            // the drawn keyboard's page up: { page, resolve }
         this._qr = { login: { key: null, file: null, chain: Promise.resolve() },
             phone: { key: null, file: null, chain: Promise.resolve() }, app: { key: null, file: null, chain: Promise.resolve() } };
         this._hmi = 'ID7';
@@ -637,6 +640,7 @@ class Store extends OnlineApp {
         case 'pick': this._pickChannel(act.channel); break;
         case 'pick-retry': this._probe(); break;
         case 'pick-add-token': this._pickAddToken(); break;
+        case 'key': this._key(act.key); break;
         default: break;
         }
         this._render();
@@ -856,9 +860,13 @@ class Store extends OnlineApp {
 
     /* The speller's text; null when the driver left it without OK or it
      * could not be opened (the status line says so); undefined when a newer
-     * speller replaced it. */
-    _spell(title, note) {
+     * speller replaced it. On iDrive 8's drawn screens the text is typed on
+     * the drawn keyboard instead (_type, with opts). */
+    _spell(title, note, opts) {
         const seq = ++this._spellSeq;
+        if (this._hmi === 'ID8' && this._drawnUi()) {
+            return this._type(Object.assign({ title }, opts)).then((text) => (seq === this._spellSeq ? text : undefined));
+        }
         // the HMI gives the focus back to a page once the speller has closed (_showPick)
         this._focusedPage = null;
         // the speller is the HMI's: the renderer's layer is not drawn over it
@@ -879,6 +887,39 @@ class Store extends OnlineApp {
             }
             return null;
         }).then((text) => (seq === this._spellSeq ? text : undefined));
+    }
+
+    /* Text typed on the drawn keyboard: the type page (src/store_ui.js, its
+     * opts) over the page on top. Its Enter key gives the text; leaving the
+     * page (BACK, a tab, the widget screens taking over) or a newer page
+     * gives null. */
+    _type(opts) {
+        if (this._typing) {
+            this._typed(null);
+        }
+        return new Promise((resolve) => {
+            const page = Object.assign({ name: 'type', text: '', shift: false, sym: false }, opts);
+            this._typing = { page, resolve };
+            this._drawn.push(page);
+        });
+    }
+
+    _key(key) {
+        const page = this._typing && this._typing.page;
+        if (page && this._drawn.top() === page && typeKey(page, key)) {
+            this._typed(page.text);
+        }
+    }
+
+    _typed(text) {
+        const typing = this._typing;
+        this._typing = null;
+        if (this._drawnUi() && this._drawn.top() === typing.page) {
+            // the HMI gives the focus back to the page below once this one has closed (_showPick)
+            this._focusedPage = null;
+            this._drawn.pop();
+        }
+        typing.resolve(text);
     }
 
     _addSource() {
@@ -903,7 +944,7 @@ class Store extends OnlineApp {
      * whose it is before it stores it; the status line says what came of it. */
     _addToken() {
         this._endTokenAdd(null);
-        this._spell('GitHub token', (m) => this._accountNote(m)).then((text) => {
+        this._spell('GitHub token', (m) => this._accountNote(m), { secret: true }).then((text) => {
             const token = (text || '').trim();
             if (!token) {
                 return;
@@ -1197,6 +1238,10 @@ class Store extends OnlineApp {
     }
 
     _render() {
+        // the drawn keyboard's page left: what it was opened for gets nothing
+        if (this._typing && !(this._drawnUi() && this._drawn.stack.indexOf(this._typing.page) >= 0)) {
+            this._typed(null);
+        }
         if (!this._visible || this._shutdownPromise) {
             return;
         }
