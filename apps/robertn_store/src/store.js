@@ -230,7 +230,7 @@ class Store extends OnlineApp {
          * token's status shows there until the next answer) }. */
         this._pick = null;
         this._spelling = false;         // the HMI's speller is up
-        this._typing = null;            // the drawn keyboard's page up: { page, resolve }
+        this._typing = null;            // the drawn keyboard's page up: { page, resolve, under (the page it took the place of) }
         this._uplinkNote = null;        // the refusal of the last Wi-Fi or preferred-connection request
         this._qr = { login: { key: null, file: null, chain: Promise.resolve() },
             phone: { key: null, file: null, chain: Promise.resolve() }, app: { key: null, file: null, chain: Promise.resolve() } };
@@ -964,8 +964,9 @@ class Store extends OnlineApp {
         }
         return new Promise((resolve) => {
             const page = Object.assign({ name: 'type', text: '', shift: false, sym: false }, opts);
-            this._typing = { page, resolve };
-            this._drawn.push(page);
+            const typing = { page, resolve, under: null };
+            this._typing = typing;
+            typing.under = this._drawn.push(page);
         });
     }
 
@@ -976,13 +977,24 @@ class Store extends OnlineApp {
         }
     }
 
+    /* Closes the keyboard's page: the page it took the place of at the
+     * last depth comes back, else the page below gets the focus back. */
     _typed(text) {
         const typing = this._typing;
         this._typing = null;
-        if (this._drawnUi() && this._drawn.top() === typing.page) {
+        if (this._drawnUi()) {
             // the HMI gives the focus back to the page below once this one has closed (_showPick)
             this._focusedPage = null;
-            this._drawn.pop();
+            if (this._drawn.top() === typing.page && typing.under) {
+                this._drawn.restore(typing.under);
+                this._focusedPage = `drawn:${typing.under.name}`;
+            } else if (this._drawn.top() === typing.page) {
+                this._drawn.pop();
+            }
+        }
+        // a repo's page that waited for the keyboard opens once the focus is back
+        if (this._pick && !this._pick.open) {
+            this._awaitFocus(this._pick);
         }
         typing.resolve(text);
     }
@@ -1066,14 +1078,20 @@ class Store extends OnlineApp {
     _startPick(repo) {
         this._endPick();
         const pick = { repo, probe: null, tokens: '', back: false, open: false };
-        pick.timer = setTimeout(() => {
-            pick.back = true;
-            this._render();
-        }, FOCUS_BACK_MS);
+        this._awaitFocus(pick);
         this._pick = pick;
         if (this._probe()) {
             this._note({ kind: 'checking', repo });
         }
+    }
+
+    _awaitFocus(pick) {
+        clearTimeout(pick.timer);
+        pick.back = false;
+        pick.timer = setTimeout(() => {
+            pick.back = true;
+            this._render();
+        }, FOCUS_BACK_MS);
     }
 
     _endPick() {
@@ -1147,13 +1165,14 @@ class Store extends OnlineApp {
         }
     }
 
-    /* Once the updater has answered and the focus is back: a repo with one
+    /* Once the updater has answered, the focus is back and the drawn
+     * keyboard is not up (its page stays on top): a repo with one
      * thing to add it on is added on it, one with none as typed; one no
      * account reaches, or with more to pick from, gets its page; anything
      * else goes on the status line. */
     _showPick() {
         const pick = this._pick;
-        if (!pick || pick.open || !pick.probe || !(pick.back || this._focusedPage !== null)) {
+        if (!pick || pick.open || !pick.probe || this._typing || !(pick.back || this._focusedPage !== null)) {
             return;
         }
         const options = pickOptions(pick.probe);
@@ -1195,7 +1214,7 @@ class Store extends OnlineApp {
     }
 
     /* The repo's page left (BACK) ends the repo being added, once it stays
-     * gone HIDE_SETTLE_MS; the speller over it does not. */
+     * gone HIDE_SETTLE_MS; the speller or the drawn keyboard over it does not. */
     _leavePick() {
         const pick = this._pick;
         if (!pick || !pick.open) {
@@ -1205,10 +1224,10 @@ class Store extends OnlineApp {
             pick.shown = true;
             clearTimeout(pick.goneTimer);
             pick.goneTimer = null;
-        } else if (pick.shown && !this._spelling && !pick.goneTimer) {
+        } else if (pick.shown && !this._spelling && !this._typing && !pick.goneTimer) {
             pick.goneTimer = setTimeout(() => {
                 pick.goneTimer = null;
-                if (this._pick === pick && !this._spelling && !this._pickShown()) {
+                if (this._pick === pick && !this._spelling && !this._typing && !this._pickShown()) {
                     logger.info(`left ${pick.repo}`);
                     this._endPick();
                 }

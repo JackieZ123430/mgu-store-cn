@@ -325,6 +325,9 @@ eq(Array.from({ length: 95 }, (x, i) => String.fromCharCode(32 + i)).filter((c) 
 const capped = { name: 'type', text: '', max: 3 };
 typeOn('iDrive 8', capped, ['a', 'b', 'c', 'd']);
 eq(capped.text, 'abc', 'no more than max');
+const near = { name: 'type', text: '', max: 10 };
+typeOn('iDrive 8', near, ['a', 'github.com/', '.com', 'b']);
+eq(near.text, 'a.comb', 'a key that would go past max types nothing');
 
 // Wi-Fi (the uplink's, state.uplink.wifi): Settings' row with its state, only with the uplink's Wi-Fi
 f = screen('settings');
