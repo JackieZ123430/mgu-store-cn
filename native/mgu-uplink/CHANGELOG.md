@@ -1,5 +1,12 @@
 # mgu-uplink changelog
 
+## 0.7.0
+
+- Wi-Fi: the unit joins a phone's hotspot or another access point through its own radio (iDrive 8: wlan1, the NXP 88W9098's second adapter), and the uplink uses it like a plugged-in device, with the same DHCP, routing, uid rules, firewall and lease. Our own wpa_supplicant does the association: upstream 2.10 with a patch for the head unit's driver, built with the tool and shipped beside it. Off until switched on (`wifi = on`, or the `wifi-enable` request); while on, the radio's rfkill is unblocked, and it is blocked again when Wi-Fi is switched off or the service stops. Saved networks are kept in `/var/opt/mgu-uplink/wifi/wpa.conf` (root only). From IterioDev mgu-wifi 1.0.0.
+- Preferred uplink: one kind (`usb`, `usbecm`, `wifi`, `rndis`, `ncm`, `iphone`) can be tried first (`preferred`, or the `prefer` request); the others are fallbacks in the usual order, which now has Wi-Fi after the wired adapters and sticks and before the phones. A change takes effect within 5 s.
+- Requests on `/run/mgu-uplink/ctl.sock` (root only): `prefer`, `wifi-enable`, `wifi-scan`, `wifi-connect`, `wifi-forget`. The `prefer` and `wifi-enable` choices are kept in `/var/opt/mgu-uplink/mgu-uplink.settings.conf` (`settings_conf`, read after `mgu-uplink.local.conf`), which earlier versions do not read, so a rollback still starts.
+- `status.json` adds `preferred` and `wifi` (link state, network, address, signal, the networks in range, the saved ones, scanning, error); `mgu-uplink status` shows them.
+
 ## 0.6.0
 
 - iPhone: the unit pairs with the phone the way a computer does (usbmux and lockdown on the phone's usbmux interface). The first time, the phone asks "Trust This Computer?". After Trust and the passcode, the phone is paired and the pairing is kept in `/var/opt/mgu-uplink/pairing/`. Every later connection opens a lockdown session as the paired host, so the phone serves its Personal Hotspot without asking again. A phone that forgot the pairing (lockdown `InvalidHostID`) is paired again. After "Don't Trust" the phone goes back to media and is not asked again until it is plugged in again.
