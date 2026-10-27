@@ -19,7 +19,13 @@
  * leaves in this app's data folder: "uninstall" (a removable installed
  * component, once confirmed), "source-add", "source-probe", "source-remove", "token-add",
  * "token-remove" (an account, once confirmed), "login-start" / "login-cancel" (GitHub
- * sign-in, which adds an account) and "web" (Phone access on or off).
+ * sign-in, which adds an account), "web" (Phone access on or off), and the
+ * ones the updater relays to mgu-uplink: "wifi-enable", "wifi-scan",
+ * "wifi-connect" (with the password typed for a secured network not saved
+ * yet), "wifi-forget" (once confirmed) and "uplink-prefer" (the preferred
+ * connection). On the drawn screens, Settings has Wi-Fi while the uplink
+ * reports it (state.uplink.wifi): the networks, Turn on / off, Scan and the
+ * preferred connection; the widget screens have none of it.
  *
  * The start screen has the status line, Check for updates, the progress of
  * the running install, the rows Apps and Head-unit tools, which open their
@@ -64,7 +70,7 @@ const { UpdaterClient } = require('./client.js');
 const { qrPng } = require('./qr.js');
 const { spell } = require('./speller.js');
 const { Drawn } = require('./store_drawn.js');
-const { typeKey } = require('./store_ui.js');
+const { typeKey, wifiOf } = require('./store_ui.js');
 const { PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState,
     loginStatus, loginCode, phoneState, phoneAddress, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage,
@@ -91,6 +97,8 @@ const TOKEN_ADD_MS = 30000;             // how long Add token says "Checking tok
 const FOCUS_BACK_MS = 2000;             // how long a page waits for the HMI to give the focus back from the speller
 const PROBE_MS = 30000;                 // how long a repo being added waits for the updater's answer
 const IF_FRONTCCU = 'de.bmw.infotainment.controlelements.FrontCCU';
+/* The updater relays these to mgu-uplink (Wi-Fi, the preferred connection). */
+const UPLINK_OPS = ['uplink-prefer', 'wifi-enable', 'wifi-scan', 'wifi-connect', 'wifi-forget'];
 
 /* The drawn screens' host states and their proxies (tools/gen_rhmi.js). */
 const PROXIES = [48, 24, 12];
@@ -223,6 +231,7 @@ class Store extends OnlineApp {
         this._pick = null;
         this._spelling = false;         // the HMI's speller is up
         this._typing = null;            // the drawn keyboard's page up: { page, resolve }
+        this._uplinkNote = null;        // the refusal of the last Wi-Fi or preferred-connection request
         this._qr = { login: { key: null, file: null, chain: Promise.resolve() },
             phone: { key: null, file: null, chain: Promise.resolve() }, app: { key: null, file: null, chain: Promise.resolve() } };
         this._hmi = 'ID7';
@@ -282,6 +291,9 @@ class Store extends OnlineApp {
                 this._sendSource({ type: 'github', repo });
             } else if (forOp === 'source-probe' && this._pick && !this._pick.probe) {
                 this._probed({ type: 'probe', repo: this._pick.repo, status: 'refused', error: String(msg) });
+            } else if (UPLINK_OPS.indexOf(forOp) >= 0) {
+                this._uplinkNote = String(msg);
+                this._render();
             } else if (forOp === 'token-add' && this._tokenAdding) {
                 this._endTokenAdd({ kind: 'refused', error: String(msg) });
             } else if (forOp === 'source-add' || forOp === 'source-remove') {
@@ -599,7 +611,8 @@ class Store extends OnlineApp {
         return { st: this._connected ? this._st : null, connected: this._connected && !!this._st, secret: !!readSecret(),
             version: this._version(), note: this._sourcesNote, login: this._login,
             webText: web && web.enabled ? readFile(WEB_URL_FILE) : '', accountsNote: this._accountsNote,
-            pick: this._pick && { repo: this._pick.repo, probe: this._pick.probe, tokenNote: !!this._pick.tokenNote } };
+            pick: this._pick && { repo: this._pick.repo, probe: this._pick.probe, tokenNote: !!this._pick.tokenNote },
+            uplinkNote: this._uplinkNote };
     }
 
     /* A press on the drawn screens (src/store_ui.js acts). */
@@ -619,6 +632,13 @@ class Store extends OnlineApp {
                 this._tokenId = act.page.id;
             } else if (act.page.name === 'confirm' && act.page.kind === 'remove') {
                 this._removeId = act.page.id;
+            } else if (act.page.name === 'wifi') {
+                // the networks in range now
+                const w = wifiOf({ connected: this._connected, st: this._st });
+                this._uplinkNote = null;
+                if (w && w.enabled && !w.scanning) {
+                    this._uplink({ op: 'wifi-scan' });
+                }
             }
             this._drawn.push(act.page);
             break;
@@ -641,9 +661,54 @@ class Store extends OnlineApp {
         case 'pick-retry': this._probe(); break;
         case 'pick-add-token': this._pickAddToken(); break;
         case 'key': this._key(act.key); break;
+        case 'wifi-power': {
+            const w = wifiOf({ connected: this._connected, st: this._st });
+            if (w) {
+                this._uplink({ op: 'wifi-enable', on: !w.enabled });
+            }
+            break;
+        }
+        case 'wifi-scan': this._uplink({ op: 'wifi-scan' }); break;
+        case 'wifi-join': this._uplink({ op: 'wifi-connect', ssid: act.ssid }); break;
+        case 'wifi-password': this._wifiPassword(act.ssid); break;
+        case 'wifi-forget':
+            this._drawn.closePage(isConfirm('wifi-forget'));
+            this._uplink({ op: 'wifi-forget', ssid: act.ssid });
+            break;
+        case 'uplink-prefer': this._uplink({ op: 'uplink-prefer', kind: act.kind }); break;
         default: break;
         }
         this._render();
+    }
+
+    /* A request for the uplink, which the updater relays; its refusal shows
+     * on the Wi-Fi and preferred-connection pages. */
+    _uplink(req) {
+        this._uplinkNote = null;
+        if (!this._privileged(req)) {
+            this._uplinkNote = readSecret() ? 'updater not running' : 'no updater secret';
+        }
+    }
+
+    /* A secured network not saved yet: its password, typed (iDrive 8: the
+     * drawn keyboard's word keys and symbols; iDrive 7: the HMI's speller),
+     * goes to the updater and is not kept. */
+    _wifiPassword(ssid) {
+        this._uplinkNote = null;
+        this._spell(ssid, (m) => { this._uplinkNote = sourcesMessage(m); this._render(); },
+            { label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63 }).then((psk) => {
+            if (!psk) {
+                return;
+            }
+            if (!/^[\x20-\x7e]{8,63}$/.test(psk)) {
+                this._uplinkNote = 'A Wi-Fi password is 8 to 63 letters, digits and symbols';
+                this._render();
+                return;
+            }
+            logger.info('wifi: join with a password');
+            this._uplink({ op: 'wifi-connect', ssid, psk });
+            this._render();
+        });
     }
 
     _openState(name) {

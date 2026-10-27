@@ -11,6 +11,9 @@
  *    that does not match the catalog, report a failed install, offline;
  *  - the reboot request: refused while an install runs or waits, the
  *    command run once, its failure and a unit that stays up reported;
+ *  - the uplink's requests relayed to a fake ctl.sock (the secret, only
+ *    their own fields, a password exact and never logged) and its
+ *    status.json in the state;
  *  - sources (an updater in this process, against a fake GitHub on the same
  *    HTTPS server): several sources and id collisions, tokens of their own
  *    (one reaching two private repos, a second for a third, a public repo
@@ -4106,6 +4109,101 @@ function testDeployTimeout() {
     });
 }
 
+/* The uplink's requests, relayed for the Store to a fake mgu-uplink ctl.sock
+ * (one JSON line in, one out): only with the secret, only the Store's
+ * fields, a password passed on exactly as typed and never logged; the
+ * uplink's status.json in the state. */
+function testUplink() {
+    const { Updater } = require('../js/updater');
+    const D = path.join(T, 'uplink');
+    mkdirp(D);
+    const status = path.join(D, 'status.json');
+    const ctl = path.join(D, 'ctl.sock');
+    const u = new Updater({ state_dir: path.join(D, 'state'), credentials_dir: path.join(D, 'cred'), uplink_status: status, uplink_ctl: ctl });
+    ok('uplink: no status.json, no uplink in the state', u.state().uplink === null);
+    const wifi = { enabled: true, link: 'online', ssid: 'Car "Hotspot"', ip: '172.20.10.2', signal: -45,
+        networks: [{ ssid: 'Car "Hotspot"', signal: -45, secure: true, saved: true, current: true }], saved: ['Car "Hotspot"'], scanning: false, error: null };
+    fs.writeFileSync(status, JSON.stringify({ device: { kind: 'wifi', name: 'Car "Hotspot"' }, state: 'online', error: null, preferred: 'wifi', wifi }));
+    ok('uplink: status.json read again when it changed', u.readUplink() === true && u.readUplink() === false);
+    ok('uplink: its device, preferred kind and Wi-Fi in the state', JSON.stringify(u.state().uplink) === JSON.stringify({
+        device: { kind: 'wifi', name: 'Car "Hotspot"' }, state: 'online', error: null, preferred: 'wifi', wifi }), JSON.stringify(u.state().uplink));
+    const got = [];
+    let answer = { ok: true };
+    const server = net.createServer((s) => {
+        let buf = '';
+        s.setEncoding('utf8');
+        s.on('data', (d) => {
+            buf += d;
+            if (buf.indexOf('\n') >= 0) {
+                got.push(JSON.parse(buf.slice(0, buf.indexOf('\n'))));
+                s.end(JSON.stringify(answer) + '\n');
+            }
+        });
+    });
+    const psk = 'p@ss "w0rd\\ {x}';
+    const logged = [];
+    const log = console.log;
+    // one request: what the updater answered (refused at once: { error }; else the reply)
+    const send = (req) => new Promise((resolve) => {
+        const now = u.handle(req, resolve);
+        if (now !== undefined) {
+            resolve(now === null ? u.state() : { error: now });
+        }
+    });
+    console.log = (...a) => logged.push(a.join(' '));
+    return send({ op: 'wifi-connect', ssid: 'Cafe', psk })
+        .then((r) => {
+            console.log = log;
+            ok('uplink: needs mgu-uplink 0.7.0 running (no ctl.sock)', r.type === 'error' && r.op === 'wifi-connect' && /0\.7\.0/.test(r.error), JSON.stringify(r));
+            console.log = (...a) => logged.push(a.join(' '));
+            return new Promise((resolve) => server.listen(ctl, resolve));
+        })
+        .then(() => Promise.all(['wifi-connect', 'wifi-enable', 'wifi-scan', 'wifi-forget', 'uplink-prefer'].map((op) => send({ op, ssid: 'x', psk }))))
+        .then((rs) => {
+            ok('uplink: every request needs the secret', rs.every((r) => r.error === 'forbidden') && got.length === 0, JSON.stringify(rs));
+            return send({ op: 'wifi-connect', ssid: 'Cafe', psk, secret: u.secret, extra: 'no' });
+        })
+        .then((r) => {
+            ok('uplink: wifi-connect passes ssid and the password on exactly, and nothing else (no secret)',
+                JSON.stringify(got) === JSON.stringify([{ op: 'wifi-connect', ssid: 'Cafe', psk }]), JSON.stringify(got));
+            ok('uplink: the state answers it, without the password', r.type === 'state' && JSON.stringify(r).indexOf('w0rd') < 0);
+            got.length = 0;
+            return send({ op: 'wifi-connect', ssid: 'Saved one', secret: u.secret });
+        })
+        .then(() => send({ op: 'wifi-enable', on: false, secret: u.secret }))
+        .then(() => send({ op: 'wifi-scan', secret: u.secret }))
+        .then(() => send({ op: 'wifi-forget', ssid: 'Cafe', secret: u.secret }))
+        .then(() => send({ op: 'uplink-prefer', kind: 'iphone', secret: u.secret }))
+        .then(() => send({ op: 'uplink-prefer', kind: '', secret: u.secret }))
+        .then(() => {
+            ok('uplink: each request as the uplink takes it', JSON.stringify(got) === JSON.stringify([{ op: 'wifi-connect', ssid: 'Saved one' },
+                { op: 'wifi-enable', on: false }, { op: 'wifi-scan' }, { op: 'wifi-forget', ssid: 'Cafe' }, { op: 'prefer', kind: 'iphone' },
+                { op: 'prefer', kind: '' }]), JSON.stringify(got));
+            got.length = 0;
+            return Promise.all([{ op: 'wifi-connect', ssid: 'Cafe', psk: 'short' }, { op: 'wifi-connect', ssid: 'Cafe', psk: `${psk}\n` },
+                { op: 'wifi-connect', ssid: 'x'.repeat(33), psk }, { op: 'wifi-connect', psk }, { op: 'wifi-enable', on: 'yes' },
+                { op: 'uplink-prefer', kind: 'Wi-Fi' }, { op: 'uplink-prefer' }, { op: 'wifi-forget', ssid: '' }]
+                .map((req) => send(Object.assign(req, { secret: u.secret }))));
+        })
+        .then((rs) => {
+            ok('uplink: a request the uplink could not take is refused here', rs.every((r) => typeof r.error === 'string' && r.error.length) &&
+                got.length === 0, JSON.stringify(rs));
+            answer = { ok: false, error: 'Wi-Fi needs uplink = auto' };
+            return send({ op: 'wifi-scan', secret: u.secret });
+        })
+        .then((r) => {
+            ok('uplink: the uplink\'s refusal is the answer', r.type === 'error' && r.op === 'wifi-scan' && r.error === 'Wi-Fi needs uplink = auto',
+                JSON.stringify(r));
+            console.log = log;
+            server.close();
+            ok('uplink: no password in any log line', logged.length > 0 && !logged.some((l) => l.indexOf('w0rd') >= 0), JSON.stringify(logged));
+        }, (e) => {
+            console.log = log;
+            server.close();
+            throw e;
+        });
+}
+
 /* ---- run ---------------------------------------------------------------------- */
 
 function main() {
@@ -4120,6 +4218,7 @@ function main() {
         .then(() => testDeployTimeout())
         .then(() => testReboot())
         .then(() => testUidsDaemon())
+        .then(() => testUplink())
         .then(() => Promise.all([startDns(), startHttps(certs, pubDir)]))
         .then(([dnsSrv, httpsSrv]) => testFetch(certs, pubDir)
             .then(() => testSources(certs).catch((e) => ok('sources scenario', false, e.stack)))
