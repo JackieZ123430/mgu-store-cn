@@ -7,7 +7,9 @@
  * OK) and mgu-render's client (records placement, frames, claims). The
  * widget screens first, then the drawn ones: the renderer coming and
  * going, proxies and focus, presses, touch, BACK, the confirm steps, the
- * drawn keyboard (iDrive 8's text entry, typed by touch). The
+ * drawn keyboard (iDrive 8's text entry, typed by touch), Wi-Fi (its page,
+ * a network's password, exactly as typed and never logged, Forget, the
+ * preferred connection). The
  * app runs from a copy of src/ in a temp folder, whose data/ holds
  * updater-secret and web-url. STORE_HMI=ID8 runs it on iDrive 8's
  * description. Node 8+.
@@ -134,7 +136,12 @@ class Client extends EventEmitter {
         return socketUp;
     }
 }
-const quiet = { info() {}, warn() {}, error() {} };
+const logged = [];                      // what the app logged
+const quiet = { info(l) { logged.push(String(l)); }, warn(l) { logged.push(String(l)); }, error(l) { logged.push(String(l)); } };
+const WIFI_PSK = 'p@ss "w0rd\\ {x}';
+// the uplink's Wi-Fi: a secured network not saved, an open one
+const WIFI = { enabled: true, link: 'idle', saved: [], scanning: false, error: null,
+    networks: [{ ssid: 'Home', signal: -50, secure: true, saved: false, current: false }, { ssid: 'Cafe', signal: -70, secure: false }] };
 /* mgu-render's client: what the Store asks of it. */
 const gpuLog = [];
 let fpsAsked = null;
@@ -1083,6 +1090,83 @@ function runDrawn() {
         return left;
     }).then((text) => {
         eq([text, drawn.stack.length, sent], [null, 1, []], 'BACK: no text, nothing sent');
+        // Wi-Fi, the uplink's through the updater: Settings' row opens its page, which asks a scan
+        app._client.emit('state', Object.assign({}, st, { uplink: { device: null, state: 'searching', error: null, preferred: '', wifi: WIFI } }));
+        drawn.setTab('settings');
+        reset();
+        tap('Wi-Fi');
+        eq([states, drawn.top().name, sent.map(secretless), !!sent[0].secret], [[`open ${host(2)}`], 'wifi', [{ op: 'wifi-scan' }], true],
+            'Wi-Fi: its page, a scan asked for, with the updater secret');
+        app._states[host(1)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: true });
+        app._states[host(2)].emit('focus', { focus: true });
+        reset();
+        tap('Cafe');
+        eq(sent.map(secretless), [{ op: 'wifi-connect', ssid: 'Cafe' }], 'an open network: joined at once');
+        reset();
+        logged.length = 0;
+        if (HMI === 'ID7') {
+            // iDrive 7: the HMI's speller; a password too short is refused here
+            spellerAnswers.push('short');
+            tap('Home');
+            return tick().then(() => {
+                eq([spellerTitles, sent, app._drawnModel().uplinkNote], [['Home'], [], 'A Wi-Fi password is 8 to 63 letters, digits and symbols']);
+                spellerAnswers.push(WIFI_PSK);
+                tap('Home');
+                return tick();
+            });
+        }
+        // iDrive 8: the keyboard's page, word keys and symbols, Connect from 8 characters
+        tap('Home');
+        eq([states, drawn.top().name, drawn.top().title, drawn.top().go], [[`open ${host(3)}`], 'type', 'Home', 'Connect']);
+        app._states[host(2)].emit('focus', { focus: false });
+        app._states[host(3)].emit('visible', { visible: true });
+        app._states[host(3)].emit('focus', { focus: true });
+        ['p', '#+=', '@', 'Connect'].forEach(tap);
+        eq([drawn.top().name, sent], ['type', []], 'Connect under 8 characters does nothing');
+        ['abc', 's', 's', 'Space', '#+=', '"', 'abc', 'w', '0', 'r', 'd', '#+=', '\\', 'abc', 'Space', '#+=', '{', 'abc', 'x', '#+=', '}',
+            'Connect'].forEach(tap);
+        eq(states.slice(-1), [`close ${host(3)}`]);
+        app._states[host(3)].emit('focus', { focus: false });
+        app._states[host(3)].emit('visible', { visible: false });
+        app._states[host(2)].emit('focus', { focus: true });
+        return tick();
+    }).then(() => {
+        eq([sent.map(secretless), !!sent[0].secret, drawn.top().name], [[{ op: 'wifi-connect', ssid: 'Home', psk: WIFI_PSK }], true, 'wifi'],
+            'the password, exactly as typed, to the updater; back on the Wi-Fi page');
+        eq(logged.filter((l) => l.indexOf('w0rd') >= 0), [], 'no password in the log');
+        // joined and saved: Forget asks first; Turn off, Scan
+        app._client.emit('state', Object.assign({}, st, { uplink: { device: { kind: 'wifi', name: 'Home' }, state: 'online', error: null, preferred: '',
+            wifi: Object.assign({}, WIFI, { link: 'online', ssid: 'Home', ip: '172.20.10.2', saved: ['Home'],
+                networks: [Object.assign({}, WIFI.networks[0], { saved: true, current: true }), WIFI.networks[1]] }) } }));
+        reset();
+        tap('Forget');
+        eq([states, drawn.items.map((i) => i.label)], [[`open ${host(3)}`], ['Cancel', 'Forget']]);
+        app._states[host(3)].emit('visible', { visible: true });
+        tap('Forget');
+        eq([sent.map(secretless), states.slice(-1)], [[{ op: 'wifi-forget', ssid: 'Home' }], [`close ${host(3)}`]], 'Forget, once confirmed');
+        app._states[host(3)].emit('visible', { visible: false });
+        app._states[host(2)].emit('focus', { focus: true });
+        reset();
+        ['Turn off', 'Scan'].forEach(tap);
+        eq(sent.map(secretless), [{ op: 'wifi-enable', on: false }, { op: 'wifi-scan' }]);
+        // the uplink's refusal shows on the page
+        app._client.emit('reply-error', 'Wi-Fi needs uplink = auto', 'wifi-scan');
+        eq(app._drawnModel().uplinkNote, 'Wi-Fi needs uplink = auto');
+        // the preferred connection
+        reset();
+        tap('Preferred: Automatic');
+        eq([states, drawn.top().name], [[`open ${host(3)}`], 'prefer']);
+        app._states[host(3)].emit('visible', { visible: true });
+        tap('LTE stick');
+        eq(sent.map(secretless), [{ op: 'uplink-prefer', kind: 'usbecm' }]);
+        // back to Settings
+        drawn.pop();
+        app._states[host(3)].emit('visible', { visible: false });
+        drawn.pop();
+        app._states[host(2)].emit('visible', { visible: false });
+        app._states[host(1)].emit('focus', { focus: true });
+        reset();
         app._client.emit('state', st);
         app._endTokenAdd(null);
         // embed: FrontCCU's dial moves the focus and its push presses (the template's buttons get neither)

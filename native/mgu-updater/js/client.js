@@ -18,6 +18,9 @@
  *   c.sourceProbe(repo);
  *   c.sourceRemove(id);  c.loginStart();  c.loginCancel();
  *   c.tokenAdd(token, label?);  c.tokenRemove(tokenId);  c.web(true | false);
+ * and, relayed to mgu-uplink (0.7.0, state.uplink shows the result):
+ *   c.uplinkPrefer(kind | '');  c.wifiEnable(true | false);  c.wifiScan();
+ *   c.wifiConnect(ssid, psk?);  c.wifiForget(ssid);
  *
  * With reconnectMs the client keeps reconnecting after the updater goes
  * away (it restarts when it updates itself) and emits 'down' while it is
@@ -151,6 +154,27 @@ class UpdaterClient extends EventEmitter {
 
     web(enable) {
         return this.privileged({ op: 'web', enable: !!enable });
+    }
+
+    uplinkPrefer(kind) {
+        return this.privileged({ op: 'uplink-prefer', kind: kind || '' });
+    }
+
+    wifiEnable(on) {
+        return this.privileged({ op: 'wifi-enable', on: !!on });
+    }
+
+    wifiScan() {
+        return this.privileged({ op: 'wifi-scan' });
+    }
+
+    /* psk: the password of a network not saved yet; none for a saved or an open one */
+    wifiConnect(ssid, psk) {
+        return this.privileged(Object.assign({ op: 'wifi-connect', ssid }, psk ? { psk } : {}));
+    }
+
+    wifiForget(ssid) {
+        return this.privileged({ op: 'wifi-forget', ssid });
     }
 
     close() {

@@ -235,10 +235,10 @@ f = screen('usb');
 eq(f.labels.slice(4), ['Drive Recorder', 'GPU renderer'], 'not the one for another head unit only');
 eq(text(f, 'subtitle'), 'USB STICK · 2 packages');
 
-// Settings: sources, Add source, Accounts, Phone access, the unit; no restart while busy
+// Settings: sources, Add source, Wi-Fi, Accounts, Phone access, the unit; no restart while busy
 f = screen('settings');
 eq(f.labels.slice(4), ['robertnisipeanu/mgu-store', 'cauliflower/idrive7-apps', 'IterioDev/car-apps', 'USB STICK', 'Add source',
-    'Accounts', 'Phone access', 'Check now']);
+    'Wi-Fi', 'Accounts', 'Phone access', 'Check now']);
 eq(text(f, 'unit'), 'iDrive 7 · BMW MGU P18_23w44.2-1-3 mgu-high');
 eq(text(f, 'versions'), 'Updater 0.4.0 · Store 0.7.0 · Renderer mgu-renderd 1.1.0');
 eq(text(screen('settings', {}, { allProviders: { renderer: [{ id: 'mgu-render', version: '0.2.0' }, { id: 'mgu-renderd', version: '1.1.2' }] } }),
@@ -325,6 +325,53 @@ eq(Array.from({ length: 95 }, (x, i) => String.fromCharCode(32 + i)).filter((c) 
 const capped = { name: 'type', text: '', max: 3 };
 typeOn('iDrive 8', capped, ['a', 'b', 'c', 'd']);
 eq(capped.text, 'abc', 'no more than max');
+
+// Wi-Fi (the uplink's, state.uplink.wifi): Settings' row with its state, only with the uplink's Wi-Fi
+f = screen('settings');
+eq([f.values.access.items[0].title, f.values.access.items[0].sub], ['Wi-Fi', 'Online · Mario iPhone']);
+eq(f.items.find((i) => i.label === 'Wi-Fi').act, { do: 'open', page: { name: 'wifi' } });
+ok(screen('settings', {}, { uplink: null }).labels.indexOf('Wi-Fi') < 0, 'no Wi-Fi without the uplink (an updater before 0.8.0)');
+ok(screen('settings', {}, { uplink: { device: null, state: 'searching', error: null, preferred: '', wifi: null } }).labels.indexOf('Wi-Fi') < 0,
+    'nor with an uplink without Wi-Fi (before 0.7.0, or not on auto)');
+const wifiSub = (w) => screen('settings', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: Object.assign({}, fixture.state().uplink.wifi, w) }) })
+    .values.access.items[0].sub;
+eq([{ link: 'connected' }, { link: 'connecting', ssid: 'Cafe' }, { enabled: false, link: 'off', ssid: '' }, { link: 'nohw', ssid: '' },
+    { link: 'failed', ssid: '', error: 'wpa_supplicant did not start' }, { link: 'idle', ssid: '' }].map(wifiSub),
+['Connected · Mario iPhone', 'Connecting · Cafe', 'Off', 'No radio', 'Error', 'Not connected']);
+// the page: the network joined first, then the scan's, then saved ones out of range; a tap joins a saved or open one and asks a
+// secured one's password; a saved one has Forget; Turn off, Scan, the preferred connection
+f = screen('wifi');
+eq(own(f), ['Forget', 'FRITZ!Box 7590 XY', 'Cafe Free WiFi', 'Telekom_FON', 'Forget', 'Turn off', 'Scan', 'Preferred: Wi-Fi', 'Back']);
+eq(f.values.networks.items.map((n) => n.sub), ['Online · Strong', 'Secured · Strong', 'Open · Good', 'Open · Weak', 'Saved · not in range']);
+eq([text(f, 'subtitle'), text(f, 'state'), text(f, 'info')], ['5 networks', 'Online · Mario iPhone', 'IP 172.20.10.3 · -52 dBm']);
+eq(f.items.slice(0, 5).map((i) => i.act), [{ do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: 'Mario iPhone' } },
+    { do: 'wifi-password', ssid: 'FRITZ!Box 7590 XY' }, { do: 'wifi-join', ssid: 'Cafe Free WiFi' }, { do: 'wifi-join', ssid: 'Telekom_FON' },
+    { do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: 'Home' } }]);
+eq(f.items.slice(5, 8).map((i) => i.act), [{ do: 'wifi-power' }, { do: 'wifi-scan' }, { do: 'open', page: { name: 'prefer' } }]);
+f = screen('wifi-off');
+eq([own(f), f.values.networks.empty, text(f, 'state')], [['Turn on', 'Preferred: Wi-Fi', 'Back'], 'Off', 'Off'], 'off: no networks, no Scan');
+f = screen('wifi-failed');
+eq([text(f, 'state'), text(f, 'note')], ['Error', 'could not join "FRITZ!Box 7590 XY" (wrong password, or out of range)']);
+eq(f.items[0].act, { do: 'wifi-join', ssid: 'Mario iPhone' }, 'a saved network not joined: a tap joins it');
+eq(text(screen('wifi', { uplinkNote: 'needs mgu-uplink 0.7.0 or newer, running' }), 'note'), 'needs mgu-uplink 0.7.0 or newer, running',
+    'the updater\'s or uplink\'s refusal');
+ok(own(screen('wifi', {}, { uplink: Object.assign({}, fixture.state().uplink, { wifi: Object.assign({}, fixture.state().uplink.wifi,
+    { scanning: true }) }) })).indexOf('Scan') < 0, 'no Scan while it scans');
+// the password: word keys and symbols, Connect only from 8 characters
+f = screen('wifi-password');
+eq([text(f, 'title'), text(f, 'field'), f.values.field.label], ['FRITZ!Box 7590 XY', 'sec', 'Password · at least 8 characters']);
+ok(own(f).indexOf('Connect') >= 0 && own(f).indexOf('#+=') >= 0, 'word keys with the symbols page, Connect');
+const pass = { name: 'type', title: 'FRITZ!Box 7590 XY', text: '', label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63 };
+ok(!typeOn('iDrive 8', pass, ['s', 'e', 'c', 'r', 'e', 't', '1', 'Connect']), 'Connect does nothing under 8 characters');
+ok(typeOn('iDrive 8', pass, ['#+=', '!', 'Connect']) && pass.text === 'secret1!', 'then gives the password');
+// Forget asks first
+f = screen('confirm-wifi-forget');
+eq([f.labels, text(f, 'title'), text(f, 'text'), f.items[1].act], [['Cancel', 'Forget'], 'Forget network?', 'Home', { do: 'wifi-forget', ssid: 'Home' }]);
+// the preferred connection: every kind the uplink takes; the preferred one marked, the others a tap away
+f = screen('prefer');
+eq(own(f), ['Automatic', 'USB Ethernet', 'LTE stick', 'Android phone', 'Android phone (NCM)', 'iPhone', 'Back']);
+eq([text(f, 'status'), f.values.list.items[3].right, f.values.list.items[3].sub], ['Online through Wi-Fi', 'chip:Preferred', 'In use']);
+eq([f.items[0].act, f.items[5].act], [{ do: 'uplink-prefer', kind: '' }, { do: 'uplink-prefer', kind: 'iphone' }]);
 
 // sign-in, phone, no updater
 f = screen('login');

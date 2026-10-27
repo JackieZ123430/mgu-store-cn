@@ -14,7 +14,8 @@
  * webText (the web-url file), accountsNote ({ text, error }: the Accounts
  * status line), pick (the GitHub repo being added: { repo, probe (the
  * updater's answer, null while it looks), tokenNote (Add token's status
- * belongs on its page) }, or null) }.
+ * belongs on its page) }, or null), uplinkNote (the uplink's refusal of the
+ * last Wi-Fi or preferred-connection request) }.
  *
  * What a press does rides on the values as `act`: on a button's opts, on
  * each nav, grid and list item, on each filter cell (acts). The acts:
@@ -23,13 +24,20 @@
  * { do: 'remove', id }, { do: 'restart' },
  * { do: 'source-remove', id }, { do: 'account-remove', id }, { do: 'add-source' },
  * { do: 'add-token' }, { do: 'sign-in' }, { do: 'sign-in-cancel' }, { do: 'phone' },
- * { do: 'pick', channel }, { do: 'pick-retry' }, { do: 'pick-add-token' }, { do: 'key', key } (typeKey).
+ * { do: 'pick', channel }, { do: 'pick-retry' }, { do: 'pick-add-token' }, { do: 'key', key } (typeKey),
+ * { do: 'wifi-power' }, { do: 'wifi-scan' }, { do: 'wifi-join', ssid }, { do: 'wifi-password', ssid },
+ * { do: 'wifi-forget', ssid }, { do: 'uplink-prefer', kind }.
  *
  * The type page ({ name: 'type', title, text, shift, sym, layout, symbols,
- * go, secret, max }) is text typed on the drawn keyboard: layout 'url'
+ * go, secret, max, min, label }) is text typed on the drawn keyboard: layout 'url'
  * (URLs and tokens, the default) or 'text' (words; with symbols its '#+='
  * page has every printable ASCII symbol), go the Enter key's text, secret
- * shows only the last 4 characters, max the length (300).
+ * shows only the last 4 characters, max the length (300), min the length
+ * its Enter key takes, label the text box's caption.
+ *
+ * The Wi-Fi page (wifi) and the preferred connection (prefer) show the
+ * uplink's state (state.uplink: mgu-uplink 0.7.0's status.json through the
+ * updater) and are there only with its Wi-Fi.
  */
 const { PHASE, percent, rowAction, statusLine, sourceLabel, sourceState, sourceActions, sourceChannel, sourceAccount,
     tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress, hmiNames,
@@ -228,6 +236,12 @@ function settingsView(m) {
     const toks = tokens(m);
     const web = m.connected && st && st.web && typeof st.web === 'object' ? st.web : null;
     const access = [];
+    const w = wifiOf(m);
+    if (w) {
+        const s = wifiState(w);
+        access.push({ id: 'wifi', title: 'Wi-Fi', sub: s[0], subColor: s[1], plain: true, vicon: 'wifi', iconColor: s[1] === DIM ? 'text' : s[1],
+            right: 'chevron', act: { do: 'open', page: { name: 'wifi' } } });
+    }
     if (toks) {
         access.push({ id: 'accounts', title: 'Accounts', sub: accountsState(toks), plain: true, vicon: 'lock', iconColor: 'text',
             right: 'chevron', act: { do: 'open', page: { name: 'accounts' } } });
@@ -324,7 +338,7 @@ function appView(m, page) {
 function confirmView(m, page) {
     const all = comps(m);
     const c = find(all, page.id);
-    const icon = c ? iconOf(c) : { vicon: page.kind === 'restart' ? 'refresh' : page.kind === 'account-remove' ? 'lock' : 'warning',
+    const icon = c ? iconOf(c) : { vicon: { restart: 'refresh', 'account-remove': 'lock', 'wifi-forget': 'wifi' }[page.kind] || 'warning',
         kind: 'service', colors: '#3a4352,#232a35' };
     let title = '';
     let line = '';
@@ -345,6 +359,10 @@ function confirmView(m, page) {
         title = 'Remove account?';
         line = t ? [tokenLabel(t), tokenSources(t, sources(m))].filter(Boolean).join(' · ') : page.id;
         now = button('Remove', { do: 'account-remove', id: page.id }, { vicon: 'trash', style: 'primary', color: RED });
+    } else if (page.kind === 'wifi-forget') {
+        title = 'Forget network?';
+        line = page.ssid;
+        now = button('Forget', { do: 'wifi-forget', ssid: page.ssid }, { vicon: 'trash', style: 'primary', color: RED });
     }
     return { icon, title: { text: title }, text: { text: line }, now, later: button('Cancel', { do: 'back' }, { vicon: 'back', style: 'outline' }),
         note: { text: '' } };
@@ -429,18 +447,19 @@ const masked = (t) => (t.length <= 4 ? t : '·'.repeat(Math.min(24, t.length - 4
 
 function typeView(m, page) {
     const text = page.text || '';
+    const short = page.min && text.length < page.min ? ` · at least ${page.min} characters` : '';
     return {
         title: { text: page.title || '' },
-        field: { text: page.secret ? masked(text) : text },
+        field: { text: page.secret ? masked(text) : text, label: page.label ? page.label + short : '' },
         keyboard: { layout: page.layout || 'url', shift: !!page.shift, symbols: !!page.symbols, sym: !!page.sym, go: page.go || 'OK' }
     };
 }
 
 /* A key pressed on the type page: its text, Shift and the symbols page
- * follow it; true for the Enter key. */
+ * follow it; true for the Enter key once the text has min characters. */
 function typeKey(page, key) {
     if (key === (page.go || 'OK')) {
-        return true;
+        return (page.text || '').length >= (page.min || 0);
     }
     if (key === 'Shift') {
         page.shift = !page.shift;
@@ -466,6 +485,97 @@ function phoneView(m) {
     };
 }
 
+/* ---- the uplink: Wi-Fi and the preferred connection (state.uplink, mgu-uplink 0.7.0's status.json) ---- */
+
+/* The uplink's Wi-Fi (status.json's wifi), null without it (an uplink before
+ * 0.7.0, or not on auto): the Wi-Fi row, its pages and the preferred
+ * connection show only with it. */
+function wifiOf(m) {
+    const u = m.connected && m.st && m.st.uplink;
+    return u && u.wifi && typeof u.wifi === 'object' ? u.wifi : null;
+}
+/* Its state line: [text, colour]. */
+function wifiState(w) {
+    const at = w.ssid ? ` · ${w.ssid}` : '';
+    if (w.error && ['online', 'connected', 'connecting'].indexOf(w.link) < 0) {
+        return ['Error', AMBER];
+    }
+    return { online: [`Online${at}`, GREEN], connected: [`Connected${at}`, BLUE], connecting: [`Connecting${at}`, BLUE],
+        off: ['Off', DIM], nohw: ['No radio', DIM], busy: ['Error', AMBER], failed: ['Error', AMBER] }[w.link] || ['Not connected', DIM];
+}
+const strength = (dbm) => (typeof dbm !== 'number' ? null : dbm >= -60 ? ['Strong', GREEN] : dbm >= -72 ? ['Good', BLUE] : ['Weak', AMBER]);
+const scanningOf = (w) => !!(w.scanning || w.link === 'scanning');
+
+/* The networks while Wi-Fi is on: the one joined first, then the latest
+ * scan's (strongest first), then saved ones out of range. */
+function wifiNets(w) {
+    if (!w.enabled) {
+        return [];
+    }
+    const scan = (Array.isArray(w.networks) ? w.networks : []).filter((n) => n && n.ssid);
+    const away = (Array.isArray(w.saved) ? w.saved : []).filter((s) => !scan.some((n) => n.ssid === s)).map((ssid) => ({ ssid, saved: true, away: true }));
+    return scan.filter((n) => n.current).concat(scan.filter((n) => !n.current), away);
+}
+
+/* A network's row: a tap joins a saved or open one, or asks a secured one's
+ * password; a saved one has Forget. */
+function netRow(w, n) {
+    const q = strength(n.signal);
+    const joined = n.current && (w.link === 'connected' || w.link === 'online');
+    const status = n.away ? 'Saved · not in range' : n.current ? { online: 'Online', connected: 'Connected', connecting: 'Connecting' }[w.link] || 'Saved'
+        : n.saved ? 'Saved' : n.secure ? 'Secured' : 'Open';
+    const act = n.away || joined ? null : n.saved || !n.secure ? { do: 'wifi-join', ssid: n.ssid } : { do: 'wifi-password', ssid: n.ssid };
+    return { id: n.ssid, title: n.ssid, sub: [status, q && q[0]].filter(Boolean).join(' · '), subColor: n.current ? GREEN : DIM, plain: true,
+        vicon: n.secure && !n.saved ? 'lock' : 'wifi', iconColor: q ? q[1] : DIM, act,
+        right: n.saved ? 'chip:Forget' : act ? 'chevron' : '', chipColor: DIM,
+        chipAct: n.saved ? { do: 'open', page: { name: 'confirm', kind: 'wifi-forget', ssid: n.ssid } } : null };
+}
+
+/* The kinds the uplink takes (mgu-uplink's order), each one a preferred connection can be. */
+const KINDS = [['', 'Automatic'], ['usb', 'USB Ethernet'], ['usbecm', 'LTE stick'], ['wifi', 'Wi-Fi'], ['rndis', 'Android phone'],
+    ['ncm', 'Android phone (NCM)'], ['iphone', 'iPhone']];
+const kindLabel = (k) => (KINDS.find((x) => x[0] === k) || [k, k])[1];
+// the Wi-Fi page's picture in its state's colour, grey otherwise
+const LIT = { [GREEN]: '#5be38e,#1f9a52', [BLUE]: '#5fb4ff,#1f5fd0', [AMBER]: '#ffc04d,#c98a12' };
+
+function wifiView(m) {
+    const w = wifiOf(m) || { enabled: false, link: 'off' };
+    const s = wifiState(w);
+    const nets = wifiNets(w);
+    const scanning = scanningOf(w);
+    const dbm = typeof w.signal === 'number' ? `${w.signal} dBm` : '';
+    const preferred = (m.st && m.st.uplink && m.st.uplink.preferred) || '';
+    return {
+        subtitle: { text: !w.enabled ? '' : scanning ? 'Scanning' : plural(nets.length, 'network') },
+        networks: { items: nets.map((n) => netRow(w, n)),
+            empty: !w.enabled ? 'Off' : w.link === 'nohw' ? 'No radio' : scanning ? 'Scanning' : 'No networks' },
+        icon: { vicon: 'wifi', kind: 'service', colors: LIT[s[1]] || '#7a808a,#3a3f47' },
+        state: { text: s[0], color: s[1] },
+        info: { text: [w.ip && `IP ${w.ip}`, dbm].filter(Boolean).join(' · ') },
+        note: { text: String(m.uplinkNote || w.error || '').slice(0, 160) },
+        power: w.enabled ? button('Turn off', { do: 'wifi-power' }, { vicon: 'wifi', style: 'outline' })
+            : button('Turn on', { do: 'wifi-power' }, { vicon: 'wifi', style: 'primary', color: GREEN }),
+        scan: button(scanning ? 'Scanning' : 'Scan', { do: 'wifi-scan' }, { vicon: 'refresh', style: 'outline',
+            disabled: !w.enabled || scanning || w.link === 'nohw' }),
+        prefer: button(`Preferred: ${kindLabel(preferred)}`, { do: 'open', page: { name: 'prefer' } }, { vicon: 'route', style: 'outline' })
+    };
+}
+
+/* The connection the uplink tries first; the others follow as fallbacks. */
+function preferView(m) {
+    const u = (m.connected && m.st && m.st.uplink) || {};
+    const preferred = u.preferred || '';
+    const using = u.device && u.device.kind;
+    return {
+        status: { text: m.uplinkNote || (using ? `${u.state === 'online' ? 'Online' : 'Connecting'} through ${kindLabel(using)}` : 'Offline'),
+            color: m.uplinkNote ? AMBER : DIM },
+        list: { items: KINDS.map(([kind, label]) => ({ id: kind || 'auto', title: label, sub: kind && kind === using ? 'In use' : '', plain: true,
+            vicon: { '': 'route', usb: 'usb', usbecm: 'usb', wifi: 'wifi' }[kind] || 'phone', iconColor: 'text',
+            right: kind === preferred ? 'chip:Preferred' : '', chipColor: GREEN,
+            act: kind === preferred ? null : { do: 'uplink-prefer', kind } })), empty: '' }
+    };
+}
+
 /* The screen and its values for the page on top. */
 function view(m) {
     const page = m.stack[m.stack.length - 1] || { name: 'main' };
@@ -485,6 +595,8 @@ function view(m) {
     case 'login': values = loginView(m); break;
     case 'phone': values = phoneView(m); break;
     case 'type': values = typeView(m, page); break;
+    case 'wifi': values = wifiView(m); break;
+    case 'prefer': values = preferView(m); break;
     default: screen = 'store'; values = storeView(m);
     }
     values.nav = nav(m, tabSel);
@@ -510,4 +622,4 @@ function icons(v) {
     return out.filter((f, i) => out.indexOf(f) === i);
 }
 
-module.exports = { view, icons, typeKey, TABS, FILTERS, canRestart };
+module.exports = { view, icons, typeKey, wifiOf, TABS, FILTERS, canRestart };

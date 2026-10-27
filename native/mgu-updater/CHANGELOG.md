@@ -1,5 +1,10 @@
 # Updater changelog
 
+## 0.8.0
+
+- The uplink's Wi-Fi and preferred connection for the Store (from IterioDev App Manager 2.0.6 Wi-Fi pages): the privileged requests `uplink-prefer`, `wifi-enable`, `wifi-scan`, `wifi-connect` and `wifi-forget` are checked and relayed to mgu-uplink's root-only `/run/mgu-uplink/ctl.sock` (mgu-uplink 0.7.0) with only their own fields; the answer is the state, or the uplink's refusal. A Wi-Fi password goes to the uplink only: no log line or reply names it. Without the uplink's socket the request is refused with `needs mgu-uplink 0.7.0 or newer, running`; nothing else depends on it.
+- The state's `uplink`: the uplink's `status.json` (device, state, error, `preferred`, `wifi`), read every 2 s (`uplink_status`, `uplink_poll_s`), null while the uplink does not run.
+
 ## 0.7.6
 
 - `deploy_timeout_s` is 5400 (90 min): longer than the deploy tool's 60-minute wait for another run's lock plus its longest run, so a queued run is never stopped mid-change.

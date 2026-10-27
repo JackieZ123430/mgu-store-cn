@@ -176,7 +176,7 @@
     };
     // kit/vicons.js names (the editor's 'vicon' fields)
     const VICONS = ['grid', 'check', 'arrowDown', 'clock', 'back', 'chevron', 'plus', 'trash', 'lock', 'unlock', 'warning', 'gear', 'usb', 'refresh',
-        'gauge', 'stopwatch', 'camera', 'phone', 'tether', 'display', 'route', 'wrench'];
+        'gauge', 'stopwatch', 'camera', 'phone', 'tether', 'display', 'route', 'wrench', 'wifi'];
 
     // reduce, not Object.fromEntries: this file also runs in apps on the car (Node 8)
     const defaults = (type) => ELEMENTS[type].fields.reduce((o, f) => { o[f.key] = f.def; return o; }, {});
