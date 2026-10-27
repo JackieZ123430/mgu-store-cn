@@ -246,7 +246,7 @@ a log line.
 
 On the drawn screens, Settings has **Wi-Fi** while the uplink reports its
 Wi-Fi (`state.uplink.wifi`: mgu-uplink 0.7.0 or newer on `uplink = auto`,
-through an updater from 0.8.0), with its state: `Online · <network>`,
+through an updater from 0.8.0; the Store requires both, `release.json`), with its state: `Online · <network>`,
 `Connected · <network>` (joined; the uplink uses another device or waits
 for DHCP), `Connecting · <network>`, `Not connected`, `Off`, `No radio`,
 `Error`. Its page (from IterioDev App Manager 2.0.6's Wi-Fi page) lists,
@@ -338,7 +338,10 @@ naming the bundle and data folder, `node --check`, `javascript/build.json`.
 `lib/client.js` and `lib/mgu_render_client.js` are committed: run the build
 after `native/mgu-updater/js/client.js` or
 `native/mgu-render/js/mgu_render_client.js` changes and commit the copies.
-The Store requires mgu-render (`release.json`), so an install puts it on.
+The Store requires mgu-render and mgu-uplink (`release.json`), so an
+install puts them on. The uplink is the Store's requirement, not the
+updater's: mgu-uplink requires the updater, and the updater's planner
+refuses two components that require each other.
 
 ## Needs the head unit
 

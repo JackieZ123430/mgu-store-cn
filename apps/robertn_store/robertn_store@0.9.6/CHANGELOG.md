@@ -5,7 +5,7 @@
 Wi-Fi and the preferred connection, on the drawn screens (from IterioDev
 App Manager 2.0.6 Wi-Fi pages): Settings has Wi-Fi with its state while
 the uplink reports its Wi-Fi (mgu-uplink 0.7.0, through mgu-updater
-0.8.0, which this version requires). Its page lists the networks (the
+0.8.0; this version requires both, so an update puts them on first). Its page lists the networks (the
 one joined, the latest scan's, saved ones out of range) with their
 state and signal; a press joins a saved or open network, or asks a
 secured one's password: on iDrive 8 the keyboard page with word keys
