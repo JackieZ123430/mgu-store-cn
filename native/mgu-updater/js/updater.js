@@ -580,7 +580,8 @@ class Fetcher {
                     }
                 } else {
                     reject(Object.assign(new Error(result && result.error || 'download failed'),
-                        result && result.status ? { status: result.status } : {}, result && result.rateLimited ? { rateLimited: true } : {}));
+                        result && result.status ? { status: result.status } : {}, result && result.rateLimited ? { rateLimited: true } : {},
+                        result && result.tooBig ? { tooBig: true } : {}));
                 }
             });
             child.stdin.end(JSON.stringify({ url, headers, dest, maxBytes, dns: lease.dns, ca: this.ca,
@@ -1297,46 +1298,63 @@ class Updater {
         return path.join(this.conf.state_dir, 'icons', `${key}.png`);
     }
 
+    /* What a failed fetch of an entry's icon is recorded under: source, id,
+     * version, URL and sha256, so a new version or a new icon is asked for. */
+    iconFailureKey(source, entry) {
+        return sha256(`${source}\0${entry.listedId || entry.id}\0${entry.version}\0${entry.icon.ref}\0${entry.icon.sha256 || ''}`);
+    }
+
+    /* Writes a checked icon's bytes as file (world-readable, by rename). */
+    keepIcon(file, b) {
+        mkdirp(path.dirname(file), 0o755);
+        fs.writeFileSync(`${file}.tmp`, b, { mode: 0o644 });
+        fs.chmodSync(`${file}.tmp`, 0o644);
+        fs.renameSync(`${file}.tmp`, file);
+    }
+
     /* Fetches the icons a source's components name that are not kept yet,
      * one source's at a time: a PNG of at most ICON_BYTES, matching its
      * sha256 when the source gives one, kept world-readable for the Store.
-     * The app installed from this source (or from none) has its icon
-     * fetched only while its installed package has none (installedIcon). An icon that is missing or bad is not asked for
-     * again for that file name (a new version is a new name); one that could
-     * not be fetched is asked for again a day later; both are kept in
-     * state/icon-failures.json across restarts. The component is listed
-     * without it. */
+     * The component whose row is an installed app with its own icon
+     * (installedIcon) has its source's icon fetched only once it has none.
+     * An icon that is missing, too big, not a PNG or not its sha256 is not
+     * asked for again for that version of the component (and that icon);
+     * one that could not be fetched is asked for again a day later; both are
+     * kept in state/icon-failures.json across restarts. The component is
+     * listed without it. */
     fetchIcons(rt) {
         if (rt.icons) {
             return rt.icons;
         }
-        const dir = path.join(this.conf.state_dir, 'icons');
         const failed = this.iconFailures();
+        // the components of this source whose row is the installed app, showing its own icon (state())
+        const shown = new Set();
+        this.resolved().forEach((r) => {
+            if (r.source === rt.def.id && r.entry.kind === 'app' && this.installedOf(r.entry.id, 'app') &&
+                this.installedIcon(r.entry.installAs || r.entry.id)) {
+                shown.add(r.entry.listedId || r.entry.id);
+            }
+        });
         const due = (c) => {
-            const file = this.iconFile(rt.def.id, c);
-            const f = failed[path.basename(file)];
-            return !fs.existsSync(file) && !(f && (f.missing || f.at > Date.now() - 86400000)) &&
-                // the row of the app installed from this source shows its installed package's
-                !(c.kind === 'app' && (!this.origins[c.id] || this.origins[c.id].source === rt.def.id) && this.installedIcon(c.id));
+            const f = failed[this.iconFailureKey(rt.def.id, c)];
+            return !fs.existsSync(this.iconFile(rt.def.id, c)) && !(f && (f.missing || f.at > Date.now() - 86400000)) &&
+                !(c.kind === 'app' && shown.has(c.id));
         };
         rt.icons = rt.components.filter((c) => c.icon && due(c)).reduce((p, c) => p
             .then(() => rt.reader.icon(c))
             .then((b) => {
-                if (b.length > sourcesLib.ICON_BYTES || b.slice(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+                if (!sourcesLib.isIcon(b)) {
                     throw Object.assign(new Error(`not a PNG of at most ${sourcesLib.ICON_BYTES} bytes`), { missing: true });
                 }
                 if (c.icon.sha256 && sha256(b) !== c.icon.sha256) {
                     throw Object.assign(new Error('does not match its sha256'), { missing: true });
                 }
-                mkdirp(dir, 0o755);
-                const file = this.iconFile(rt.def.id, c);
-                fs.writeFileSync(`${file}.tmp`, b, { mode: 0o644 });
-                fs.chmodSync(`${file}.tmp`, 0o644);
-                fs.renameSync(`${file}.tmp`, file);
+                this.keepIcon(this.iconFile(rt.def.id, c), b);
                 this.changed();
             })
             .catch((err) => {
-                failed[path.basename(this.iconFile(rt.def.id, c))] = { at: Date.now(), missing: !!(err.missing || err.status === 404 || err.code === 'ENOENT') };
+                failed[this.iconFailureKey(rt.def.id, c)] = { at: Date.now(),
+                    missing: !!(err.missing || err.tooBig || err.status === 404 || err.code === 'ENOENT') };
                 this.saveIconFailures();
                 console.log(`source ${rt.def.id}: icon of ${c.id}: ${err.message}`);
             }), Promise.resolve()).then(() => {
@@ -1345,7 +1363,7 @@ class Updater {
         return rt.icons;
     }
 
-    /* The icons that could not be fetched, by file name: { at, missing }. */
+    /* The icons that could not be fetched, by iconFailureKey: { at, missing }. */
     iconFailures() {
         if (!this.iconFailed) {
             try {
@@ -1359,7 +1377,7 @@ class Updater {
 
     saveIconFailures() {
         try {
-            mkdirp(this.conf.state_dir, 0o700);
+            mkdirp(this.conf.state_dir, 0o755);
             writeAtomic(path.join(this.conf.state_dir, 'icon-failures.json'), JSON.stringify(this.iconFailed));
         } catch (e) {
             console.log(`icon-failures.json: ${e.message}`);
@@ -1367,44 +1385,42 @@ class Updater {
     }
 
     /* The icon an installed app's package shows on the car's app list (its
-     * rhmiData's first entry point's, sourcesLib.entryIcon), kept as
+     * rhmiData's first entry point's, sourcesLib.entryIcons), kept as
      * <state_dir>/icons/<sha256>.png for the Store; null without a PNG of
-     * at most ICON_BYTES. Read again only when its application.json or the
-     * icon file changes. */
+     * at most ICON_BYTES. Every folder on the way is a folder, not a link,
+     * and no file is read through one. Read again only when its
+     * application.json or the icon file changes. */
     installedIcon(id) {
         this.appIcons = this.appIcons || new Map();
         try {
-            const rhmi = path.join(appHome(this.conf, id), 'rhmiData');
+            const home = appHome(this.conf, id);
+            const inside = (rel) => sourcesLib.safePath(home, `rhmiData/${rel}`);
             const stamp = (f) => {
                 const st = fs.lstatSync(f);
                 return `${st.size}:${st.mtime.getTime()}:${st.ino}`;
             };
-            const app = path.join(rhmi, 'application.json');
+            const app = inside('application.json');
             const appStamp = `${app}:${stamp(app)}`;
             const kept = this.appIcons.get(id);
             if (kept && kept.app === appStamp && (!kept.ref || kept.from === `${kept.ref}:${stamp(kept.ref)}`) &&
                 (!kept.file || fs.existsSync(kept.file))) {
                 return kept.file;
             }
-            const rel = sourcesLib.entryIcon(readAppJson(app).application, '', (r) => {
+            const ref = sourcesLib.entryIcons(readAppJson(app).application, '').map((r) => {
                 try {
-                    return fs.lstatSync(path.join(rhmi, r)).isFile();
+                    const f = inside(r);
+                    return fs.lstatSync(f).isFile() ? f : null;
                 } catch (e) {
-                    return false;
+                    return null;
                 }
-            });
-            const ref = rel ? path.join(rhmi, rel) : null;
+            }).find(Boolean) || null;
             const from = ref ? `${ref}:${stamp(ref)}` : null;
             const b = ref ? readAppFile(ref, sourcesLib.ICON_BYTES) : null;
             let file = null;
-            if (b && b.slice(0, 8).toString('hex') === '89504e470d0a1a0a') {
-                const dir = path.join(this.conf.state_dir, 'icons');
-                file = path.join(dir, `${sha256(b)}.png`);
+            if (b && sourcesLib.isIcon(b)) {
+                file = path.join(this.conf.state_dir, 'icons', `${sha256(b)}.png`);
                 if (!fs.existsSync(file)) {
-                    mkdirp(dir, 0o755);
-                    fs.writeFileSync(`${file}.tmp`, b, { mode: 0o644 });
-                    fs.chmodSync(`${file}.tmp`, 0o644);
-                    fs.renameSync(`${file}.tmp`, file);
+                    this.keepIcon(file, b);
                 }
             }
             this.appIcons.set(id, { app: appStamp, ref, from, file });
@@ -1415,22 +1431,31 @@ class Updater {
         }
     }
 
-    /* Removes the kept icons no source's components name and no installed app shows. */
+    /* Removes the kept icons no source's components name and no installed
+     * app shows, and the failures of icons no component names. */
     pruneIcons() {
         const dir = path.join(this.conf.state_dir, 'icons');
-        const keep = (this.appIcons ? Array.from(this.appIcons.values()) : []).filter((k) => k.file).map((k) => path.basename(k.file));
+        (this.appIcons || new Map()).forEach((k, id) => {
+            if (!installedApp(this.conf, id)) {
+                this.appIcons.delete(id);
+            }
+        });
+        const keep = Array.from((this.appIcons || new Map()).values()).filter((k) => k.file).map((k) => path.basename(k.file));
+        const keys = [];
         this.defs().forEach((d) => {
             const rt = this.src.get(d.id);
-            (rt ? rt.components : []).filter((c) => c.icon).forEach((c) => keep.push(path.basename(this.iconFile(d.id, c))));
+            (rt ? rt.components : []).filter((c) => c.icon).forEach((c) => {
+                keep.push(path.basename(this.iconFile(d.id, c)));
+                keys.push(this.iconFailureKey(d.id, c));
+            });
         });
         try {
             fs.readdirSync(dir).filter((n) => keep.indexOf(n) < 0).forEach((n) => rmIfThere(path.join(dir, n)));
         } catch (e) { /* none yet */ }
-        // failures of icons no component names any more
         const failed = this.iconFailures();
-        const gone = Object.keys(failed).filter((n) => keep.indexOf(n) < 0);
+        const gone = Object.keys(failed).filter((k) => keys.indexOf(k) < 0);
         if (gone.length) {
-            gone.forEach((n) => delete failed[n]);
+            gone.forEach((k) => delete failed[k]);
             this.saveIconFailures();
         }
     }
@@ -1466,7 +1491,13 @@ class Updater {
         this.scanTokens();
         this.validateTokens();
         this.checking = uids.then(() => Promise.all(this.defs().map((d) => this.checkSource(d.id))))
-            .then(() => this.pruneIcons())
+            .then(() => {
+                // with every source read, which row is the installed one is settled: once the
+                // fetches under way are through, each source's icons are looked at again (in the background)
+                const rts = this.defs().map((d) => this.src.get(d.id)).filter(Boolean);
+                this.iconPass = Promise.all(rts.map((rt) => rt.icons)).then(() => Promise.all(rts.map((rt) => this.fetchIcons(rt))));
+                return this.pruneIcons();
+            })
             .then(() => this.refresh())
             .then(() => {
                 this.checking = null;

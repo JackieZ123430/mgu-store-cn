@@ -2620,6 +2620,26 @@ function testIndexV2(certs, pubDir) {
         })
         .then(() => {
             ok('icons: kept ones are not fetched again, nor failed ones within a day', asked(/\.png$/) === iconAsks, `${asked(/\.png$/)} ${iconAsks}`);
+            // a day later: a too-big icon and one that does not match its sha256 are not asked for again
+            Object.keys(u.iconFailed).forEach((k) => {
+                u.iconFailed[k].at -= 2 * 86400000;
+            });
+            iconAsks = asked(/\.png$/);
+            return checked();
+        })
+        .then(() => {
+            ok('icons: a day later, a too-big icon and a mismatched one are still not asked for again (that version)',
+                asked(/\.png$/) === iconAsks && comp('v2big').icon === null && comp('v2both').icon === null, `${asked(/\.png$/)} ${iconAsks}`);
+            // the index gives v2both's icon its right sha256: a new icon is asked for once
+            const both = index.packages.find((x) => x.id === 'v2both');
+            both.iconSha256 = sha256(fs.readFileSync(path.join(pubDir, 'v2both.png')));
+            fs.writeFileSync(path.join(pubDir, 'v2-index.json'), JSON.stringify(index));
+            iconAsks = asked(/\.png$/);
+            return checked();
+        })
+        .then(() => {
+            ok('icons: an icon with a new sha256 is asked for again, once', asked(/v2both\.png$/) >= 1 && asked(/\.png$/) === iconAsks + 1 &&
+                comp('v2both').icon && fs.readFileSync(comp('v2both').icon).equals(png(10, 2)), `${asked(/\.png$/)} ${iconAsks}`);
             return ask(sock, { op: 'install', id: 'v2both' });
         })
         .then((err) => until(st, () => !st().busy && comp('v2both').status !== 'available', 30000, 'v2both installed').then(() => err))
@@ -2858,7 +2878,7 @@ function testIdrive7(certs) {
         { id: 'srcpkg', kind: 'app', path: 'pkg' }] }),
         'pkg/mgu-app.json': JSON.stringify({ schema: 1, id: 'srcpkg', version: '1.0.0', tree: 'srcpkg@1.0.0' }),
         'pkg/srcpkg@1.0.0/rhmiData/application.json': JSON.stringify({ application: { entryPoints: [{ icon: 'srcpkg_icon.png' }],
-            variantGroups: [{ resourcesPath: './variantGroups/Common/images' }] } }),
+            variantGroups: [{ resourcesPath: './variantGroups/ID8/images' }, { resourcesPath: './variantGroups/Common/images' }] } }),
         'pkg/srcpkg@1.0.0/rhmiData/variantGroups/Common/images/srcpkg_icon.png': srcIcon,
         'apps/car_vitals/app.json': JSON.stringify({ id: 'car_vitals', title: 'M Vitals', version: '2.14.0' }),
         'apps/car_vitals/icon.png': repoIcon,
@@ -2915,10 +2935,11 @@ function testIdrive7(certs) {
                 `${comp('redline').icon} ${comp('my_kitapp').icon}`);
             u.pruneIcons();
             ok('icons: an installed app\'s icon is kept by the clean-up', fs.existsSync(comp('car_vitals').icon) && iconOf('gforce'));
-            ok('icons: a source package shows the icon its entry point names', iconOf('srcpkg') && iconOf('srcpkg').equals(srcIcon), comp('srcpkg').icon);
+            ok('icons: a source package shows the icon its entry point names, from the variant group that has it', iconOf('srcpkg') && iconOf('srcpkg').equals(srcIcon), comp('srcpkg').icon);
             const first = iconReads(mark);
-            ok('requests: a new listing reads each app\'s icon once (a source package\'s through its application.json), ' +
-                'none for an app installed with its own', first.length === 4 && !first.some((u) => /car_vitals/.test(u)), first.join(' '));
+            ok('requests: a new listing reads each app\'s icon once (a source package\'s through its application.json, ' +
+                'then each place it names until one is there), none for an app installed with its own',
+            first.length === 5 && !first.some((u) => /car_vitals/.test(u)), first.join(' '));
             mark = seen.length;
             return u.check().then(() => until(() => u.src.get('idrive7-apps').icons, (x) => !x, 30000, 'icons fetched'));
         })
@@ -2970,6 +2991,100 @@ function testIdrive7(certs) {
             ok('idrive7: with its source removed by the owner, an app is imported and the source stays removed',
                 u.adopted.imported.indexOf('dyno') >= 0 && !u.origins.dyno && !u.stored.some((d) => d.id === 'idrive7-apps') &&
                 comp('dyno').source === 'imported' && comp('dyno').status === 'installed', `${JSON.stringify(u.stored)} ${JSON.stringify(comp('dyno'))}`);
+            u.server.close();
+        });
+}
+
+/* Icons of installed apps and of folder sources: an app installed from
+ * outside the updater that two sources list, an app home with a link in
+ * it, and an app that goes away. */
+function testIcons() {
+    const { Updater } = require('../js/updater');
+    const M = path.join(T, 'icons');
+    const opt = path.join(M, 'opt');
+    const oap = path.join(M, 'oap');
+    const state = path.join(M, 'state');
+    [M, opt, oap, state, path.join(M, 'shm'), path.join(M, 'media'), path.join(M, 'empty')].forEach(mkdirp);
+    const deployLog = path.join(M, 'deploy.log');
+    fs.writeFileSync(deployLog, '');
+    Object.assign(process.env, { TOOL_ROOT: opt, OAP_ROOT: oap, FAKE_DEPLOY_LOG: deployLog });
+    delete process.env.FAKE_LEASE;
+    delete process.env.FAKE_PENDING;
+    delete process.env.FAKE_UNIT_HMI;
+    const deploySh = path.join(M, 'mgu-deploy.sh');
+    fs.writeFileSync(deploySh, DEPLOY_SH, { mode: 0o755 });
+    mkdirp(path.join(opt, 'mgu-deploy', 'versions', '0.5.0'));
+    fs.writeFileSync(path.join(opt, 'mgu-deploy', 'versions', '0.5.0', 'component.json'), JSON.stringify({ id: 'mgu-deploy', kind: 'tool', version: '0.5.0' }));
+    fs.symlinkSync('versions/0.5.0', path.join(opt, 'mgu-deploy', 'current'));
+    const png = (n, fill) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(n, fill)]);
+    const installed = (id, uid, icon) => {
+        mkdirp(path.join(oap, 'oap_12201', 'data', 'apps'));
+        mkdirp(path.join(oap, `oap_${uid}`, 'source'));
+        fs.writeFileSync(path.join(oap, 'oap_12201', 'data', 'apps', `${id}.json`), JSON.stringify({ userId: uid }));
+        fs.writeFileSync(path.join(oap, `oap_${uid}`, 'source', 'package.json'), JSON.stringify({ name: id, version: '1.0.0' }));
+        mkdirp(path.join(oap, `oap_${uid}`, 'rhmiData', 'resources'));
+        fs.writeFileSync(path.join(oap, `oap_${uid}`, 'rhmiData', 'application.json'), JSON.stringify({ application: {
+            entryPoints: [{ icon: `${id}_icon.png` }] } }));
+        fs.writeFileSync(path.join(oap, `oap_${uid}`, 'rhmiData', 'resources', `${id}_icon.png`), icon);
+    };
+    const twinIcon = png(41, 1);
+    installed('twin', 12460, twinIcon);
+    // an app home whose resources folder is a link elsewhere
+    installed('linked', 12461, png(42, 2));
+    const elsewhere = path.join(M, 'elsewhere');
+    mkdirp(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, 'linked_icon.png'), png(43, 3));
+    fs.renameSync(path.join(oap, 'oap_12461', 'rhmiData', 'resources'), path.join(M, 'was-resources'));
+    fs.symlinkSync(elsewhere, path.join(oap, 'oap_12461', 'rhmiData', 'resources'));
+    // two folder sources listing twin (no title of its own: neither updates it), each with its icon
+    const folder = (name, icon) => {
+        const d = path.join(M, name);
+        mkdirp(path.join(d, 'twin'));
+        fs.writeFileSync(path.join(d, 'mgu-repo.json'), JSON.stringify({ schema: 1, components: [
+            { id: 'twin', kind: 'app', path: 'twin', build: { node: 'build.js', args: [] } }] }));
+        fs.writeFileSync(path.join(d, 'twin', 'app.json'), JSON.stringify({ id: 'twin', title: `Twin ${name}`, version: '1.1.0' }));
+        fs.writeFileSync(path.join(d, 'twin', 'icon.png'), icon);
+        fs.writeFileSync(path.join(d, 'build.js'), '// not run here\n');
+        return d;
+    };
+    const aIcon = png(44, 4);
+    const bIcon = png(45, 5);
+    const sources = path.join(M, 'sources.json');
+    fs.writeFileSync(sources, JSON.stringify({ schema: 1, sources: [{ id: 'mgu-store', type: 'file', path: path.join(M, 'empty'), builtin: true },
+        { id: 'fa', type: 'file', path: folder('fa', aIcon) }, { id: 'fb', type: 'file', path: folder('fb', bIcon) }] }));
+    publish(path.join(M, 'empty'), []);
+    const conf = {
+        sources, credentials_dir: path.join(M, 'cred'), state_dir: state, tool_root: opt, oap_root: oap, mainapp_uid: '12201',
+        store_app: 'robertn_store', deploy: deploySh, lease: path.join(M, 'lease.json'), ca_file: '',
+        github_api: API, github_web: GH_WEB, github_client_id: '', builtin_repo: 'robertnisipeanu/mgu-store',
+        fetch_uid: String(FETCH_UID), fetch_gid: String(FETCH_UID), build_uid: '12995', build_gid: '12995',
+        build_timeout_s: '3', build_max_bytes: String(8 << 20), repo_max_bytes: String(8 << 20),
+        mounts: path.join(M, 'mounts'), usb_roots: path.join(M, 'media'), web_secret: path.join(M, 'web-secret'), web_uid: '12996', web_gid: '12202',
+        socket: path.join(M, 'shm', 'updater.sock'), socket_group: 'staff', deploy_tool: 'mgu-deploy', uplink_tool: 'mgu-uplink',
+        bootstrap_check_s: '6', privacy_tool: '', reboot: ''
+    };
+    fs.writeFileSync(conf.mounts, 'proc /proc proc rw 0 0\n');
+    const u = new Updater(conf);
+    const rows = () => u.state().components.filter((c) => c.id === 'twin' || c.installAs === 'twin' || c.listedId === 'twin');
+    return u.serve()
+        .then(() => u.check())
+        .then(() => u.iconPass)
+        .then(() => {
+            const r = rows();
+            const bytes = (c) => (c && c.icon ? fs.readFileSync(c.icon) : null);
+            const mine = r.find((c) => c.installed);
+            const others = r.filter((c) => !c.installed);
+            ok('icons: of an app two sources list, the installed row shows its installed package\'s, each other row its source\'s',
+                mine && bytes(mine).equals(twinIcon) && others.length >= 1 &&
+                others.every((c) => bytes(c) && bytes(c).equals(c.source === 'fa' ? aIcon : bIcon)),
+                JSON.stringify(r.map((c) => [c.id, c.source, !!c.installed, c.icon])));
+            ok('icons: none through a link in an app\'s home', u.installedIcon('linked') === null);
+            // twin goes away: its kept icon and its entry go with the clean-up
+            const file = mine && mine.icon;
+            fs.unlinkSync(path.join(oap, 'oap_12201', 'data', 'apps', 'twin.json'));
+            u.pruneIcons();
+            ok('icons: an app no longer installed drops its icon at the clean-up', !u.appIcons.has('twin') && file && !fs.existsSync(file),
+                `${Array.from(u.appIcons.keys())} ${file}`);
             u.server.close();
         });
 }
@@ -3956,6 +4071,7 @@ function main() {
             .then(() => testIndexV2(certs, pubDir).catch((e) => ok('index v2 scenario', false, e.stack)))
             .then(() => testAppManager(certs, pubDir).catch((e) => ok('App Manager scenario', false, e.stack)))
             .then(() => testIdrive7(certs).catch((e) => ok('idrive7-apps installer scenario', false, e.stack)))
+            .then(() => testIcons().catch((e) => ok('icons scenario', false, e.stack)))
             .then(() => testPythonRepo().catch((e) => ok('python repo scenario', false, e.stack)))
             .then(() => testIdClash().catch((e) => ok('id clash scenario', false, e.stack)))
             .then(() => testDaemon(certs, pubDir))

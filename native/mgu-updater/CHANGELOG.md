@@ -2,10 +2,10 @@
 
 ## 0.7.3
 
-- An installed app's `icon` is the icon its installed package shows on the car's app list (its rhmiData's first entry point's), kept in `state/icons/`; its source's icon is not fetched while it has one.
-- A repo tree's apps have icons: a build-script app's `icon.png` in its folder (or the file its `mgu-repo.json` entry's `icon` names there), a source package's entry-point icon. Each is read from the listed commit once per version, in the background.
+- An installed app's `icon` is the icon its installed package shows on the car's app list (its rhmiData's first entry point's, read through no link), kept in `state/icons/`; the row of the installed app has its source's icon fetched only once it has none, other sources' rows of that id show their own.
+- A repo tree's apps have icons: a build-script app's `icon.png` in its folder (or the file its `mgu-repo.json` entry's `icon` names there), a source package's entry-point icon (each variant group's `resourcesPath` looked in, then `resources/`). Each is read from the listed commit once per version, in the background.
 - A package without `icon.png` beside `package.json` gives its entry point's icon.
-- An icon that is missing or not a usable PNG is not asked for again for that version, across restarts too (`state/icon-failures.json`); one that could not be fetched is asked for again a day later.
+- An icon that is missing, larger than 128 KiB, not a PNG or not its sha256 is not asked for again for that version of the component and that icon, across restarts too (`state/icon-failures.json`); one that could not be fetched for another reason is asked for again a day later.
 
 ## 0.7.2
 

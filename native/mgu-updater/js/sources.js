@@ -160,7 +160,7 @@ function readInside(root, rel, max) {
             throw new Error(`${rel}: not a file`);
         }
         if (st.size > max) {
-            throw new Error(`${rel}: more than ${max} bytes`);
+            throw Object.assign(new Error(`${rel}: more than ${max} bytes`), { tooBig: true });
         }
         const buf = Buffer.alloc(st.size);
         let off = 0;
@@ -232,38 +232,43 @@ function safeRel(p) {
         p.split('/').every((s) => s !== '..' && s !== '.' && s !== '');
 }
 
+/* A PNG of at most ICON_BYTES: what the Store draws as an icon. */
+function isIcon(b) {
+    return b.length <= ICON_BYTES && b.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
+}
+
 /* The icon an app shows on the car's app list: its rhmiData's
  * application.json (app) names it on the first entry point, in a variant
  * group's resourcesPath, or in resources/ once installed. rhmi: the
- * rhmiData folder's path with a trailing slash. With has(rel), the first
- * of those that is there; without, the first one. */
-function entryIcon(app, rhmi, has) {
+ * rhmiData folder's path with a trailing slash. The places it can be, in
+ * that order ([] without one). */
+function entryIcons(app, rhmi) {
     const name = app && Array.isArray(app.entryPoints) && app.entryPoints[0] && app.entryPoints[0].icon;
     if (typeof name !== 'string' || !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(name)) {
-        return null;
+        return [];
     }
     const dirs = (Array.isArray(app.variantGroups) ? app.variantGroups : [])
         .map((g) => (g && typeof g.resourcesPath === 'string' ? g.resourcesPath.replace(/^\.\//, '').replace(/\/+$/, '') : ''))
         .filter(safeRel).concat(['resources']);
-    const refs = dirs.map((d) => `${rhmi}${d}/${name}`);
-    return has ? refs.find(has) || null : refs[0];
+    return dirs.map((d) => `${rhmi}${d}/${name}`).filter((r, i, all) => all.indexOf(r) === i);
 }
 
 /* A repo-tree entry's icon bytes through readFile(rel, max): the file its
- * icon names, or for an entryPoint icon (a source package's) the file its
- * application.json names. */
+ * icon names, or for an entryPoint icon (a source package's) the first of
+ * the places its application.json gives that is there (a request each,
+ * stopping at the first found). */
 function iconOf(entry, readFile) {
     if (!entry.icon.entryPoint) {
         return readFile(entry.icon.ref, ICON_BYTES);
     }
     const rhmi = entry.icon.ref.replace(/application\.json$/, '');
-    return readFile(entry.icon.ref, SMALL).then((b) => {
-        const ref = entryIcon(parseJson(b, 'application.json').application, rhmi);
-        if (!ref) {
-            throw Object.assign(new Error('its entry point names no icon'), { missing: true });
-        }
-        return readFile(ref, ICON_BYTES);
-    });
+    return readFile(entry.icon.ref, SMALL).then((b) => entryIcons(parseJson(b, 'application.json').application, rhmi)
+        .reduce((p, ref) => p.catch((err) => {
+            if (!err.missing && err.status !== 404) {
+                throw err;
+            }
+            return readFile(ref, ICON_BYTES);
+        }), Promise.reject(Object.assign(new Error('its entry point names no icon'), { missing: true }))));
 }
 
 /* What a component needs that another one provides: Python for a
@@ -1519,13 +1524,13 @@ function packageInfo(members) {
     let ref = `${base}icon.png`;
     if (!byName.has(ref)) {
         try {
-            ref = entryIcon(parseJson(byName.get(`${rhmi}application.json`), 'application.json').application, rhmi, (r) => byName.has(r));
+            ref = entryIcons(parseJson(byName.get(`${rhmi}application.json`), 'application.json').application, rhmi).find((r) => byName.has(r)) || null;
         } catch (e) {
             ref = null;
         }
     }
     const ib = ref && byName.get(ref);
-    const icon = ib && ib.length <= ICON_BYTES && ib.slice(0, 8).toString('hex') === '89504e470d0a1a0a'
+    const icon = ib && isIcon(ib)
         ? { ref, sha256: crypto.createHash('sha256').update(ib).digest('hex'), packaged: true } : null;
     return { pkg, title, hmi: hmi.length ? hmi.sort() : null, icon };
 }
@@ -1633,5 +1638,5 @@ function label(s) {
 module.exports = {
     load, save, checkStored, writePrivate, mkdirPrivate, reader, label, usbSources, mountPoints,
     repoCatalog, packComponent, serviceUnit, preloadFiles, subtree, packageInfo, packageEntry, readInside, walkInside, authError,
-    renameable, renameApp, packageId, uuid5, orderBranches, entryIcon, REPO, CHANNEL, PACKAGE, ICON_BYTES
+    renameable, renameApp, packageId, uuid5, orderBranches, entryIcons, isIcon, safePath, REPO, CHANNEL, PACKAGE, ICON_BYTES
 };

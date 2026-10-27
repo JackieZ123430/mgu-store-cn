@@ -17,7 +17,7 @@
  *   { done: true, bytes, status, headers }      dest complete (headers: those kept)
  *   { notModified: true, status: 304, headers } a conditional request's answer:
  *                                               unchanged, nothing at dest
- *   { error: "<reason>", status, rateLimited }  nothing usable at dest
+ *   { error: "<reason>", status, rateLimited, tooBig }  nothing usable at dest
  *                                               (status: the HTTP answer, if any;
  *                                               rateLimited: a 429, or a 403 with
  *                                               x-ratelimit-remaining 0 or retry-after)
@@ -116,7 +116,7 @@ function get(job, url, headers, hops) {
         const total = Number(res.headers['content-length']) || null;
         if (job.maxBytes && total && total > job.maxBytes) {
             res.resume();
-            emit({ error: `${total} bytes is more than the expected ${job.maxBytes}` });
+            emit({ error: `${total} bytes is more than the expected ${job.maxBytes}`, tooBig: true });
             process.exitCode = 1;
             return;
         }
@@ -128,7 +128,7 @@ function get(job, url, headers, hops) {
             if (job.maxBytes && bytes > job.maxBytes) {
                 res.destroy();
                 out.destroy();
-                emit({ error: `more than the expected ${job.maxBytes} bytes` });
+                emit({ error: `more than the expected ${job.maxBytes} bytes`, tooBig: true });
                 process.exitCode = 1;
                 return;
             }
