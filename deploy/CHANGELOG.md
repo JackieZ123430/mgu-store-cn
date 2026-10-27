@@ -1,5 +1,10 @@
 # Deploy tool changelog
 
+## 0.5.4
+
+- An app update, the Store's included, runs in place, restarting only that app, also right after an update of the deploy tool: while the app manager runs a provisioning fallback with the same in-place install hook, it keeps that one, and the deploy tool's new one takes effect at the next start. An app manager restarted moments before (by an app-privacy update, say) is given its usual time to come up first.
+- An update the running app manager cannot make in place restarts the app manager before the new version is put in place, then has it update the app in place, so the app's tile stays on the HMI. An app manager that started less than a minute before, whatever restarted it, is given that minute before the new version is put in place, saying so. (An update the app manager made while it was starting could leave the app without its tile until the head unit restarted.)
+
 ## 0.5.3
 
 - A tool's `"internet": true` can name in `"uids"` a file under `/var/opt/<id>/` the tool keeps its uids in (the updater picks its own on the unit); its `uids.d/<id>` follows that file.
