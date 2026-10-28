@@ -39,7 +39,7 @@ function listed(row) {
 
 /* An app install queued for the next start (iDrive 8: MainApp takes it
  * only then): the updater reports it pending (nextStart "install", an
- * updater before 0.8.1 reports no nextStart: an app pending a restart that
+ * updater before 0.8.2 reports no nextStart: an app pending a restart that
  * would update) while the car still lists the old version, or none. Not
  * offered again. */
 function startPending(row) {
