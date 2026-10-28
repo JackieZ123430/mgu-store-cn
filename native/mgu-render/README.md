@@ -97,8 +97,9 @@ from the installed HmiMain3D.
 - Logs: `journalctl -u mgu-render -u mgu-render-hmi`. `embed:` lines name the HMI compositor's globals and the
   embed path (`zero-copy`, or `readback fallback (<why>)`). While `/run/mgu-render/stats-log` exists, each shown
   app's frames a second, render time and path are logged once a second (`stats <app>: ...`); an embed app's line
-  adds the HMI's frame callbacks in that second and the time from each commit to its callback. The Store then logs
-  its own line (`stats store: ...`: builds, frames sent, touch events, CPU).
+  adds the HMI's frame callbacks in that second and the time from each commit to its callback. The Store then
+  appends its own line to `/dev/shm/robertn_store-stats.log` (`stats store: ...`: builds, frames sent, touch
+  events, CPU).
 
 An update does not stop a running mgu-render (`keepRunning` in
 `component.json`): the files and units are replaced, the running daemon goes

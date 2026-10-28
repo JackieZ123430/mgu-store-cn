@@ -490,15 +490,15 @@ static void stats(client *c, uint64_t dt) {
         uint32_t p[4] = { c->stat_frames, (uint32_t)(c->stat_sum / (c->stat_frames ? c->stat_frames : 1)), (uint32_t)c->stat_max,
                           !strcmp(path, "zero-copy") ? STATS_ZERO_COPY : 0 };
         send_msg(c, E_STATS, p, c->dialect == DIALECT_NATIVE ? sizeof p : 3 * 4);
-        if (access(STATS_LOG_FILE, F_OK) == 0 && c->mode == MODE_EMBED) {
-            unsigned n, avg, max;
-            embed_callbacks(&n, &avg, &max);
+        unsigned n = 0, avg = 0, max = 0;
+        if (c->mode == MODE_EMBED) embed_callbacks(&n, &avg, &max);
+        if (access(STATS_LOG_FILE, F_OK) != 0)
+            log_debug("%s: %u fps, render avg %u us max %u us, path %s", c->app, p[0], p[1], p[2], path);
+        else if (c->mode == MODE_EMBED)
             log_info("stats %s: %u fps, render avg %u us max %u us, path %s, hmi callbacks %u, commit to callback avg %u us max %u us",
                      c->app, p[0], p[1], p[2], path, n, avg, max);
-        } else if (access(STATS_LOG_FILE, F_OK) == 0)
-            log_info("stats %s: %u fps, render avg %u us max %u us, path %s", c->app, p[0], p[1], p[2], path);
         else
-            log_debug("%s: %u fps, render avg %u us max %u us, path %s", c->app, p[0], p[1], p[2], path);
+            log_info("stats %s: %u fps, render avg %u us max %u us, path %s", c->app, p[0], p[1], p[2], path);
         c->stat_t0 = now; c->stat_frames = 0; c->stat_sum = 0; c->stat_max = 0;
     }
 }
@@ -547,7 +547,7 @@ static void render_embed(void) {
     if (b >= 0) {
         c->last_draw = t0;
         int w = cfg.embed_area[2], h = cfg.embed_area[3];
-        if (dbr) {          /* made on the CPU: shared memory written straight in; a GPU buffer gets it scaled by GL */
+        if (dbr) {
             int img[4] = { (int)c->dbr.img[0], (int)c->dbr.img[1], (int)c->dbr.img[2], (int)c->dbr.img[3] };
             int gpu = embed_gpu_index(b), pw = (int)c->dbr.w, ph = (int)c->dbr.h;
             embed_gl_cancel();

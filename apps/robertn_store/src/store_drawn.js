@@ -402,14 +402,9 @@ class Drawn extends EventEmitter {
     }
 
     _touch(phase, x, y) {
-        if (!this.timing.on) {
-            this._touchEvent(phase, x, y);
-            return;
-        }
-        const t0 = msNow();
+        const t0 = this.timing.on ? msNow() : 0;
         this._touchEvent(phase, x, y);
-        this.timing.touches++;
-        this.timing.touchMs += msNow() - t0;
+        if (t0) { this.timing.touches++; this.timing.touchMs += msNow() - t0; }
     }
 
     _touchEvent(phase, x, y) {
