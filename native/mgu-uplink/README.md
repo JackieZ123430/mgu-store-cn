@@ -133,7 +133,12 @@ never sends an association request). Switched on, the provider takes
 `unavailable`, with the reason, and looked at again every 10 s. While it
 has `wlan1` it looks every 20 s, and when the car starts using it, gives it
 back: our wpa_supplicant stops, the link ends, IPv6 is put back and the
-link stays as the car has it. The car uses `wlan1` when there is:
+link stays as the car has it. It takes `wlan1` again no sooner than 60 s
+later, twice as long after each give-back in a row (up to 8 min), and
+keeps how `wlan1` was before it first took it until Wi-Fi is switched off.
+A check that fails (no answer from D-Bus, nl80211) is no reason to give
+`wlan1` back; before taking it, it means `unavailable`. The car uses
+`wlan1` when there is:
 
 - `wlan1` in any mode but station (an access point, P2P), read through nl80211
 - hostapd on `wlan1`
@@ -165,8 +170,8 @@ entered again. WPA2 and WPA3 personal (passwords of 8 to 63 printable
 characters) and open networks; no enterprise (EAP). A password or a
 printable-ASCII network name with a `#` after an odd number of `"` is
 refused: wpa.conf can't keep it. A wpa.conf wpa_supplicant can't read is
-moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks
-(`error` says so).
+moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks;
+`error` says so until the next join or until Wi-Fi is switched.
 
 ### status.json
 

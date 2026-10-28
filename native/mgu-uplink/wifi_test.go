@@ -21,10 +21,13 @@ import (
 // fastWiFi shortens the provider's timings for a test.
 func fastWiFi(t *testing.T) {
 	every, join, drop, recheck, own, retry, stable := wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable
+	retake, held := wifiRetake, wifiHeld
 	wifiEvery, joinTimeout, wifiDropAfter = 50*time.Millisecond, 1500*time.Millisecond, 300*time.Millisecond
 	wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable = 100*time.Millisecond, 200*time.Millisecond, 100*time.Millisecond, time.Hour
+	wifiRetake, wifiHeld = 600*time.Millisecond, time.Hour
 	t.Cleanup(func() {
 		wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable = every, join, drop, recheck, own, retry, stable
+		wifiRetake, wifiHeld = retake, held
 	})
 }
 
@@ -285,9 +288,58 @@ func TestWiFiBadConf(t *testing.T) {
 	waitWiFi(t, p, "set aside", func(st wifiStatus) bool {
 		return st.Link == "failed" && st.Error != nil && strings.Contains(*st.Error, "set aside (wpa.conf.bad)")
 	})
-	waitWiFi(t, p, "idle without saved networks", func(st wifiStatus) bool { return st.Link == "idle" && len(st.Saved) == 0 })
+	// after the retry the note stays until the next join or switch
+	waitWiFi(t, p, "idle without saved networks, saying so", func(st wifiStatus) bool {
+		return st.Link == "idle" && len(st.Saved) == 0 && st.Error != nil && strings.Contains(*st.Error, "set aside")
+	})
 	if b, err := os.ReadFile(c.wpaConf() + ".bad"); err != nil || string(b) != bad {
 		t.Fatalf("wpa.conf.bad: %q %v", b, err)
+	}
+	p.setEnabled(true)
+	waitWiFi(t, p, "note gone once switched", func(st wifiStatus) bool { return st.Link == "idle" && st.Error == nil })
+
+	// unreadable at RECONFIGURE (a join dropped): set aside too
+	os.Remove(c.wpaConf() + ".bad")
+	writeScan(t, scan, "0a:3c:ff:5b:bc:a7\t2437\t-40\t[WPA2-PSK-CCMP][ESS]\tHome\trightpass1")
+	if err := p.connect("Home", "wrongpass9"); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, c.wpaConf(), bad)
+	p.connect("Home", "rightpass1") // fails: the supplicant restarts without saved networks
+	if _, err := os.Stat(c.wpaConf() + ".bad"); err != nil {
+		t.Fatalf("not set aside at RECONFIGURE: %v", err)
+	}
+	waitWiFi(t, p, "noted after RECONFIGURE", func(st wifiStatus) bool {
+		return st.Error != nil && strings.Contains(*st.Error, "set aside")
+	})
+}
+
+// A check that fails while the provider has the interface is no reason to
+// give it back; a finding is.
+func TestWiFiKeptOnCheckError(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeScan(t, scan)
+	p, _, _ := testProvider(t, scan)
+	var mu sync.Mutex
+	var iftypeErr, dbusErr error
+	p.iftype = func(string) (uint32, error) { mu.Lock(); defer mu.Unlock(); return nl80211Station, iftypeErr }
+	p.dbusHas = func(string) (bool, error) { mu.Lock(); defer mu.Unlock(); return false, dbusErr }
+	writeFile(t, filepath.Join(p.proc, "77", "cmdline"), "/usr/sbin/wpa_supplicant_nxp\x00-u\x00-s\x00")
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "taken", func(st wifiStatus) bool { return st.Link == "idle" })
+	mu.Lock()
+	dbusErr = errors.New("dbus-send: no answer")
+	mu.Unlock()
+	time.Sleep(4 * wifiOwnRecheck)
+	mu.Lock()
+	dbusErr, iftypeErr = nil, errors.New("nl80211: busy")
+	mu.Unlock()
+	time.Sleep(4 * wifiOwnRecheck)
+	if st := p.status(); st.Link != "idle" || !p.guarding() || !p.wpa.isRunning() {
+		t.Fatalf("given back on a failed check: %+v", st)
 	}
 }
 
@@ -300,6 +352,21 @@ func TestWiFiTakenBack(t *testing.T) {
 	scan := filepath.Join(t.TempDir(), "scan")
 	writeScan(t, scan)
 	p, c, soft := testProvider(t, scan)
+	// wlant0 was down before the first take; each later take finds it up
+	var mu sync.Mutex
+	takes := 0
+	p.linkUp = func(string) (linkState, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		takes++
+		return linkState{Index: 7, Name: "wlant0", OrigName: "wlant0", WasUp: takes > 1}, nil
+	}
+	record := func() wifiRecord {
+		var r wifiRecord
+		b, _ := os.ReadFile(p.record)
+		json.Unmarshal(b, &r)
+		return r
+	}
 	p.setEnabled(true)
 	p.start()
 	defer p.stop()
@@ -312,18 +379,37 @@ func TestWiFiTakenBack(t *testing.T) {
 	st := waitWiFi(t, p, "given back", func(st wifiStatus) bool {
 		return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, "hostapd runs on wlant0")
 	})
-	if p.guarding() || p.wpa.isRunning() || exists(p.record) || len(supplicants(p.proc, "", c.wpaConf())) != 0 {
+	gaveBack := time.Now()
+	if p.guarding() || p.wpa.isRunning() || len(supplicants(p.proc, "", c.wpaConf())) != 0 {
 		t.Fatalf("still held: %+v", st)
+	}
+	if r := record(); !r.GivenBack || r.Link.WasUp {
+		t.Fatalf("record after the give-back: %+v", r)
 	}
 	if v, _ := readSysctl(soft); v != "0" {
 		t.Fatal("rfkill touched")
 	}
+	// free again at once, but taken again only after wifiRetake
 	os.RemoveAll(filepath.Dir(other))
 	waitWiFi(t, p, "taken again once free", func(st wifiStatus) bool { return st.Link == "idle" })
+	// gaveBack is when the test saw it, up to a tick late; without the wait it is taken again within wifiRecheck
+	if since := time.Since(gaveBack); since < wifiRetake-2*wifiEvery {
+		t.Fatalf("taken again after %v", since)
+	}
+	// the state from before the first take stays
+	if r := record(); r.GivenBack || r.Link.WasUp {
+		t.Fatalf("record after taking it again: %+v", r)
+	}
+	p.setEnabled(false)
+	waitWiFi(t, p, "off", func(st wifiStatus) bool { return st.Link == "off" })
+	if exists(p.record) {
+		t.Fatal("record kept after switching off")
+	}
 }
 
-// Giving the interface to the car puts back IPv6 and leaves the link as the
-// car has it; a switch-off puts the link back down too.
+// Giving the interface to the car puts back IPv6, leaves the link as the
+// car has it and keeps the record; a switch-off puts the link back down too
+// and removes it.
 func TestRestoreWiFiToCar(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (a dummy interface)")
@@ -346,7 +432,7 @@ func TestRestoreWiFiToCar(t *testing.T) {
 		restoreWiFi(record, toCar)
 		l, _ := netlink.LinkByIndex(link.Attrs().Index)
 		v, _ := readSysctl(ipv6Sysctl(name))
-		if up := l.Attrs().Flags&net.FlagUp != 0; up != toCar || v != ls.IPv6 || exists(record) {
+		if up := l.Attrs().Flags&net.FlagUp != 0; up != toCar || v != ls.IPv6 || exists(record) != toCar {
 			t.Fatalf("toCar %v: up %v ipv6 %q (was %q)", toCar, up, v, ls.IPv6)
 		}
 	}

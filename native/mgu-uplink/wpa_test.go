@@ -454,7 +454,9 @@ func fakeWPA(scanFile string, args []string) int {
 			try()
 		case "RECONFIGURE":
 			if !load() {
-				return 255
+				fmt.Printf("Failed to parse the configuration file '%s' - exiting\n", conf)
+				reply = "FAIL\n"
+				break
 			}
 			try()
 		case "SAVE_CONFIG":

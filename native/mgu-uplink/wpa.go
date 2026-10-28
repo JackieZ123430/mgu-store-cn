@@ -38,6 +38,29 @@ type supplicant struct {
 	run       *supplicantRun
 	startedAt time.Time
 	conn      *net.UnixConn
+	setAside  bool // wpa.conf was moved to wpa.conf.bad (takeSetAside)
+}
+
+// What wpa_supplicant 2.10 prints when it can't read wpa.conf at the start.
+const confUnreadable = "Failed to read or parse configuration"
+
+// setAsideConf moves wpa.conf to wpa.conf.bad, with s.mu held.
+func (s *supplicant) setAsideConf() bool {
+	if err := os.Rename(s.conf, s.conf+".bad"); err != nil {
+		return false
+	}
+	logf("wifi: wpa_supplicant could not read %s; moved to %s.bad", s.conf, s.conf)
+	s.setAside = true
+	return true
+}
+
+// takeSetAside reports, once, that wpa.conf was set aside.
+func (s *supplicant) takeSetAside() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.setAside
+	s.setAside = false
+	return t
 }
 
 // supplicantRun is one started supplicant: err is set before exited closes,
@@ -111,11 +134,8 @@ func (s *supplicant) ensure(proc string) error {
 	s.closeConn()
 	if s.cmd != nil {
 		s.cmd = nil
-		if strings.Contains(s.run.out.String(), "Failed to read or parse configuration") {
-			if err := os.Rename(s.conf, s.conf+".bad"); err == nil {
-				logf("wifi: wpa_supplicant could not read %s; moved to %s.bad", s.conf, s.conf)
-				return fmt.Errorf("the saved networks could not be read and were set aside (%s.bad)", filepath.Base(s.conf))
-			}
+		if strings.Contains(s.run.out.String(), confUnreadable) && s.setAsideConf() {
+			return fmt.Errorf("the saved networks could not be read and were set aside (%s.bad)", filepath.Base(s.conf))
 		}
 		return fmt.Errorf("wpa_supplicant ended (%v)", s.run.err)
 	}
@@ -345,8 +365,25 @@ func (s *supplicant) joined() error {
 	return s.ok("SAVE_CONFIG")
 }
 
-// reload drops what join set up: the saved networks as saved.
-func (s *supplicant) reload() error { return s.ok("RECONFIGURE") }
+// reload drops what join set up: the saved networks as saved. 2.10 answers
+// RECONFIGURE with FAIL only when it can't read wpa.conf
+// (wpa_supplicant_reload_configuration): the file is set aside and the
+// supplicant stopped, so that the next ensure starts it without saved
+// networks.
+func (s *supplicant) reload() error {
+	r, err := s.request("RECONFIGURE")
+	if err != nil {
+		return err
+	}
+	if t := strings.TrimSpace(r); t != "OK" {
+		s.stop()
+		s.mu.Lock()
+		s.setAsideConf()
+		s.mu.Unlock()
+		return fmt.Errorf("wpa_supplicant: RECONFIGURE: %s", t)
+	}
+	return nil
+}
 
 func (s *supplicant) forget(ssid string) error {
 	id, ok := s.saved()[ssid]

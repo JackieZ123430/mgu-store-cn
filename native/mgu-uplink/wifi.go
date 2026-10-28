@@ -53,6 +53,9 @@ var (
 	wifiOwnRecheck = 20 * time.Second // while the provider has the interface, the stock system's use is looked at this often
 	wifiRetry      = 30 * time.Second // after a failure to take the interface or run the supplicant; doubles each time
 	wifiStable     = 2 * time.Minute  // a supplicant running this long ends a run of failures
+	wifiRetake     = 60 * time.Second // after giving the interface back, not taken again before this; doubles each time
+	wifiRetakeMax  = 8 * time.Minute
+	wifiHeld       = 10 * time.Minute // holding the interface this long ends a run of give-backs
 )
 
 // wifiMaxFails failures in a row stop the provider (link "failed") until
@@ -86,7 +89,8 @@ type wifiStatus struct {
 // wifiRecord is what the provider changed on the interface, kept in the
 // run dir so that a start after a killed run puts it back (restoreWiFi).
 type wifiRecord struct {
-	Link linkState `json:"link"`
+	Link      linkState `json:"link"`
+	GivenBack bool      `json:"givenBack"` // the car has the interface; its IPv6 setting is back
 }
 
 type wifiProvider struct {
@@ -113,9 +117,14 @@ type wifiProvider struct {
 	reqMu sync.Mutex // one request or tick talks to the supplicant at a time
 
 	// with reqMu held
-	used    string // why the stock system uses the interface, "" free
-	usedAt  time.Time
-	failMsg string // the last failure to take the interface or run the supplicant
+	used      string // why the stock system uses the interface, "" free
+	usedSure  bool   // used is a finding, not a check that failed
+	usedAt    time.Time
+	kept      string // a failed check logged while keeping the interface
+	failMsg   string // the last failure to take the interface or run the supplicant
+	retakeAt  time.Time
+	givebacks int // give-backs in a row
+	ownedAt   time.Time
 
 	mu        sync.Mutex
 	enabled   bool
@@ -128,6 +137,7 @@ type wifiProvider struct {
 	fails     int       // failures in a row to take the interface or run the supplicant
 	retryAt   time.Time // not tried again before
 	err       string    // a failed join, shown until the next request
+	note      string    // the saved networks set aside, shown until the next join or switch
 	ip        string    // the uplink's lease on the interface
 	link      *wifiLink
 }
@@ -219,17 +229,35 @@ func (p *wifiProvider) up(st *wifiStatus) {
 		st.Link, st.Error = "failed", &msg
 		return
 	}
-	if why := p.stockUse(owned); why != "" {
-		if owned {
-			logf("wifi: giving %s back: %s", p.iface, why)
-			p.release(errors.New(why), true)
+	if !owned && time.Now().Before(p.retakeAt) {
+		p.unavailable(st, p.used)
+		return
+	}
+	switch why, sure := p.stockUse(owned); {
+	case why == "":
+		p.kept = ""
+	case owned && !sure:
+		// a check that failed is no reason to give the interface back
+		if p.kept != why {
+			logf("wifi: keeping %s: %s", p.iface, why)
+			p.kept = why
 		}
+	case owned:
+		p.giveBack(why)
+		p.unavailable(st, why)
+		return
+	default:
 		p.unavailable(st, why)
 		return
 	}
 	err := p.own()
 	if err == nil {
 		err = p.wpa.ensure(p.proc)
+	}
+	if p.wpa.takeSetAside() {
+		p.mu.Lock()
+		p.note = "the saved networks could not be read and were set aside (wpa.conf.bad)"
+		p.mu.Unlock()
 	}
 	if err != nil {
 		p.failed(st, err)
@@ -335,40 +363,59 @@ func humanDuration(d time.Duration) string {
 // stockUse says why the stock system uses the interface ("" when it does
 // not): an access point, P2P or any mode but station, hostapd on it,
 // another wpa_supplicant on it or a D-Bus one that has it, connman
-// managing it. While it does, it is looked at again every wifiRecheck;
-// while the provider has the interface, every wifiOwnRecheck.
-func (p *wifiProvider) stockUse(owned bool) string {
+// managing it. sure: a finding; else a check failed. While it uses it, it
+// is looked at again every wifiRecheck; while the provider has the
+// interface, every wifiOwnRecheck.
+func (p *wifiProvider) stockUse(owned bool) (string, bool) {
 	every := wifiRecheck
 	if owned && p.used == "" {
 		every = wifiOwnRecheck
 	}
 	if (p.used != "" || owned) && !p.usedAt.IsZero() && time.Since(p.usedAt) < every {
-		return p.used
+		return p.used, p.usedSure
 	}
-	p.used, p.usedAt = p.findStockUse(), time.Now()
-	return p.used
+	p.used, p.usedSure = p.findStockUse()
+	p.usedAt = time.Now()
+	return p.used, p.usedSure
 }
 
-func (p *wifiProvider) findStockUse() string {
+func (p *wifiProvider) findStockUse() (string, bool) {
 	if t, err := p.iftype(p.iface); err != nil {
-		return fmt.Sprintf("can't read %s's mode: %v", p.iface, err)
+		return fmt.Sprintf("can't read %s's mode: %v", p.iface, err), false
 	} else if t != nl80211Station {
-		return fmt.Sprintf("%s is in %s mode", p.iface, iftypeName(t))
+		return fmt.Sprintf("%s is in %s mode", p.iface, iftypeName(t)), true
 	}
 	u := stockUsers(p.proc, p.iface, p.wpa.conf, p.connmanConf)
 	if u.why != "" {
-		return u.why
+		return u.why, true
 	}
 	if u.dbus {
 		has, err := p.dbusHas(p.iface)
 		switch {
 		case err != nil:
-			return fmt.Sprintf("can't ask the D-Bus wpa_supplicant about %s: %v", p.iface, err)
+			return fmt.Sprintf("can't ask the D-Bus wpa_supplicant about %s: %v", p.iface, err), false
 		case has:
-			return fmt.Sprintf("the D-Bus wpa_supplicant has %s", p.iface)
+			return fmt.Sprintf("the D-Bus wpa_supplicant has %s", p.iface), true
 		}
 	}
-	return ""
+	return "", true
+}
+
+// giveBack hands the interface to the car (release) and keeps it from
+// being taken again for wifiRetake, doubling with each give-back in a row
+// (up to wifiRetakeMax), so a car that keeps taking it is not fought.
+func (p *wifiProvider) giveBack(why string) {
+	logf("wifi: giving %s back: %s", p.iface, why)
+	if time.Since(p.ownedAt) >= wifiHeld {
+		p.givebacks = 0
+	}
+	p.givebacks++
+	wait := wifiRetakeMax
+	if p.givebacks <= 16 && wifiRetake<<(p.givebacks-1) < wait {
+		wait = wifiRetake << (p.givebacks - 1)
+	}
+	p.retakeAt = time.Now().Add(wait)
+	p.release(errors.New(why), true)
 }
 
 // publish keeps st, with the lease and a failed join, and writes it to
@@ -380,6 +427,10 @@ func (p *wifiProvider) publish(st wifiStatus) {
 	}
 	if st.Error == nil && p.err != "" && st.Enabled {
 		msg := p.err
+		st.Error = &msg
+	}
+	if st.Error == nil && p.note != "" && st.Enabled {
+		msg := p.note
 		st.Error = &msg
 	}
 	old := p.st
@@ -427,6 +478,11 @@ func (p *wifiProvider) own() error {
 		}
 	}
 	ls, err := p.linkUp(p.iface)
+	// taken again after a give-back: the state before the first take stays
+	var prev wifiRecord
+	if b, e := os.ReadFile(p.record); e == nil && json.Unmarshal(b, &prev) == nil && prev.Link.Index == ls.Index {
+		ls = prev.Link
+	}
 	if e := writeJSON(p.record, wifiRecord{Link: ls}, 0644); err == nil {
 		err = e
 	}
@@ -435,7 +491,7 @@ func (p *wifiProvider) own() error {
 		return err
 	}
 	p.mu.Lock()
-	p.owned = true
+	p.owned, p.ownedAt = true, time.Now()
 	p.mu.Unlock()
 	logf("wifi: %s on", p.iface)
 	if p.notify != nil {
@@ -479,6 +535,9 @@ func (p *wifiProvider) release(why error, toCar bool) {
 		}
 	}
 	if !owned {
+		if !toCar {
+			restoreWiFi(p.record, false) // given back: only the record goes
+		}
 		return
 	}
 	p.wpa.stop()
@@ -490,9 +549,12 @@ func (p *wifiProvider) release(why error, toCar bool) {
 }
 
 // restoreWiFi puts back what a record says the provider changed on the
-// interface: its IPv6 setting, and unless ipv6Only, down when it was down.
-// The radio's rfkill state stays.
-func restoreWiFi(record string, ipv6Only bool) {
+// interface: its IPv6 setting, and down when it was down, and removes the
+// record. toCar (a give-back): only the IPv6 setting, and the record stays,
+// marked, so that taking the interface again keeps the state from before
+// the first take. A marked record is only removed. The radio's rfkill
+// state stays.
+func restoreWiFi(record string, toCar bool) {
 	b, err := os.ReadFile(record)
 	if err != nil {
 		return
@@ -500,9 +562,14 @@ func restoreWiFi(record string, ipv6Only bool) {
 	var rec wifiRecord
 	switch {
 	case json.Unmarshal(b, &rec) != nil || rec.Link.Index <= 0:
-	case ipv6Only:
+	case rec.GivenBack:
+	case toCar:
 		if rec.Link.IPv6 != "" {
 			writeSysctl(ipv6Sysctl(rec.Link.OrigName), rec.Link.IPv6)
+		}
+		rec.GivenBack = true
+		if writeJSON(record, rec, 0644) == nil {
+			return
 		}
 	default:
 		rec.Link.restore()
@@ -544,7 +611,8 @@ func (p *wifiProvider) setOnline(ip string) {
 func (p *wifiProvider) setEnabled(on bool) {
 	p.mu.Lock()
 	changed := p.enabled != on
-	p.enabled, p.err, p.fails, p.retryAt = on, "", 0, time.Time{}
+	p.enabled, p.err, p.fails, p.retryAt, p.note = on, "", 0, time.Time{}, ""
+	p.retakeAt, p.givebacks = time.Time{}, 0
 	p.mu.Unlock()
 	if changed {
 		logf("wifi: switched %s", onOff(on))
@@ -598,6 +666,9 @@ func (p *wifiProvider) connect(ssid, psk string) error {
 	if err := p.ready(); err != nil {
 		return err
 	}
+	p.mu.Lock()
+	p.note = ""
+	p.mu.Unlock()
 	p.cancelJoin()
 	open := false
 	for _, n := range p.status().Networks {
