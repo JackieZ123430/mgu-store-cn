@@ -278,9 +278,13 @@ cmd_restart() {
 	out=$(on_unit "pid=\$(systemctl show -p MainPID mgu-render.service | cut -d= -f2)
 		if [ \"\$(systemctl is-active mgu-render.service || true)\" != active ] || [ -z \"\$pid\" ] || [ \"\$pid\" = 0 ]; then echo NOT-RUNNING; exit 0; fi
 		if [ -f /etc/recmgr-restartlist.conf ] && ! grep -qE '^[[:space:]]*mgu-render[[:space:]]*\$' /etc/recmgr-restartlist.conf; then echo NO-RECMGR; exit 0; fi
-		echo \"LAST \$(journalctl -b _PID=\$pid -o cat 2>/dev/null | grep -oE 'embed: surface 0x[0-9a-f]+ (created|destroyed)' | tail -n 1)\"")
+		j=\$(journalctl -b _PID=\$pid -o cat 2>/dev/null) || { echo NO-JOURNAL; exit 0; }
+		if printf '%s\\n' \"\$j\" | grep -qE ': surface 0x[0-9a-f]+ on layer '; then echo LAYER; exit 0; fi
+		echo \"LAST \$(printf '%s\\n' \"\$j\" | grep -oE 'embed: surface 0x[0-9a-f]+ (created|destroyed)' | tail -n 1)\"")
 	case "$out" in
 		NOT-RUNNING) say "mgu-render is not running: it starts with the installed version at the next app's connection"; return 0 ;;
+		NO-JOURNAL) die "mgu-render's journal could not be read, so whether an app is on screen is unknown; not restarted" 2 ;;
+		LAYER) die "an app drew over the HMI in this renderer run, which the journal does not show closed; not restarted: restart the head unit instead ($0 reboot --off-screen)" 2 ;;
 		NO-RECMGR) die "mgu-render is not in recmgr's restart list on the unit: stopping it could reboot the head unit; not restarted" 2 ;;
 		*created*) die "mgu-render's embed surface is up (the Store or another app is on screen): close it, then run again" 2 ;;
 	esac

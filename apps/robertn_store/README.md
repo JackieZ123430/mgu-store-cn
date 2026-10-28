@@ -1,4 +1,4 @@
-# robertn_store 0.9.8
+# robertn_store 0.9.9
 
 The Store: every app and head-unit tool of every source, each with its
 state, the progress of the running install, the sources, the phone page

@@ -295,10 +295,6 @@ function pids() {
 function comm(pid, tid) {
     return readTrim('/proc/' + pid + (tid ? '/task/' + tid : '') + '/comm');
 }
-function cmdline(pid) {
-    const s = read('/proc/' + pid + '/cmdline');
-    return s === null ? null : s.split('\0').filter(Boolean).join(' ');
-}
 function byComm(name) {
     return pids().filter((p) => comm(p) === name);
 }
