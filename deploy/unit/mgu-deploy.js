@@ -665,20 +665,19 @@ function crashListDone(plan, remounted) {
 }
 /* What keeps the status sync from remounting /: another writer may be
  * at work on it. app-privacy's boot run remounts / itself, without this
- * tool's lock: it is ahead while the unit is activating, or inactive
- * while the boot is still starting units; once it is active
- * (RemainAfterExit) or failed, or the boot is done, it does not remount /
- * again. Null when / is free to remount. */
+ * tool's lock. Its run is done once the unit is active (RemainAfterExit)
+ * or failed, or inactive after the boot has started its units (an
+ * install enables it without starting it); any other state, or none
+ * readable, counts as ahead. Null when / is free to remount. */
 function rootBusy() {
     var mode = rootMountMode();
     if (mode !== 'ro') return '/ is ' + (mode === 'unknown' ? 'in an unknown mount state' : 'read-write') + ': another writer may be at work';
     var privacy = 'app-privacy.service';
     if (lstatOrNull(path.join(CFG.systemd, 'multi-user.target.wants', privacy))) {
         var st = unitState(privacy, 'is-active');
-        if (st === 'activating' || st === 'deactivating' ||
-            st === 'inactive' && ['initializing', 'starting'].indexOf(unitState('', 'is-system-running')) >= 0) {
-            return privacy + ' is ' + st + ' while the unit starts: its boot run may remount /';
-        }
+        var done = st === 'active' || st === 'failed' ||
+            st === 'inactive' && ['initializing', 'starting'].indexOf(unitState('', 'is-system-running')) < 0;
+        if (!done) return privacy + ' is ' + st + ': its boot run may remount /';
     }
     return null;
 }
@@ -694,6 +693,7 @@ function rootBusy() {
 function syncCrashList() {
     var out = process.stdout.write, locked = false, mine = LOCK_FILE + '.' + process.pid;
     function ownedChanges(p) { return JSON.stringify(p.owned) !== JSON.stringify(crashOwned().slice().sort()); }
+    // status --json keeps stdout for its JSON; the step's one line goes to stderr
     process.stdout.write = function () { return true; };
     try {
         if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };

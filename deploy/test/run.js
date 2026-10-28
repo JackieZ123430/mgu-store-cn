@@ -2987,23 +2987,30 @@ function testCrashList() {
     r = bare.run(['status', '--json']);
     check('crash list: status waits while the boot has app-privacy\'s run still ahead',
         r.status === 0 && unchanged() && crashState(r).state === 'pending' && /app-privacy\.service is inactive/.test(crashState(r).reason), r.out);
-    // both at once: app-privacy's boot run starts, remounts / read-write, writes and puts / back,
-    // while the updater's status runs again and again; status writes nothing until it is done
+    write(path.join(units, 'app-privacy.service.active'), 'activating\n');
+    r = bare.run(['status', '--json']);
+    check('crash list: status waits while app-privacy\'s boot run is activating',
+        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /is activating/.test(crashState(r).reason), r.out);
+    // both at once: app-privacy's boot run remounts / read-write, writes and puts / back, while the
+    // updater's status runs again and again; it finishes (active, boot done) only once the test says so
+    const release = `${bare.R}.privacy-done`;
     const privacyRun = cp.spawn('sh', ['-c',
-        'echo activating > "$1/app-privacy.service.active"; sleep 0.3; ' +
-        'echo "rootfs / ext4 rw,relatime 0 0" > "$2"; sleep 0.6; echo "rootfs / ext4 ro,relatime 0 0" > "$2"; sleep 0.3; ' +
-        'echo active > "$1/app-privacy.service.active"; echo running > "$1/system"', 'sh', units, bare.p('proc/mounts')],
-    { stdio: 'ignore' });
+        'echo activating > "$1/app-privacy.service.active"; sleep 0.2; ' +
+        'echo "rootfs / ext4 rw,relatime 0 0" > "$2"; sleep 0.4; echo "rootfs / ext4 ro,relatime 0 0" > "$2"; ' +
+        'while [ ! -f "$3" ]; do sleep 0.05; done; echo active > "$1/app-privacy.service.active"; echo running > "$1/system"',
+    'sh', units, bare.p('proc/mounts'), release], { stdio: 'ignore' });
     const during = [];
-    const t0 = Date.now();
-    while (Date.now() - t0 < 1000) {
+    for (let i = 0; i < 4; i += 1) {
         during.push(crashState(bare.run(['status', '--json'])));
-        if (!unchanged()) break;
+        cp.spawnSync('sh', ['-c', 'sleep 0.25']);
     }
-    cp.spawnSync('sh', ['-c', 'sleep 0.6']);
+    write(release, '');
+    for (let i = 0; i < 40 && fs.readFileSync(path.join(units, 'system'), 'utf8').trim() !== 'running'; i += 1) {
+        cp.spawnSync('sh', ['-c', 'sleep 0.05']);
+    }
     privacyRun.kill();
     check('crash list: while app-privacy\'s boot run is at work, every status waits and writes nothing',
-        during.length >= 2 && during.every((c) => c && c.state === 'pending') && unchanged(), JSON.stringify(during));
+        during.every((c) => c && c.state === 'pending') && unchanged(), JSON.stringify(during));
     // a fresh app-privacy install enables the unit without starting it: after the boot that is not a run ahead
     write(path.join(units, 'app-privacy.service.active'), 'inactive\n');
     const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
