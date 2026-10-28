@@ -126,7 +126,8 @@ var HOOK_21 = 'try{if(__mguDeployGuard.on&&this.isMainapp&&section!==this.mainap
  * "running", written in this boot by another pid). Off, the fallback
  * and the hook do nothing; the guard file (beside the status file,
  * {boot, loads, ready, off}) keeps it off until the next boot. A guard
- * that cannot read or write its file is off. */
+ * file missing or unreadable starts the boot over; a guard that cannot
+ * write it, or read the boot id, is off. */
 function guardSource(guardPath, statusPath) {
     return 'const __mguDeployGuard=(()=>{try{const fs=require("fs"),G=' + JSON.stringify(guardPath) +
         ',boot=fs.readFileSync("/proc/sys/kernel/random/boot_id","utf8").trim(),' +
@@ -151,6 +152,22 @@ function helperSource21(listPath, guardPath, statusPath) {
         '(o[id]=Object.assign({},' + JSON.stringify(DEFAULT_FLAGS) + ',c[id])),o),{}):{}}catch(e){return{}}};';
 }
 
+/* The tracing of the manager's installer (AppManagerStub's members with
+ * the prefix s): each install, update or uninstall it queues and each call
+ * it runs, and its child's start. */
+function tracerSource(s) {
+    return '' +
+        'if(stub&&"function"==typeof stub.' + s + 'callMethod){' +
+        '["install","update","uninstall"].forEach(m=>{const f=stub[m];"function"==typeof f&&(stub[m]=' +
+        'function(app){return end(add({k:"q",m:m,app:String(app),t:Date.now()}),f.apply(this,arguments))})});' +
+        'const cm=stub.' + s + 'callMethod;stub.' + s + 'callMethod=function(m,app){' +
+        'return end(add({k:"run",m:String(m),app:String(app),t:Date.now()}),cm.apply(this,arguments))};' +
+        'const fk=stub.' + s + 'fork;"function"==typeof fk&&(stub.' + s + 'fork=function(){' +
+        'const fresh=!this.' + s + 'forkPromise&&!this.' + s + 'childProcess,p=fk.apply(this,arguments);' +
+        'return fresh?end(tr.fork={t:Date.now()},p):p});' +
+        'stub.' + s + 'forkPromise&&(tr.fork={t:Date.now(),early:!0},end(tr.fork,stub.' + s + 'forkPromise))}';
+}
+
 function inplaceSource(requestPath, statusPath, v) {
     var s = v.stub;
     return INPLACE_MARK + 'try{(function(mgr,registry,log){' +
@@ -164,15 +181,7 @@ function inplaceSource(requestPath, statusPath, v) {
         'o.err=String(e&&(e.reason||e.message)||e)}),p),' +
         'trace=()=>({ops:reqOps.concat(ops).sort((a,b)=>a.t-b.t),fork:tr.fork,child:!!(stub&&stub.' + s + 'childProcess),retries:mgr&&mgr.retries,' +
         'backoff:!!(mgr&&mgr.clearBackOff),resuming:!!(stub&&stub.' + s + 'resumePromise)});' +
-        'if(stub&&"function"==typeof stub.' + s + 'callMethod){' +
-        '["install","update","uninstall"].forEach(m=>{const f=stub[m];"function"==typeof f&&(stub[m]=' +
-        'function(app){return end(add({k:"q",m:m,app:String(app),t:Date.now()}),f.apply(this,arguments))})});' +
-        'const cm=stub.' + s + 'callMethod;stub.' + s + 'callMethod=function(m,app){' +
-        'return end(add({k:"run",m:String(m),app:String(app),t:Date.now()}),cm.apply(this,arguments))};' +
-        'const fk=stub.' + s + 'fork;"function"==typeof fk&&(stub.' + s + 'fork=function(){' +
-        'const fresh=!this.' + s + 'forkPromise&&!this.' + s + 'childProcess,p=fk.apply(this,arguments);' +
-        'return fresh?end(tr.fork={t:Date.now()},p):p});' +
-        'stub.' + s + 'forkPromise&&(tr.fork={t:Date.now(),early:!0},end(tr.fork,stub.' + s + 'forkPromise))}' +
+        (v.start ? '' : tracerSource(s)) +
         'const put=o=>{try{fs.writeFileSync(OUT+".tmp",JSON.stringify(Object.assign(' +
         '{pid:process.pid,start:start,at:Date.now()},o))+"\\n");fs.renameSync(OUT+".tmp",OUT)}catch(e){}},' +
         'own=(p,dir)=>{const s=fs.lstatSync(p);return(dir?s.isDirectory():s.isFile())&&' +
@@ -192,7 +201,7 @@ function inplaceSource(requestPath, statusPath, v) {
         'busy=!0,reqOps.length=0,tell(r,"running");' +
         'Promise.resolve().then(()=>' + v.run + ')' +
         '.then(()=>{busy=!1,tell(r,"done")},e=>{busy=!1,tell(r,"failed",String(e&&(e.reason||e.message)||e))})};' +
-        v.start + 'put({state:"ready"}),setInterval(()=>{try{poll(),busy&&cur&&put(Object.assign({trace:trace()},cur))}catch(e){}},1e3)' +
+        (v.start ? v.start + tracerSource(s) : '') + 'put({state:"ready"}),setInterval(()=>{try{poll(),busy&&cur&&put(Object.assign({trace:trace()},cur))}catch(e){}},1e3)' +
         '})' + v.args + '}catch(e){}' + INPLACE_MARK + ';';
 }
 

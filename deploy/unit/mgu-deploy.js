@@ -399,13 +399,19 @@ function psLines() {
     return (r.stdout || '').split('\n');
 }
 /* The PID column is where the header names it: first in busybox's ps,
- * second in "ps aux". */
+ * second in "ps aux". The manager is node running MainApp's main.js as its
+ * script (the first argument that is not an option or a -r preload), not a
+ * command that only names the file, as the fallback copy's build does. */
 function managerPid() {
-    var lines = psLines(), col = (lines[0] || '').trim().split(/\s+/).indexOf('PID'), i, pid;
-    if (col < 0) return null;
+    var lines = psLines(), head = (lines[0] || '').trim().split(/\s+/), col = head.indexOf('PID'), i, f, a, pid;
+    var cmd = head.indexOf('COMMAND'), script = path.basename(mainappRoot()) + '/src/main.js';
+    if (col < 0 || cmd < 0) return null;
     for (i = 1; i < lines.length; i++) {
-        if (lines[i].indexOf(path.basename(mainappRoot()) + '/src/main.js') < 0) continue;
-        pid = Number(lines[i].trim().split(/\s+/)[col]);
+        f = lines[i].trim().split(/\s+/);
+        if (!/(^|\/)node$/.test(f[cmd] || '')) continue;
+        for (a = cmd + 1; a < f.length && f[a].charAt(0) === '-'; a++) if (f[a] === '-r' || f[a] === '--require') a++;
+        if (!f[a] || f[a].slice(-script.length) !== script) continue;
+        pid = Number(f[col]);
         if (pid > 0 && pid !== process.pid) return pid;
     }
     return null;
@@ -2051,6 +2057,15 @@ function ensureLocalOnlyListed() {
     chownMaybe(file, MGR_UID, MGR_UID);
     say('app-privacy override lists ' + add.join(', ') + ': installed without the local-only marker');
 }
+/* Provisioning still lists an app uninstalled in place until the next
+ * start, so a MainApp-21 restarted meanwhile would look it up at the
+ * backend: app-privacy's override list keeps it from asking. */
+function listLocalOnly(id) {
+    var file = localOnlyFile(), cur = readJsonOrNull(file), listed = Array.isArray(cur) ? cur.slice() : [];
+    if (listed.indexOf(id) >= 0) return;
+    writeAtomic(file, JSON.stringify(listed.concat([id])) + '\n', 0o644);
+    chownMaybe(file, MGR_UID, MGR_UID);
+}
 function privacyApplyQuiet(extra) {
     var tool = privacyTool(), args = [tool, 'apply', '--json'];
     if (!fs.existsSync(tool)) return null;
@@ -3107,12 +3122,19 @@ function placeId8(a) {
  * back from the install's snapshot. Throws when MainApp-21's installer
  * failed it. */
 function installLiveId8(a, existing, state, backup) {
-    ensureFallback(state, true);
+    /* a MainApp-21 the copy does not fit takes the app at the next start */
+    try { preflightFallback(); ensureFallback(state, true); } catch (e) {
+        if (!isRefusal(e)) throw e;
+        say(a.id + ' ' + a.version + ' is not installed in place: ' + e.message);
+        return false;
+    }
     var m = inplaceManager();
     if (!m.pid) { say(a.id + ' ' + a.version + ' is not installed in place: ' + m.why); return false; }
     if (existing) waitStartedUp('updating ' + a.id + ' ' + a.version);
     var kc = existing ? lstatOrNull(keychainFile(existing.uid)) : null;
     a.noKeychain = existing && !(kc && kc.size > 0) ? existing.uid : null;
+    var placed = DAS.map(dasFile).concat([customAppsFile()], id8LiveTouched(a.id, a.version)
+        .filter(function (p) { return path.dirname(p) === preinstalledDir(); }));
     placeId8(a);
     var r = installInPlace(a, existing), uid = r.uid;
     if (r.ranFailed) {
@@ -3126,8 +3148,7 @@ function installLiveId8(a, existing, state, backup) {
     }
     if (!uid) {
         say(a.id + ' ' + a.version + ' is not installed in place: ' + r.why);
-        restoreSnapshot(backup, DAS.map(dasFile).concat([customAppsFile()], id8LiveTouched(a.id, a.version)
-            .filter(function (p) { return path.dirname(p) === preinstalledDir(); })));
+        restoreSnapshot(backup, placed);
         return false;
     }
     queueId8({ id: a.id });
@@ -3152,6 +3173,7 @@ function uninstallLiveId8(id) {
     rmrf(appEntryFile(id) + '.tmp');
     rmrf(home);
     queueId8({ id: id });
+    listLocalOnly(id);
     say(id + ' uninstalled');
     return { done: true };
 }

@@ -448,7 +448,11 @@ never adds to `installable_apps`). The first app install turns the
 fallback on and is queued; from the next start on, changes are live. A
 change the running MainApp-21 does not take (no hook, the request not
 taken or refused, MainApp-21 restarted) is queued instead, with what was
-placed for it put back; one its installer failed fails, rolled back.
+placed for it put back; one its installer failed fails, rolled back. On a
+MainApp-21 the copy does not fit, every change is queued. An app
+uninstalled live goes on app-privacy's override list
+(`local-only-apps.json`): provisioning lists it until the next start, and
+a MainApp-21 restarted meanwhile would otherwise ask the backend for it.
 MainApp-21 is never restarted.
 
 The copy is built at every boot from the stock `main.js` and bound only

@@ -1,6 +1,7 @@
 [Unit]
 Description=mgu-deploy provisioning fallback and in-place installs for our apps (iDrive 8)
 RequiresMountsFor=/var/opt
+After=mgu-deploy-apply.service
 Before=oapcontroller.service app-privacy.service
 
 [Service]
