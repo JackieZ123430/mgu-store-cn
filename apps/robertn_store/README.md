@@ -218,9 +218,8 @@ without a channel. A failure on the page shows with **Try again**. BACK
 from the page ends the adding. The page opens only once the HMI has
 given the focus back from the speller or the keyboard page (or 2 s after
 it closed), since the focus coming back below a page opened earlier
-closes it. On the third page level the keyboard page takes the place of
-the page it opens from, which comes back after OK or the page's back
-button.
+closes it. Leaving the keyboard of an Add token pressed there, with OK,
+its back button or BACK, returns to the repo's page.
 
 Leaving the speller or the keyboard page without OK, or OK with nothing
 typed, sends nothing. A

@@ -69,7 +69,7 @@ const someipBuilders = require('oap-sdk/src/someip/someipBuilders');
 const { UpdaterClient } = require('./client.js');
 const { qrPng } = require('./qr.js');
 const { spell } = require('./speller.js');
-const { Drawn } = require('./store_drawn.js');
+const { Drawn, DEPTHS } = require('./store_drawn.js');
 const { typeKey, wifiOf } = require('./store_ui.js');
 const { PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState,
@@ -621,7 +621,7 @@ class Store extends OnlineApp {
         switch (act.do) {
         case 'tab': this._drawn.setTab(act.tab); break;
         case 'filter': this._drawn.setFilter(act.filter); break;
-        case 'back': this._drawn.pop(); break;
+        case 'back': this._back(); break;
         case 'check': this._send({ op: 'check' }); break;
         case 'open':
             if (act.page.name === 'source') {
@@ -977,19 +977,37 @@ class Store extends OnlineApp {
         }
     }
 
+    /* A page's back item: the keyboard's page closes as with OK, but gives no text. */
+    _back() {
+        if (this._typing && this._drawn.top() === this._typing.page) {
+            this._typed(null);
+        } else {
+            this._drawn.pop();
+        }
+    }
+
     /* Closes the keyboard's page: the page it took the place of at the
-     * last depth comes back, else the page below gets the focus back. */
+     * last depth comes back, else the page below gets the focus back. The
+     * HMI's BACK closes the last depth's host state with the page: a repo's
+     * page it took the place of opens again once the focus is back. */
     _typed(text) {
         const typing = this._typing;
         this._typing = null;
-        if (this._drawnUi()) {
+        if (this._drawnUi() && this._drawn.top() === typing.page) {
             // the HMI gives the focus back to the page below once this one has closed (_showPick)
             this._focusedPage = null;
-            if (this._drawn.top() === typing.page && typing.under) {
+            if (typing.under) {
                 this._drawn.restore(typing.under);
                 this._focusedPage = `drawn:${typing.under.name}`;
-            } else if (this._drawn.top() === typing.page) {
+            } else {
                 this._drawn.pop();
+            }
+        } else if (this._drawnUi()) {
+            if (this._focusedPage === `drawn:${typing.page.name}`) {
+                this._focusedPage = null;
+            }
+            if (this._pick && typing.under && isPage('pick')(typing.under) && this._drawn.stack.length === DEPTHS - 1) {
+                this._pick.open = false;
             }
         }
         // a repo's page that waited for the keyboard opens once the focus is back

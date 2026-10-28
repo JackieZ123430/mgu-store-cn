@@ -1205,6 +1205,27 @@ function runDrawn() {
         }).then(() => {
             eq([app._pick && app._pick.repo, tokensSent()], ['o/deep', [{ op: 'token-add', token: 'ghp_x' }]],
                 'the token sent, the repo still being added');
+            // the keyboard's back button: the same, nothing typed sent
+            reset();
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            eq(names(), ['main', 'accounts', 'type']);
+            ['a', 'Back'].forEach(tap);
+            eq([names(), states], [['main', 'accounts', 'pick'], []], 'its back button: the repo\'s page back in its host state');
+            eq(drawn.items.some((i) => i.label === 'Add token'), true, 'its keys pressable again');
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq([app._pick && app._pick.repo, tokensSent()], ['o/deep', []], 'its back button: nothing sent, the repo still being added');
+            // the HMI's BACK closes host state 3 with the keyboard's page: the repo's page opens there again once the
+            // focus is back on Accounts
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            reset();
+            leave(3);
+            eq([names(), states], [['main', 'accounts', 'pick'], [`open ${host(3)}`]], 'BACK: the repo\'s page opens again');
+            enter(3);
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq([app._pick && app._pick.repo, names(), tokensSent()], ['o/deep', ['main', 'accounts', 'pick'], []],
+                'BACK: nothing sent, the repo still being added');
             app._endPick();
             app._endTokenAdd(null);
             drawn.setTab('settings');
