@@ -445,12 +445,13 @@ das lines go in first, as `apply-pending` puts them (below), so every later
 start has the app; its `custom_apps.json` entry gives it its provisioning
 section until then (the copy fills only a listed app's empty section and
 never adds to `installable_apps`). `status`, run as root (the updater
-runs it right after it installs the deploy tool), installs and enables the
-boot unit once a copy of this MainApp-21's `main.js` builds, with the
-crash list's rules for remounting `/`; it reports `live_installs` in
-`status --json`. A MainApp-21 the copy does not fit is not tried again
-until its `main.js` changes (`id8-live.json`). From the next start on,
-changes are live; until then they are queued. A
+runs it right after it installs the deploy tool), turns the fallback on
+once, when a copy of this MainApp-21's `main.js` builds, with the crash
+list's rules for remounting `/`; it reports `live_installs` in `status
+--json`, and does not turn it on again after `fallback off`. A MainApp-21
+the copy does not fit is tried again when its `main.js`, the deploy tool
+or app-privacy changes (`id8-live.json`). From the next start on, changes
+are live; until then they are queued. A
 change the running MainApp-21 does not take (no hook, the request not
 taken or refused, MainApp-21 restarted) is queued instead, with what was
 placed for it put back; one its installer failed fails, rolled back. On a
@@ -1455,6 +1456,7 @@ whole iDrive 8 path:
 - MainApp-21 running as node with `oap-mainapp21/src/main.js` as its script
   (`apply-pending` refuses while it runs, by that);
 - live changes (the copy bound at boot, the hook, tiles shown and removed
-  at once) on the car's MainApp-21 build;
+  at once, no corruption handling in oapcontroller's log) on the car's
+  MainApp-21 build;
 - MainApp-21 supplying `oap-sdk` to an npm package that names it in
   `dependencies` without shipping it (IterioDev's packages do so).

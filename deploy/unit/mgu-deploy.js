@@ -690,15 +690,6 @@ function rootBusy() {
     }
     return null;
 }
-/* status's step: brings the crash handler's list to what the installed
- * tools want, so a deploy tool update (which the version before it
- * installs) writes it at the updater's status check after it, and a
- * firmware update that put the stock list back is undone. It remounts /
- * only for a change, only while / is read-only and no other writer can be
- * at work (rootBusy), under this tool's lock, with a snapshot first; the
- * window puts / back read-only on any exit. It says one line on stderr
- * for a change. Returns { state: ok | changed | pending | error, reason }: pending is
- * tried again at the next status. */
 /* The lock for a status step, taken only when free: true when held (the
  * step releases it), false when another run holds it. */
 function statusLock() {
@@ -709,8 +700,17 @@ function statusLock() {
     try { fs.linkSync(mine, LOCK_FILE); return true; } catch (e) { if (e.code !== 'EEXIST') throw e; return false; }
     finally { rmrf(mine); }
 }
+/* status's step: brings the crash handler's list to what the installed
+ * tools want, so a deploy tool update (which the version before it
+ * installs) writes it at the updater's status check after it, and a
+ * firmware update that put the stock list back is undone. It remounts /
+ * only for a change, only while / is read-only and no other writer can be
+ * at work (rootBusy), under this tool's lock, with a snapshot first; the
+ * window puts / back read-only on any exit. It says one line on stderr
+ * for a change. Returns { state: ok | changed | pending | error, reason }: pending is
+ * tried again at the next status. */
 function syncCrashList() {
-    var out = process.stdout.write, locked = false, mine = LOCK_FILE + '.' + process.pid;
+    var out = process.stdout.write, locked = false;
     function ownedChanges(p) { return JSON.stringify(p.owned) !== JSON.stringify(crashOwned().slice().sort()); }
     // status --json keeps stdout for its JSON; the step's one line goes to stderr
     process.stdout.write = function () { return true; };
@@ -742,55 +742,55 @@ function syncCrashList() {
         process.stderr.write('mgu-deploy: crash handler whitelist not updated: ' + e.message + '\n');
         return { state: 'error', reason: e.message };
     } finally {
-        rmrf(mine);
         if (locked) releaseLock();
         process.stdout.write = out;
     }
 }
 
-/* status's step on iDrive 8: turns live app changes on once the installed
- * deploy tool can make them, so the updater's status check after a deploy
- * tool update does it with nothing else to do. It installs and enables
- * the boot unit only, when it is absent and a copy of this MainApp-21's
- * main.js builds, takes app-privacy's patch and parses (preflightFallback);
- * the boot unit binds the copy at the next start, and until then app
- * changes are queued as without it. A MainApp-21 the copy does not fit is
- * recorded with its main.js's checksum (id8-live.json) and not built
- * again until that changes. Same rules for remounting / as the crash
- * list's step. Returns { state: ok | changed | pending | error, reason },
- * null off iDrive 8. */
+/* status's step on iDrive 8: turns live app changes on once, when the
+ * installed deploy tool can make them, so the updater's status check after
+ * a deploy tool update does it with nothing else to do. Once a copy of
+ * this MainApp-21's main.js builds, takes app-privacy's patch and parses
+ * (preflightFallback), it turns the fallback on (ensureFallback: its boot
+ * unit, recmgr entry and copy); the running MainApp-21 keeps the main.js it
+ * started with, so app changes are queued until the next start, as without
+ * it. The record (id8-live.json) says it was done, which `fallback off` and
+ * restores leave alone, or why the copy did not build, keyed by main.js,
+ * this tool's version and app-privacy's tool, tried again when one
+ * changes. Same rules for remounting / as the crash list's step. Returns
+ * { state: ok | changed | pending | error, reason }, null off iDrive 8. */
 var ID8_LIVE_RECORD = path.join(DEPLOY_DIR, 'id8-live.json');
 function syncLiveId8() {
     if (!isId8()) return null;
-    var out = process.stdout.write, locked = false;
+    var out = process.stdout.write, locked = false, rec = readJsonOrNull(ID8_LIVE_RECORD) || {};
+    var key = [shaOrNull(mainJs()), VERSION, shaOrNull(privacyTool())].join(' ');
+    var done = function (why) { writeAtomic(ID8_LIVE_RECORD, JSON.stringify({ on: new Date().toISOString() }) + '\n', 0o644); return why; };
     process.stdout.write = function () { return true; };
     try {
-        if (fallbackPresent()) return { state: 'ok', reason: 'on' };
+        if (rec.on) return { state: 'ok', reason: fallbackPresent() ? 'on' : 'turned off since it was turned on' };
+        if (fallbackPresent()) return { state: 'ok', reason: done('on') };
+        if (rec.key === key) return { state: 'ok', reason: 'off: ' + rec.why };
         if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };
         if (!runningInstalled() && !FAKE) return { state: 'pending', reason: 'this deploy tool is not the installed one' };
-        var sha = shaOrNull(mainJs()), rec = readJsonOrNull(ID8_LIVE_RECORD);
-        if (rec && rec.sha256 === sha) return { state: 'ok', reason: 'off: ' + rec.why };
         var busy = rootBusy();
         if (busy) return { state: 'pending', reason: busy };
         locked = statusLock();
         if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
-        if (fallbackPresent()) return { state: 'ok', reason: 'on' };
+        if (fallbackPresent()) return { state: 'ok', reason: done('on') };
         try { preflightFallback(); } catch (e) {
             if (!isRefusal(e)) throw e;
-            writeAtomic(ID8_LIVE_RECORD, JSON.stringify({ sha256: sha, why: e.message }) + '\n', 0o644);
+            writeAtomic(ID8_LIVE_RECORD, JSON.stringify({ key: key, why: e.message }) + '\n', 0o644);
             return { state: 'ok', reason: 'off: ' + e.message };
         }
         busy = rootBusy();
         if (busy) return { state: 'pending', reason: busy };
-        var link = path.join(CFG.systemd, 'multi-user.target.wants', FALLBACK_UNIT);
+        var state = loadState();
         takeSnapshot('live-installs', fallbackTouched());
-        rootfsWindow([{ type: 'copy', src: fallbackUnitSource(), path: path.join(CFG.systemd, FALLBACK_UNIT), mode: 0o644 },
-            { type: 'mkdir', path: path.dirname(link) }, { type: 'symlink', path: link, target: '../' + FALLBACK_UNIT }]);
-        runOk(CFG.systemctl, ['daemon-reload']);
-        rmrf(ID8_LIVE_RECORD);
+        ensureFallback(state, false);
+        saveState(state);
         pruneBackups();
         process.stderr.write('live app installs: on from the next start of the head unit\n');
-        return { state: 'changed', reason: 'on from the next start' };
+        return { state: 'changed', reason: done('on from the next start') };
     } catch (e) {
         process.stderr.write('mgu-deploy: live app installs not turned on: ' + e.message + '\n');
         return { state: 'error', reason: e.message };
