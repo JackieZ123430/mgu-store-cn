@@ -42,6 +42,8 @@ const KEEPALIVE_MS = 1000;              // the renderer hides an app silent for 
 const CLOSED_RESHOW_MS = 700;           // a touch outside that left the page where it was
 const DRAG_PX = 14;
 const STATS_LOG = '/run/mgu-render/stats-log';  // mgu-render's per-second stats switch: the Store's own then too
+const STATS_OUT = '/dev/shm/robertn_store-stats.log';   // where they go (an OAP app's own log goes to DLT)
+const STATS_OUT_MAX = 1024 * 1024;              // bytes kept; past it the file starts again
 // FrontCCU frontRotaryEncoderPushButton pushed (short, long): by name or ordinal
 const PUSHED = ['DREHGEBER_KURZ_GEDRUECKT', 'DREHGEBER_LANG_GEDRUECKT', 1, 2];
 const RELEASED = ['KEINE_BETAETIGUNG', 0];
@@ -49,12 +51,12 @@ const DIAL_MAX_STEP = 24;
 
 const msNow = () => { const t = process.hrtime(); return t[0] * 1e3 + t[1] / 1e6; };
 
-/* While mgu-render's stats-log is on, once a second: the frames built and sent, their build and send times, the
- * touch events and the time they took, and the process's CPU, so its share outside drawing shows. */
+/* While mgu-render's stats-log is on, once a second a line into out: the frames built and sent, their build and send
+ * times, the touch events and the time they took, and the process's CPU, so its share outside drawing shows. */
 class Timing {
-    constructor(log, file) {
-        this.log = log;
+    constructor(file, out) {
         this.file = file;
+        this.out = out;
         this.on = false;
         this._reset();
         this.timer = setInterval(() => this._second(), 1000);
@@ -71,9 +73,13 @@ class Timing {
             this.on = !err;
             if (was && this.on && (this.builds || this.touches)) {
                 const n = this.builds || 1, f = this.frames || 1, c = process.cpuUsage(this.cpu), el = msNow() - this.t0;
-                this.log.info(`stats store: ${this.builds} builds avg ${(this.build / n).toFixed(1)} ms max ` +
-                    `${this.buildMax.toFixed(1)} ms, ${this.frames} frames sent avg ${(this.send / f).toFixed(1)} ms, ` +
-                    `${this.touches} touch events ${this.touchMs.toFixed(0)} ms, cpu ${((c.user + c.system) / 10 / el).toFixed(0)} %`);
+                const line = `${new Date().toISOString()} stats store: ${this.builds} builds avg ${(this.build / n).toFixed(1)} ms ` +
+                    `max ${this.buildMax.toFixed(1)} ms, ${this.frames} frames sent avg ${(this.send / f).toFixed(1)} ms, ` +
+                    `${this.touches} touch events ${this.touchMs.toFixed(0)} ms, cpu ${((c.user + c.system) / 10 / el).toFixed(0)} %\n`;
+                fs.stat(this.out, (e, st) => {
+                    const write = !e && st.size > STATS_OUT_MAX ? fs.writeFile : fs.appendFile;
+                    write(this.out, line, () => { /* a full /dev/shm: the line is lost */ });
+                });
             }
             this._reset();
         });
@@ -94,7 +100,7 @@ class Drawn extends EventEmitter {
         this.log = host.log;
         this.gpu = (opts && opts.client) || new RenderClient('robertn_store', this.log, { kit, mode: 'layer' });
         this.gpu.fps(FPS);
-        this.timing = new Timing(this.log, (opts && opts.statsLog) || STATS_LOG);
+        this.timing = new Timing((opts && opts.statsLog) || STATS_LOG, (opts && opts.statsOut) || STATS_OUT);
         this.mode = null;
         this.w = 0;
         this.scale = 1;

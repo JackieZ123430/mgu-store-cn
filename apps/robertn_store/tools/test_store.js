@@ -1435,9 +1435,11 @@ function cleanUp() {
 function runTiming() {
     const { Timing } = require(path.join(SRC, 'store_drawn.js'));
     const file = path.join(ROOT, 'stats-log');
+    const out = path.join(ROOT, 'store-stats.log');
     const lines = [];
-    const t = new Timing({ info: (l) => lines.push(l) }, file);
-    const second = () => new Promise((r) => { t._second(); setTimeout(r, 30); });
+    const t = new Timing(file, out);
+    const read = () => { lines.length = 0; try { lines.push(...fs.readFileSync(out, 'utf8').split('\n').filter(Boolean)); } catch (e) { /* none yet */ } };
+    const second = () => new Promise((r) => { t._second(); setTimeout(() => { read(); r(); }, 50); });
     const busy = () => { t.builds = 2; t.build = 3; t.buildMax = 2; t.frames = 2; t.send = 0.4; t.touches = 5; t.touchMs = 4; };
     busy();
     return second().then(() => {
@@ -1451,7 +1453,7 @@ function runTiming() {
         return second();
     }).then(() => {
         eq(lines.length, 1);
-        eq(/^stats store: 2 builds avg 1\.5 ms max 2\.0 ms, 2 frames sent avg 0\.2 ms, 5 touch events 4 ms, cpu \d+ %$/.test(lines[0]), true, lines[0]);
+        eq(/^\d{4}-\d\d-\d\dT[\d:.]+Z stats store: 2 builds avg 1\.5 ms max 2\.0 ms, 2 frames sent avg 0\.2 ms, 5 touch events 4 ms, cpu \d+ %$/.test(lines[0]), true, lines[0]);
         fs.unlinkSync(file);
         busy();
         return second();
