@@ -3011,8 +3011,6 @@ function testCrashList() {
     privacyRun.kill();
     check('crash list: while app-privacy\'s boot run is at work, every status waits and writes nothing',
         during.every((c) => c && c.state === 'pending') && unchanged(), JSON.stringify(during));
-    // a fresh app-privacy install enables the unit without starting it: after the boot that is not a run ahead
-    write(path.join(units, 'app-privacy.service.active'), 'inactive\n');
     const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
     r = bare.run(['status', '--json']);
     check('crash list: once the boot is done, status adds the built-in names (in the file\'s line ending), snapshotted, one line, reported',
@@ -3036,9 +3034,11 @@ function testCrashList() {
         fs.readFileSync(bareList, 'utf8') === listBefore && !r.stderr, r.out);
     r = bare.run(['status']);
     check('crash list: plain status prints the step\'s result', r.status === 0 && r.stdout.includes('crash handler whitelist: ok (up to date)'), r.out);
+    // a fresh app-privacy install enables the unit without starting it: after the boot that is not a run ahead
+    write(path.join(units, 'app-privacy.service.active'), 'inactive\n');
     write(bareList, '[ForceRestartList]\ndbus-daemon\n');
     r = bare.run(['status', '--json']);
-    check('crash list: a list without [Whitelist] gets one at the end',
+    check('crash list: a list without [Whitelist] gets one at the end (app-privacy enabled, not started, boot done)',
         r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[ForceRestartList]\ndbus-daemon\n\n[Whitelist]\nmgu-uplink\n', r.out);
     // a list that cannot be read: status reports the error and still answers; an install fails before it changes anything
     const unreadable = { MGU_DEPLOY_CRASHLIST: '/proc/self/mem' };
