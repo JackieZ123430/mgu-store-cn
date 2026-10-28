@@ -116,7 +116,7 @@ var SELF_DESCRIPTION = 'Installs, updates, rolls back and removes our tools and 
     'with a snapshot before every change';
 var SELF_FILES = [{ path: 'mgu-deploy.js', mode: '0644' }, { path: 'mgu-deploy.sh', mode: '0755' },
     { path: 'fallback_build.js', mode: '0644' }, { path: 'mgu-app-fallback.service', mode: '0644' },
-    { path: 'mgu-deploy-apply.service', mode: '0644' },
+    { path: 'mgu-deploy-apply.service', mode: '0644' }, { path: 'mgu-app-fallback-id8.service', mode: '0644' },
     { path: 'oap_link.js', mode: '0644' }, { path: 'oap_pack.js', mode: '0644' }];
 /* A file of this tool: beside the script, or in the repository's tools/
  * (the linker and packer, when it runs from deploy/unit/). */
@@ -130,8 +130,8 @@ function privacyTool() {
     return env('MGU_DEPLOY_PRIVACY',
         path.join(CFG.varOpt, 'app-privacy', 'current', 'patch_mainapp.js'));
 }
-function mainJs() { return path.join(CFG.mainapp, 'src', 'main.js'); }
-function appManagementJs() { return path.join(CFG.mainapp, 'src', 'AppManagement', 'AppManagement.js'); }
+function mainJs() { return path.join(mainappRoot(), 'src', 'main.js'); }
+function appManagementJs() { return path.join(mainappRoot(), 'src', 'AppManagement', 'AppManagement.js'); }
 function certManagerJs() { return path.join(CFG.mainapp, 'src', 'scripts', 'CertificateManager.js'); }
 function baseJson() { return path.join(CFG.mainapp, 'config', 'base.json'); }
 /* MainApp's own folder: oap-mainapp on iDrive 7, oap-mainapp21 on iDrive 8. */
@@ -463,8 +463,10 @@ function bounceWait() {
 }
 /* Bouncing the app manager is killing its node child; oapcontroller
  * respawns it. oapcontroller itself is never stopped or restarted. Every
- * bounce goes through here. */
+ * bounce goes through here. MainApp-21 (iDrive 8) is never bounced: what
+ * it has not taken in place it takes at the next start. */
 function bounceManager() {
+    if (isId8()) { say('MainApp-21 is not restarted; it takes this at the next start of the head unit'); return false; }
     var old = bounceWait(), waited = 0, cur;
     if (!old) { warn('app manager node child not found; nothing to bounce'); return false; }
     say('bouncing the app manager node child (pid ' + old + ')');
@@ -854,8 +856,8 @@ function entryMatches(e) {
 /* Rootfs entries go back through one trapped window; the rest directly.
  * An entry already as recorded is left alone, so a snapshot of an
  * unchanged state restores without opening the window. The bounce record
- * outlives the restore. */
-function restoreSnapshot(dir) {
+ * outlives the restore. With only, just the entries of those paths. */
+function restoreSnapshot(dir, only) {
     var data = readJson(path.join(dir, 'manifest.json'));
     var rootEntries = [], plain = [], lb = lastBounceAt();
     /* A snapshot holding main.js itself compares and restores the file
@@ -866,6 +868,7 @@ function restoreSnapshot(dir) {
     }
     data.entries.forEach(function (e) {
         if (e.kind === 'record' || selfPath(e.path) || updaterStatePath(e.path) || entryMatches(e)) return;
+        if (only && only.indexOf(e.path) < 0) return;
         (isRootfsPath(e.path) ? rootEntries : plain).push(e);
     });
     plain.forEach(function (e) { putBackEntry(dir, e); });
@@ -2209,7 +2212,8 @@ function inplaceManager() {
         if (started === null) return { why: 'its start time is unreadable' };
         if (bundlesWritten() > started) return { why: 'its main.js or AppManagement.js was written after it started' };
         if (st && st.pid === pid && typeof st.start === 'number' && Math.abs(st.start / 1000 - started) < 5) {
-            return { pid: pid };
+            /* MainApp-21's hook stays off for the boot after a restart it may have caused */
+            return st.state === 'off' ? { why: 'its in-place hook is off until the next start: ' + st.why } : { pid: pid };
         }
         var left = started + CFG.bounceMinUpS - nowS();
         if (left <= 0) return { why: 'the running app manager has no in-place hook' };
@@ -2233,10 +2237,12 @@ function inplaceTrace(st, app) {
     var s = function (t) { var d = Math.round((t - t0) / 1000); return (d < 0 ? '' : '+') + d + 's'; };
     var mine = function (k) {
         return tr.ops.filter(function (o) {
-            return o.k === k && o.app === app && ['install', 'update', 'uninstall'].indexOf(o.m) >= 0 && o.t >= t0 - 1000;
+            return o.k === k && o.app === app && ['install', 'update', 'uninstall', 'installPackage'].indexOf(o.m) >= 0 && o.t >= t0 - 1000;
         }).pop();
     };
     var q = mine('q'), run = mine('run');
+    /* MainApp-21 hands an install or update to its installer as installPackage, unqueued */
+    if (!q && run && run.m === 'installPackage') q = run;
     if (!q) out.push('not yet handed to the installer');
     else if (!run) out.push('in the installer\'s queue since ' + s(q.t));
     else out.push((run.m === 'uninstall' ? 'uninstalling' : 'installing') + ' since ' + s(run.t) + (run.end ? ', ended ' + s(run.end) + (run.err ? ' (' + oneLine(run.err) + ')' : '') : ''));
@@ -2738,14 +2744,14 @@ function uninstallTool(id, state) {
 /* An app on iDrive 8: its removal queued for the next start (or a queued
  * install dropped), in a snapshot of the boot unit's files. */
 function uninstallQueuedId8(id, state) {
-    var backup = takeSnapshot('uninstall', applyTouched());
+    var backup = takeSnapshot('uninstall', applyTouched().concat(id8LiveTouched(id, null), uplinkDropIns(id)));
     try {
         uninstallAppId8(id, state);
         saveState(state); selfInstall();
     } catch (e) {
         if (e.code !== 2) {
             process.stderr.write('uninstall failed, rolling back from ' + backup + '\n');
-            try { restoreSnapshot(backup); pruneCreatedDirs(state); } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
+            try { rollbackAppId8(backup, state); } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
         }
         throw e;
     }
@@ -3023,10 +3029,11 @@ function ensurePrivacyId8(state) {
     var pr = privacyApplyAndBounce(state);
     if (!pr.ok) throw refuse('app-privacy ' + pr.why + '; refusing the app install');
 }
-function installAppId8(a, state, decision) {
+function installAppId8(a, state, decision, backup) {
     var existing = decision.existing || null, file = path.join(ID8_QUEUE, a.id + '@' + a.version + '.tgz');
-    say('queueing app ' + a.id + ' ' + a.version + (existing ? ' (update of ' + existing.version + ')' : '') + ' for the next start');
     ensurePrivacyId8(state);
+    if (installLiveId8(a, existing, state, backup)) return;
+    say('queueing app ' + a.id + ' ' + a.version + (existing ? ' (update of ' + existing.version + ')' : '') + ' for the next start');
     ensureApplyUnit(state);
     mkdirp(ID8_QUEUE, 0o700);
     copyFileMode(a.file, file, 0o600);
@@ -3034,15 +3041,119 @@ function installAppId8(a, state, decision) {
     say(a.id + ' ' + a.version + ' ' + ID8_INSTALLS + ' of the head unit' +
         (existing ? '; ' + existing.version + ' is uninstalled first, and its data with it' : ''));
 }
-function uninstallAppId8(id, state) {
+function uninstallAppId8(id, state, queueOnly) {
     if (ID8_PROTECTED.indexOf(id) >= 0) throw refuse(id + ' is a system app');
     var queued = readPending().filter(function (c) { return c.id === id; })[0];
     var present = !!readJsonOrNull(appEntryFile(id)) || dasApps().indexOf(id) >= 0 || preinstalledFor(id).length > 0;
     if (!present && !queued) throw refuse(id + ': not installed');
     if (!present) { queueId8({ id: id }); say('the queued install of ' + id + ' is dropped'); return; }
+    if (!queueOnly) {
+        var r = uninstallLiveId8(id);
+        if (r.done) return;
+        say(id + ' is not uninstalled in place: ' + r.why);
+    }
     ensureApplyUnit(state);
+    customAppsRemove(id);
     queueId8({ action: 'remove', id: id });
     say(id + ' is ' + ID8_REMOVES + ' of the head unit');
+}
+/* ---- iDrive 8: app changes in place ------------------------------------------------- */
+/* While the fallback copy (fallback_build.js, MainApp-21's variant) is
+ * bound over MainApp-21's main.js and the running MainApp-21 started on it,
+ * its hook has MainApp-21 install, update or uninstall one app itself, from
+ * the package in preinstalled_apps: only that app stops and starts, its tile
+ * comes or goes at once, and nothing waits for the next start. MainApp-21 is
+ * never bounced.
+ *
+ * What makes the app MainApp-21's at every later start goes in first, as
+ * the queue puts it at boot: the package in preinstalled_apps and the app's
+ * two lines in every das file. Its custom_apps.json entry, with the flags
+ * of its das line, is its provisioning section until then: provisioning
+ * reads the das files only at its start, and the fallback gives a listed
+ * app with an empty section that entry. An install needs the hook running;
+ * the first one turns the fallback on, and its boot unit binds the copy at
+ * the next start. A change the running MainApp-21 does not take (no hook,
+ * the request not taken or refused, MainApp-21 restarted) is queued for
+ * the next start as without the hook, with what was placed for it put
+ * back. One its installer took and failed fails, rolled back. */
+var ID8_START_TYPE = 'autostart'; // dasEnableLine's
+
+/* What an app change on iDrive 8 may touch: the das files, the app's
+ * registry entry, packages and custom_apps.json entry, and the fallback. */
+function id8LiveTouched(id, version) {
+    var pkgs = preinstalledFor(id);
+    if (version) pkgs.push(path.join(preinstalledDir(), id + '@' + version + '.tgz'));
+    return DAS.map(dasFile).concat([appEntryFile(id)], pkgs, fallbackTouched());
+}
+function rollbackAppId8(backup, state) {
+    var fb = fallbackPresent();
+    restoreSnapshot(backup);
+    if (fallbackPresent() !== fb) { runOk(CFG.systemctl, ['daemon-reload']); settleFallback(); }
+    pruneCreatedDirs(state);
+}
+/* The package and the das lines in one rootfs window, the custom_apps.json
+ * entry after them; what they replace is in the install's snapshot. */
+function placeId8(a) {
+    var dest = path.join(preinstalledDir(), a.id + '@' + a.version + '.tgz'), sha = sha256File(a.file);
+    if (rootFreeKB() < fs.statSync(a.file).size / 1024 + 5120) throw fail('not enough space on the system partition');
+    var ops = preinstalledFor(a.id).filter(function (p) { return p !== dest; }).map(function (p) { return { type: 'delete', path: p }; });
+    ops.push({ type: 'copy', src: a.file, path: dest, mode: 0o644, uid: 0, gid: 0 });
+    rootfsWindow(ops.concat(dasOps(dasEdits(a.id, true))));
+    if (sha256File(dest) !== sha) throw fail('preinstalled package checksum mismatch at ' + dest);
+    customAppsPut(a.id, null, ID8_START_TYPE);
+}
+/* True once the running MainApp-21 installed or updated the app in place;
+ * false when it is to be queued instead, with what was placed for it put
+ * back from the install's snapshot. Throws when MainApp-21's installer
+ * failed it. */
+function installLiveId8(a, existing, state, backup) {
+    ensureFallback(state, true);
+    var m = inplaceManager();
+    if (!m.pid) { say(a.id + ' ' + a.version + ' is not installed in place: ' + m.why); return false; }
+    if (existing) waitStartedUp('updating ' + a.id + ' ' + a.version);
+    var kc = existing ? lstatOrNull(keychainFile(existing.uid)) : null;
+    a.noKeychain = existing && !(kc && kc.size > 0) ? existing.uid : null;
+    placeId8(a);
+    var r = installInPlace(a, existing), uid = r.uid;
+    if (r.ranFailed) {
+        throw fail('MainApp-21 could not ' + (existing ? 'update ' : 'install ') + a.id + ' ' + a.version + ': ' +
+            managerReason(r.error));
+    }
+    if (!uid && (r.error === 'APP_ALREADY_INSTALLED' || r.error === 'APP_ALREADY_UPDATED' ||
+            r.state === 'refused' && !existing)) {
+        waitStartedUp('looking at ' + a.id + ' ' + a.version + ' again');
+        uid = installedAlready(a, r.why);
+    }
+    if (!uid) {
+        say(a.id + ' ' + a.version + ' is not installed in place: ' + r.why);
+        restoreSnapshot(backup, DAS.map(dasFile).concat([customAppsFile()], id8LiveTouched(a.id, a.version)
+            .filter(function (p) { return path.dirname(p) === preinstalledDir(); })));
+        return false;
+    }
+    queueId8({ id: a.id });
+    return true;
+}
+/* The running MainApp-21's own uninstall: it stops the app, unregisters it
+ * (its tile goes) and removes its folders; then its packages, das lines,
+ * custom_apps.json entry and what MainApp-21 left of it go. { done }, or
+ * { why } when it is to be queued instead. */
+function uninstallLiveId8(id) {
+    var entry = readJsonOrNull(appEntryFile(id));
+    if (!entry || !entry.userId) return { why: 'MainApp-21 has not installed it yet' };
+    var home = appHome(entry.userId), pkg = readJsonOrNull(path.join(home, 'source', 'package.json'));
+    if (!pkg || pkg.name !== id) return { why: 'its home is not provably ' + id + "'s" };
+    say('uninstalling app ' + id + ' (uid ' + entry.userId + ')');
+    var r = uninstallInPlace(id, typeof pkg.version === 'string' ? pkg.version : null);
+    if (!r.done) return r;
+    rootfsWindow(preinstalledFor(id).map(function (p) { return { type: 'delete', path: p }; })
+        .concat(dasOps(dasEdits(id, false))));
+    customAppsRemove(id);
+    rmrf(appEntryFile(id));
+    rmrf(appEntryFile(id) + '.tmp');
+    rmrf(home);
+    queueId8({ id: id });
+    say(id + ' uninstalled');
+    return { done: true };
 }
 function copyTree(src, dst) {
     var st = fs.lstatSync(src);
@@ -3442,7 +3553,7 @@ function amRemove(state, stage) {
         say(AM.home + ' kept as ' + AM_REMOVED);
     }
     if (isId8()) {
-        if (amAppOnUnit(AM.app)) uninstallAppId8(AM.app, state);
+        if (amAppOnUnit(AM.app)) uninstallAppId8(AM.app, state, true);
     } else if (installedApp(AM.app)) uninstallApp(AM.app, state);
     rec.removed = new Date().toISOString();
     writeAtomic(AM_RECORD, JSON.stringify(rec, null, 2) + '\n', 0o644);
@@ -3518,7 +3629,9 @@ function buildFallbackCopy(dest, input) {
     process.stdout.write(r.stdout || '');
     if (r.status !== 0) throw refuse('fallback build refused: ' + (r.stderr || '').trim());
 }
-function fallbackUnitSource() { return path.join(HERE, FALLBACK_UNIT); }
+/* The boot unit, installed as FALLBACK_UNIT: iDrive 8's builds the copy of
+ * MainApp-21's main.js and binds it there. */
+function fallbackUnitSource() { return path.join(HERE, isId8() ? 'mgu-app-fallback-id8.service' : FALLBACK_UNIT); }
 function fallbackTouched() {
     return [path.join(CFG.systemd, FALLBACK_UNIT),
         path.join(CFG.systemd, 'multi-user.target.wants', FALLBACK_UNIT),
@@ -4041,7 +4154,7 @@ function artifactTouched(a) {
         return toolTouched(a.component).concat(gone).concat(i7Takeover(a).paths)
             .concat([path.join(CFG.varOpt, a.id, 'versions', a.version)]).concat(uplinkDropIns(a.id));
     }
-    if (isId8()) return applyTouched();
+    if (isId8()) return applyTouched().concat(id8LiveTouched(a.id, a.version), uplinkDropIns(a.id));
     var existing = null;
     try { existing = installedApp(a.id); } catch (e) { /* listed without it */ }
     return appTouched(a, existing).concat(uplinkDropIns(a.id));
@@ -4403,7 +4516,7 @@ function cmdInstall(args) {
             }
             try {
                 if (a.kind === 'tool') installTool(a, state, tx);
-                else if (id8) installAppId8(a, state, decisions[a.id]);
+                else if (id8) installAppId8(a, state, decisions[a.id], backup);
                 else installApp(a, state, decisions[a.id]);
                 syncDropIns();
                 endAppRecord(state, a.id);
@@ -4412,7 +4525,7 @@ function cmdInstall(args) {
                 process.stderr.write(a.id + ' ' + a.version + ' failed: ' + e.message + '\n');
                 try {
                     if (a.kind === 'tool') rollbackTool(a, tx, backup, e, state);
-                    else if (id8) { restoreSnapshot(backup); pruneCreatedDirs(state); }
+                    else if (id8) rollbackAppId8(backup, state);
                     else rollbackApp(a, tx, backup, state);
                     endAppRecord(state, a.id);
                 } catch (e2) { process.stderr.write('rollback failed: ' + e2.message + '\n'); }
@@ -4711,9 +4824,7 @@ function cmdFallback(args) {
         say('fallback: ' + (s.active ? 'active' : 'inactive'));
         return 0;
     }
-    if (['on', 'off', 'migrate'].indexOf(sub) >= 0 && isId8()) {
-        throw refuse('the provisioning fallback is for iDrive 7; on iDrive 8 apps are listed in provisioning (' + CFG.prov + ')');
-    }
+    if (sub === 'migrate' && isId8()) throw refuse('fallback migrate is for iDrive 7');
     if (sub === 'on') { fallbackOn(state); saveState(state); return 0; }
     if (sub === 'off') { fallbackOff(state, {}); saveState(state); return 0; }
     if (sub === 'migrate') { if (fallbackMigrate(state)) saveState(state); return 0; }
