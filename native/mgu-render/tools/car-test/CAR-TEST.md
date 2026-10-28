@@ -185,8 +185,11 @@ DRI driver HmiMain3D has loaded ______.
 - **Never stop or restart mgu-render with an app on screen.** Stopping a
   renderer while an app's surface is up can restart the head unit. Use
   `k restart --off-screen` only, after the owner has closed the Store; it
-  also refuses while mgu-render's journal shows its embed surface up, or
-  when mgu-render is not in recmgr's restart list.
+  also refuses while mgu-render's journal shows its embed surface up, when
+  an app has drawn over the HMI since mgu-render started (its closing is not
+  logged), when the journal cannot be read, or when mgu-render is not in
+  recmgr's restart list. Then `k reboot --off-screen` instead, and `k ab
+  <settings>` and `k stats on` again (a head-unit restart clears them).
 - **The head unit restarts by itself** (black screen, boot logo): wait until
   it is back (about 2 minutes). Test settings and stats-log are gone; the
   installed mgu-render runs. `k status`, then go on, or `k restore`.

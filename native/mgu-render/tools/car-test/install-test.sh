@@ -278,7 +278,7 @@ cmd_restart() {
 	out=$(on_unit "pid=\$(systemctl show -p MainPID mgu-render.service | cut -d= -f2)
 		if [ \"\$(systemctl is-active mgu-render.service || true)\" != active ] || [ -z \"\$pid\" ] || [ \"\$pid\" = 0 ]; then echo NOT-RUNNING; exit 0; fi
 		if [ -f /etc/recmgr-restartlist.conf ] && ! grep -qE '^[[:space:]]*mgu-render[[:space:]]*\$' /etc/recmgr-restartlist.conf; then echo NO-RECMGR; exit 0; fi
-		j=\$(journalctl -b _PID=\$pid -o cat 2>/dev/null) || { echo NO-JOURNAL; exit 0; }
+		j=\$(journalctl -b _PID=\$pid -o cat 2>/dev/null) && [ -n \"\$j\" ] || { echo NO-JOURNAL; exit 0; }
 		if printf '%s\\n' \"\$j\" | grep -qE ': surface 0x[0-9a-f]+ on layer '; then echo LAYER; exit 0; fi
 		echo \"LAST \$(printf '%s\\n' \"\$j\" | grep -oE 'embed: surface 0x[0-9a-f]+ (created|destroyed)' | tail -n 1)\"")
 	case "$out" in

@@ -124,7 +124,7 @@ An embed app's frames reach the HMI's compositor one of two ways, decided when m
 Both draw top-down and give the same bytes (`test/test_embed.c`). display-bridge's apps' pixels go into whichever
 kind is in use (with zero-copy, drawn into the GPU buffer by GL as a picture): the HMI's compositor shows a GPU buffer
 with red and blue swapped once the same surface id has shown a shared-memory buffer in that HMI run (seen in the
-emulator), so a connection never mixes the two. Once reading back, mgu-render stays so until it restarts, and
+emulator and on the car), so a connection never mixes the two. Once reading back, mgu-render stays so until it restarts, and
 zero-copy after a readback shows right only on a freshly started HMI. The journal names the path (`embed: zero-copy` or `embed: readback fallback (<why>)`);
 apps see it in X_READY's caps (32) and STATS' fourth word.
 
