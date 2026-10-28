@@ -365,24 +365,16 @@ func (s *supplicant) joined() error {
 	return s.ok("SAVE_CONFIG")
 }
 
-// reload drops what join set up: the saved networks as saved. 2.10 answers
-// RECONFIGURE with FAIL only when it can't read wpa.conf
-// (wpa_supplicant_reload_configuration): the file is set aside and the
-// supplicant stopped, so that the next ensure starts it without saved
-// networks.
+// reload drops what join set up: the saved networks as saved. When
+// RECONFIGURE fails (2.10: mostly a wpa.conf it can't read) the supplicant
+// is stopped, so that the next ensure starts it again from the file; a file
+// it really can't read is set aside there.
 func (s *supplicant) reload() error {
-	r, err := s.request("RECONFIGURE")
-	if err != nil {
-		return err
-	}
-	if t := strings.TrimSpace(r); t != "OK" {
+	err := s.ok("RECONFIGURE")
+	if err != nil && s.isRunning() {
 		s.stop()
-		s.mu.Lock()
-		s.setAsideConf()
-		s.mu.Unlock()
-		return fmt.Errorf("wpa_supplicant: RECONFIGURE: %s", t)
 	}
-	return nil
+	return err
 }
 
 func (s *supplicant) forget(ssid string) error {

@@ -138,6 +138,7 @@ type wifiProvider struct {
 	retryAt   time.Time // not tried again before
 	err       string    // a failed join, shown until the next request
 	note      string    // the saved networks set aside, shown until the next join or switch
+	switched  bool      // setEnabled ran: the tick ends a run of give-backs (retakeAt, givebacks: reqMu's)
 	ip        string    // the uplink's lease on the interface
 	link      *wifiLink
 }
@@ -221,8 +222,12 @@ func (p *wifiProvider) unavailable(st *wifiStatus, why string) {
 
 func (p *wifiProvider) up(st *wifiStatus) {
 	p.mu.Lock()
-	owned, fails, retryAt := p.owned, p.fails, p.retryAt
+	owned, fails, retryAt, switched := p.owned, p.fails, p.retryAt, p.switched
+	p.switched = false
 	p.mu.Unlock()
+	if switched {
+		p.retakeAt, p.givebacks = time.Time{}, 0
+	}
 	// failed, or waiting to try again: nothing is looked at until the next try
 	if fails >= wifiMaxFails || fails > 0 && time.Now().Before(retryAt) {
 		msg := p.failMsg
@@ -611,8 +616,7 @@ func (p *wifiProvider) setOnline(ip string) {
 func (p *wifiProvider) setEnabled(on bool) {
 	p.mu.Lock()
 	changed := p.enabled != on
-	p.enabled, p.err, p.fails, p.retryAt, p.note = on, "", 0, time.Time{}, ""
-	p.retakeAt, p.givebacks = time.Time{}, 0
+	p.enabled, p.err, p.fails, p.retryAt, p.note, p.switched = on, "", 0, time.Time{}, "", true
 	p.mu.Unlock()
 	if changed {
 		logf("wifi: switched %s", onOff(on))

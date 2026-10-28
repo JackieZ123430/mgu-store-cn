@@ -305,13 +305,55 @@ func TestWiFiBadConf(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, c.wpaConf(), bad)
-	p.connect("Home", "rightpass1") // fails: the supplicant restarts without saved networks
-	if _, err := os.Stat(c.wpaConf() + ".bad"); err != nil {
-		t.Fatalf("not set aside at RECONFIGURE: %v", err)
-	}
-	waitWiFi(t, p, "noted after RECONFIGURE", func(st wifiStatus) bool {
+	p.connect("Home", "rightpass1") // fails: the supplicant stops, and its restart can't read the file
+	waitWiFi(t, p, "set aside at the restart", func(st wifiStatus) bool {
 		return st.Error != nil && strings.Contains(*st.Error, "set aside")
 	})
+	if _, err := os.Stat(c.wpaConf() + ".bad"); err != nil {
+		t.Fatalf("not set aside: %v", err)
+	}
+}
+
+// Switching Wi-Fi while the car takes the interface back and forth: no race
+// on the give-back wait, and a switch ends it.
+func TestWiFiSwitchDuringGiveBacks(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeScan(t, scan)
+	p, _, _ := testProvider(t, scan)
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "taken", func(st wifiStatus) bool { return st.Link == "idle" })
+	other := filepath.Join(p.proc, "88", "cmdline")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for end := time.Now().Add(1500 * time.Millisecond); time.Now().Before(end); time.Sleep(15 * time.Millisecond) {
+			p.setEnabled(true)
+		}
+	}()
+	for end := time.Now().Add(1500 * time.Millisecond); time.Now().Before(end); time.Sleep(120 * time.Millisecond) {
+		if exists(other) {
+			os.RemoveAll(filepath.Dir(other))
+		} else {
+			writeFile(t, other, "/usr/sbin/hostapd\x00-iwlant0\x00")
+		}
+	}
+	<-done
+	os.RemoveAll(filepath.Dir(other))
+	waitWiFi(t, p, "taken once free", func(st wifiStatus) bool { return st.Link == "idle" })
+	// a give-back now, then a switch: it ends the wait, so the interface is
+	// taken again within a few ticks, not after wifiRetake
+	writeFile(t, other, "/usr/sbin/hostapd\x00-iwlant0\x00")
+	waitWiFi(t, p, "given back", func(st wifiStatus) bool { return st.Link == "unavailable" })
+	os.RemoveAll(filepath.Dir(other))
+	p.setEnabled(true)
+	start := time.Now()
+	waitWiFi(t, p, "taken again after the switch", func(st wifiStatus) bool { return st.Link == "idle" })
+	if since := time.Since(start); since >= wifiRetake {
+		t.Fatalf("waited %v after a switch", since)
+	}
 }
 
 // A check that fails while the provider has the interface is no reason to
