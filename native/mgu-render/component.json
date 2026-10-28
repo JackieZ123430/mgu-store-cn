@@ -7,7 +7,7 @@
   "mguProvides": "renderer",
   "mguHmi": ["ID7", "ID8"],
   "optional": true,
-  "requires": { "mgu-deploy": "0.5.11" },
+  "requires": { "mgu-deploy": "0.6.1" },
   "uninstallable": true,
   "build": ["make", "check-target"],
   "files": [
