@@ -81,10 +81,10 @@ from the installed HmiMain3D.
   `/var/opt/mgu-render/status.json` says how it went: `template` (`ok`,
   `building`, `failed`), `stamp`, `reason`, `retry`, and `problem`
   (`In-page drawing unavailable: <reason>`), which the Store shows on the
-  Renderer's page. A failure the generator reports is not tried again until
-  the stamp changes; the time limit or a signal (out of memory) is tried
-  again at the next install.
-- `mgu-render-hmi.service` (before `hmi.service`, at most 10 s) generates
+  Renderer's page. HmiMain3D lacking what the template needs is not tried
+  again until the stamp changes; any other failure (the time limit, a
+  signal, memory or disk) is tried again at the next install.
+- `mgu-render-hmi.service` (before `hmi.service`, at most 30 s) generates
   nothing: with a template for the current stamp it mounts a copy of
   `bmw/widget/` in `/run` with it over the original and writes
   `/run/mgu-render/hmi-template`, else the stock widgets stay. Embed is

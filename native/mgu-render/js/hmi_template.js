@@ -15,7 +15,8 @@
  * (wayland-1), stretched to the box (mgu-render.conf's embed_area is the same
  * box). Writes DIR/LT_State_A4A_WelcomeApp.pbw; systemd/mgu-render-hmi.sh --build
  * runs it on the unit's Node 8 when mgu-render is installed. An error is one line
- * on stderr, exit status 1.
+ * on stderr: exit status 1 when this HmiMain3D lacks what the template needs, 3 for
+ * anything else (memory, disk), which may pass on another try.
  */
 'use strict';
 
@@ -93,7 +94,7 @@ function identifiers(data) {
         }
     }
     if (best.size < 1000) {
-        throw new Error('no identifier table in HmiMain3D');
+        throw Object.assign(new Error('no identifier table in HmiMain3D'), { hmi: true });
     }
     return best;
 }
@@ -125,7 +126,7 @@ function template(ids, surfaceId) {
     };
     const id = (f, name) => {
         if (!ids.has(name)) {
-            throw new Error(`no ${name} in HmiMain3D`);
+            throw Object.assign(new Error(`no ${name} in HmiMain3D`), { hmi: true });
         }
         return m(f, v(1, ids.get(name)));
     };
@@ -203,7 +204,7 @@ if (require.main === module) {
         fs.writeFileSync(file, template(identifiers(fs.readFileSync(opt.hmi)), surfaceId));
     } catch (e) {
         console.error(e.message);
-        process.exit(1);
+        process.exit(e.hmi ? 1 : 3);
     }
     console.log(`${file}: surface ${opt['surface-id']}`);
 }

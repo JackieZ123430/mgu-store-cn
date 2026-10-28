@@ -7,8 +7,9 @@
 # --build (the install runs it: component.json postInstall) makes the template from the installed
 # HmiMain3D for the conf's embed_surface_id, unless OUT holds it for this stamp already (that binary,
 # the generator and the id: its identifier numbers belong to one HmiMain3D build) or the last build
-# for this stamp failed for good. The generator runs at nice 19 for at most 120 s; one stopped
-# by that limit or by a signal (out of memory) is tried again at the next install.
+# for this stamp failed for good (the generator found HmiMain3D lacking what the template needs). The
+# generator runs at nice 19, first in line for the out-of-memory killer, for at most 120 s; any other
+# failure (that limit, a signal, memory or disk) is tried again at the next install.
 #   status.json: {"template": "ok" | "building" | "failed", "stamp", "reason", "retry", "problem"}
 #
 # Without --build (mgu-render-hmi.service, before the HMI starts) nothing is generated: when OUT holds
@@ -73,6 +74,7 @@ if [ -n "$BUILD" ]; then
 	gen=$!
 	# the unit's shell has renice, not nice
 	renice -n 19 -p $gen >/dev/null 2>&1 || :
+	{ echo 1000 > /proc/$gen/oom_score_adj; } 2>/dev/null || :
 	(
 		i=0
 		while [ $i -lt "$LIMIT" ] && kill -0 $gen 2>/dev/null; do sleep 1; i=$((i + 1)); done
@@ -97,7 +99,8 @@ if [ -n "$BUILD" ]; then
 		reason="the page template generator stopped (signal $((rc - 128)))"; retry=true
 	else
 		reason=$(grep -v '^[[:space:]]*$' "$NEW/log" | tail -n 1)
-		reason=${reason:-the page template generator exited $rc}; retry=false
+		reason=${reason:-the page template generator exited $rc}
+		retry=true; [ $rc -eq 1 ] && retry=false
 	fi
 	rm -rf "$NEW"
 	status failed "$reason" $retry

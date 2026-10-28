@@ -3,7 +3,7 @@
 ## 0.4.1
 
 - The HMI page template is made when mgu-render is installed or updated (`mgu-render-hmi.sh --build`, the deploy tool's `postInstall`; needs mgu-deploy 0.5.11), at low priority for at most 120 s, never before the HMI: `mgu-render-hmi.service` only mounts a template made for the installed HmiMain3D, the generator and the surface id, else leaves the stock widgets, so the HMI and the cluster's map start without waiting for it. An install whose boot-time build never finished gets its template with this update; embed is offered from the next start of the head unit.
-- `/var/opt/mgu-render/status.json` says how the last build went: `template` `ok`, `building` or `failed`, the `stamp` it was for, the `reason` and, when it failed, `problem` (`In-page drawing unavailable: <reason>`), which the Store shows on the Renderer's page (mgu-updater 0.8.1, Store 0.9.7). A build the generator refuses (identifiers it cannot find in this HmiMain3D) is not tried again until the stamp changes; one stopped by the time limit or a signal (out of memory) is tried again at the next install.
+- `/var/opt/mgu-render/status.json` says how the last build went: `template` `ok`, `building` or `failed`, the `stamp` it was for, the `reason` and, when it failed, `problem` (`In-page drawing unavailable: <reason>`), which the Store shows on the Renderer's page (mgu-updater 0.8.1, Store 0.9.7). A build the generator refuses (identifiers it cannot find in this HmiMain3D) is not tried again until the stamp changes; any other failure (the time limit, a signal, memory or disk) is tried again at the next install.
 
 ## 0.4.0
 

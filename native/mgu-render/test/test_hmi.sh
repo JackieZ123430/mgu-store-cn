@@ -2,7 +2,7 @@
 # systemd/mgu-render-hmi.sh with a stand-in HmiMain3D, generator (node), widget folder and mount:
 # the boot run only mounts a template made for this stamp and never generates; --build makes it
 # (an earlier install stuck without one included), records a real failure and does not try again
-# until the stamp changes, and tries again after a timeout or a signal.
+# until the stamp changes, and tries again after a timeout, a signal, or a memory or disk error.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=$HERE/../systemd/mgu-render-hmi.sh
@@ -30,6 +30,7 @@ ok) echo template > "\$out/LT_State_A4A_WelcomeApp.pbw" ;;
 fail) echo 'no eGfxIdParameter_titlebarH_ID7 in HmiMain3D' >&2; exit 1 ;;
 sleep) sleep 30 ;;
 kill) kill -9 \$\$ ;;
+disk) echo 'ENOSPC: no space left on device, write' >&2; exit 3 ;;
 esac
 EOF
 cat > "$T/bin/mount" <<EOF
@@ -81,7 +82,7 @@ echo 'embed_surface_id = 0x501' > "$CUR/mgu-render.conf"
 build
 ok 'build: another id is tried' '[ "$(runs)" = 3 ]'
 
-# a timeout and a signal (out of memory) are tried again
+# a timeout, a signal (out of memory) and a memory or disk error are tried again
 echo 'generator 2b' > "$CUR/hmi_template.js"
 echo sleep > "$T/mode"
 MGU_RENDER_LIMIT=1 build
@@ -92,27 +93,34 @@ echo kill > "$T/mode"
 build
 ok 'build: after a timeout it is tried again; a signal is recorded for a retry' \
 	'[ "$(runs)" = 5 ] && [ "$(field retry)" = true ] && [ "$(field reason)" = "the page template generator stopped (signal 9)" ]'
+echo disk > "$T/mode"
+build
+ok 'build: after a signal it is tried again; a memory or disk error is recorded for a retry' \
+	'[ "$(runs)" = 6 ] && [ "$(field retry)" = true ] && [ "$(field reason)" = "ENOSPC: no space left on device, write" ]'
 echo ok > "$T/mode"
 build
-ok 'build: after a signal it is tried again, and made' '[ "$(runs)" = 6 ] && [ "$(field template)" = ok ]'
+ok 'build: after a memory or disk error it is tried again, and made' '[ "$(runs)" = 7 ] && [ "$(field template)" = ok ]'
 # a build stopped with the install (status building) is tried again
 printf '{\n"template": "building",\n"stamp": "x",\n"reason": "",\n"retry": true,\n"problem": ""\n}\n' > "$ROOT/status.json"
 echo 'generator 3' > "$CUR/hmi_template.js"
 build
-ok 'build: a build left at building is made again' '[ "$(runs)" = 7 ] && [ "$(field template)" = ok ]'
+ok 'build: a build left at building is made again' '[ "$(runs)" = 8 ] && [ "$(field template)" = ok ]'
 
 # iDrive 8: no HmiMain3D
 rm "$T/HmiMain3D"
 build
-ok 'build: no HmiMain3D, no template and no status' '[ "$(runs)" = 7 ] && [ ! -e "$ROOT/status.json" ]'
+ok 'build: no HmiMain3D, no template and no status' '[ "$(runs)" = 8 ] && [ ! -e "$ROOT/status.json" ]'
 boot
-ok 'boot: no HmiMain3D, nothing mounted' '[ "$(runs)" = 7 ]'
+ok 'boot: no HmiMain3D, nothing mounted' '[ "$(runs)" = 8 ]'
 
-# the generator's error is one line, exit status 1
+# the generator's error is one line: exit status 1 for HmiMain3D lacking identifiers, 3 for anything else
 if command -v node >/dev/null 2>&1; then
 	head -c 4096 /dev/zero > "$T/zero"
 	rc=0
 	msg=$(PATH=${PATH#$T/bin:} node "$HERE/../js/hmi_template.js" --hmi "$T/zero" --out "$T" 2>&1) || rc=$?
 	ok 'generator: no identifiers in the binary is one line, exit status 1' '[ $rc = 1 ] && [ "$msg" = "no identifier table in HmiMain3D" ]'
+	rc=0
+	msg=$(PATH=${PATH#$T/bin:} node "$HERE/../js/hmi_template.js" --hmi "$T/missing" --out "$T" 2>&1) || rc=$?
+	ok 'generator: any other error is one line, exit status 3' '[ $rc = 3 ] && [ "$(echo "$msg" | wc -l)" = 1 ]'
 fi
 echo "test_hmi: $pass checks pass"
