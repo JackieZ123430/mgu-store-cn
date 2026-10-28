@@ -294,8 +294,7 @@ cmd_reboot() {
 	open_link
 	local boot out
 	local hmi='systemctl show -p ActiveEnterTimestampMonotonic --value hmi.service'
-	boot=$(on_unit "cat /proc/sys/kernel/random/boot_id; $hmi")
-	boot=$(echo $boot)
+	boot=$(on_unit "echo \$(cat /proc/sys/kernel/random/boot_id) \$($hmi)")
 	on_unit "for p in /proc/[0-9]*; do tr '\\0' ' ' <\$p/cmdline 2>/dev/null | grep -q 'mgu-deploy[.]js' && exit 1; done; exit 0" ||
 		die "the deploy tool is running (an install or update): wait until it ends, then run again" 2
 	say "asking the head unit to restart"
