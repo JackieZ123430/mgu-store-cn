@@ -114,7 +114,7 @@ boot
 ok 'boot: no HmiMain3D, nothing mounted' '[ "$(runs)" = 8 ]'
 
 # the generator's error is one line: exit status 1 for HmiMain3D lacking identifiers, 3 for anything else
-if command -v node >/dev/null 2>&1; then
+if PATH=${PATH#$T/bin:} command -v node >/dev/null 2>&1; then
 	head -c 4096 /dev/zero > "$T/zero"
 	rc=0
 	msg=$(PATH=${PATH#$T/bin:} node "$HERE/../js/hmi_template.js" --hmi "$T/zero" --out "$T" 2>&1) || rc=$?
