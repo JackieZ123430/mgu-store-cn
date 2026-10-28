@@ -399,6 +399,7 @@ cmd_drag() {
 	on_unit "t0=\$(date '+%Y-%m-%d %H:%M:%S')
 		node $UNIT_PROBE cpu $secs --gpu-freq --json /tmp/mgu-probe-$name.json
 		journalctl -u mgu-render --since \"\$t0\" -o cat 2>/dev/null | grep -E ' stats | fps, render |embed: ' > /tmp/mgu-probe-$name.stats
+		journalctl --since \"\$t0\" -o cat 2>/dev/null | grep -F 'stats store:' >> /tmp/mgu-probe-$name.stats
 		true" | tee "$RESULTS/$name.txt"
 	on_unit "cat /tmp/mgu-probe-$name.json; rm -f /tmp/mgu-probe-$name.json" >"$RESULTS/$name.json"
 	on_unit "cat /tmp/mgu-probe-$name.stats; rm -f /tmp/mgu-probe-$name.stats" >"$RESULTS/$name.stats"
