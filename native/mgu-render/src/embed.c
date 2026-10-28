@@ -138,6 +138,16 @@ static void lost(const char *what)
         embed_connect(display, E.id, E.w, E.h, E.zero_copy);
 }
 
+void embed_readback(const char *why)
+{
+    char display[sizeof E.display];
+    snprintf(display, sizeof display, "%s", E.display);
+    snprintf(E.refused, sizeof E.refused, "%s", why);
+    log_warn("embed: %s; reading back from now on", why);
+    embed_disconnect();
+    embed_connect(display, E.id, E.w, E.h, E.zero_copy);
+}
+
 static int shm_buffers(void)
 {
     size_t one = (size_t)E.w * E.h * 4;

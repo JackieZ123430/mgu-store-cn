@@ -4,18 +4,21 @@
  * renderer draws the shown app there through buffers of the box's size. The surface exists
  * only while an app is shown, so another app's page with the template shows nothing of ours.
  *
- * Two kinds of buffer, both XRGB8888 rows top-down:
+ * Two kinds of buffer, both XRGB8888 rows top-down, one kind per connection (the compositor shows a GPU buffer with
+ * red and blue swapped once the surface id has shown a shared-memory one in that HMI run):
  * - GPU buffers (zero-copy): dmabufs GL draws into (embed_gl.c), given to the compositor with wl_drm's
  *   create_prime_buffer. Made when the compositor offers wl_drm with PRIME and XRGB8888, and the renderer's
  *   own GL can draw into dmabufs; the compositor accepting them completes the setup.
- * - shared-memory buffers (wl_shm): written on the CPU (display-bridge's pixel apps, and GL frames read back when
- *   there are no GPU buffers).
+ * - shared-memory buffers (wl_shm): written on the CPU, without GPU buffers (GL frames read back,
+ *   display-bridge's pixel apps' frames).
  */
 #ifndef MGU_EMBED_H
 #define MGU_EMBED_H
 #include <poll.h>
 #include <stdint.h>
 
+/* from now on read back (GPU buffers failed: why), at once: a new connection with shared-memory buffers only */
+void embed_readback(const char *why);
 /* starts connecting (0), or -1 when the compositor is not there; embed_changed follows when it is ready.
    zero_copy: make GPU buffers when the compositor takes them */
 int embed_connect(const char *display, uint32_t id, int w, int h, int zero_copy);

@@ -52,18 +52,18 @@ while [ $# -gt 0 ]; do
 done
 nargs=${#ARGS[@]}
 # The target is named: --car (deploy/hu finds the car over ENET, else its hotspot), or
-# --host/--port (an emulator, or a car by address), never the default by omission.
+# --host (an emulator, or a car by address), never the default by omission.
 TARGET=
 CONN2=()
 for c in ${CONN[@]+"${CONN[@]}"}; do
 	case "$c" in
 		--car) TARGET=car ;;
-		--host|--port) TARGET=${TARGET:-host}; CONN2+=("$c") ;;
+		--host) TARGET=${TARGET:-host}; CONN2+=("$c") ;;
 		*) CONN2+=("$c") ;;
 	esac
 done
 CONN=(${CONN2[@]+"${CONN2[@]}"})
-if [ -z "$TARGET" ] && { [ -n "${HU_HOST:-}" ] || [ -n "${HU_PORT:-}" ]; }; then TARGET=host; fi
+if [ -z "$TARGET" ] && [ -n "${HU_HOST:-}" ]; then TARGET=host; fi
 arg() { if [ "$nargs" -gt "$1" ]; then printf '%s' "${ARGS[$1]}"; fi; }
 
 # ---- connection ---------------------------------------------------------------------------------
@@ -235,9 +235,18 @@ cmd_restore() {
 	done < <(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).restore.forEach((r) => console.log(r.artifact + " " + r.sha256))' "$TEST/plan.json")
 
 	if [ $store -eq 1 ]; then
-		# an app has no rollback and no downgrade: the test Store goes, then the published one installs
-		say "== removing the test Store"
-		on_unit "sh $DEPLOY uninstall robertn_store --yes" || die "the Store's uninstall failed; run restore again"
+		# an app has no rollback and no downgrade: the test Store goes, then the published one installs. A restore
+		# that stopped after the uninstall finds no Store, or the published one: nothing to remove then.
+		local have want now
+		want=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).restore.filter((r) => r.id === "robertn_store")[0].version)' "$TEST/plan.json")
+		now=$(mktemp /tmp/mgu-car-test-now.XXXXXX)
+		on_unit "sh $DEPLOY status --json" >"$now" || die "could not read the unit's status; run restore again"
+		have=$(node "$KIT/kit.js" versions "$now" | sed -n 's/^robertn_store //p')
+		rm -f "$now"
+		if [ -n "$have" ] && [ "$have" != - ] && [ "$have" != "$want" ]; then
+			say "== removing the test Store ($have)"
+			on_unit "sh $DEPLOY uninstall robertn_store --yes" || die "the Store's uninstall failed; run restore again"
+		fi
 	fi
 	say "== installing the published versions"
 	on_unit "sh $DEPLOY install$flags --yes" || die "the install of the published versions failed; run restore again"

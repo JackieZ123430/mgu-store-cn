@@ -20,7 +20,7 @@ int embed_gl_begin(int gpu, int w, int h);
 /* the frame is drawn: a dmabuf is finished (the compositor may sample it once committed); a readback either reads
    it into px (w*4 bytes a row) now or, with a pixel buffer, starts reading and leaves px to embed_gl_resolve */
 void embed_gl_end(int gpu, uint8_t *px, int w, int h);
-/* a frame written on the CPU (XRGB8888, w*4 bytes a row) into dmabuf gpu; 0, or -1 when it cannot be mapped */
+/* a frame made on the CPU (XRGB8888, w*4 bytes a row) into dmabuf gpu, drawn by GL; 0, or -1 */
 int embed_gl_write(int gpu, const uint8_t *px, int w, int h);
 void embed_gl_resolve(void);                /* a started readback into its px: before that buffer is committed */
 void embed_gl_cancel(void);                 /* a started readback's frame is not to be shown */

@@ -29,7 +29,8 @@ every command; the owner only opens and closes the Store and drags its list.
   ```
 
   Keep the options in an array: a string of them is one word in zsh,
-  `--host` is then not seen, and the command would look for the car.
+  `--host` is then not seen, and the command refuses (the same string
+  given to deploy/hu itself would make it look for the car).
 - At the car: parked, on stable power (engine running or a charger), ENET
   cable in, the SSH key in `~/.config/mgu-store/assets` (deploy/README.md,
   "Connecting").
@@ -198,7 +199,10 @@ DRI driver HmiMain3D has loaded ______.
 - **The Store does not draw after a restart, or mgu-render does not stay
   up:** `k ab` (clears the settings), `k restart --off-screen`, `k
   status`. If it still fails: `k restore`.
-- **`install` refused (exit 2):** nothing changed; the message says why.
+- **`install` refused (exit 2):** when the message is the kit's own
+  (versions, requirements, a test install already recorded), nothing
+  changed. When the unit's deploy tool refused a component, the test
+  record exists: `k status`, then `k restore`.
 - **`install` failed (exit 1):** the deploy tool undid that component. `k
   status`, then `k restore`.
 - **The connection drops mid-command:** run the command again. `install`
@@ -210,14 +214,14 @@ DRI driver HmiMain3D has loaded ______.
 
 - The whole round trip (status, probe, install of mgu-render and a newer
   Store, restart guard and restart, the runtime settings, drag with stats
-  lines, restore with the Store reinstalled, the checks) ran in the
-  emulator, whose `wayland-1` offers no `wl_drm`, so it always shows the
-  readback fallback. The car's own connection (`--car`) is deploy/hu's.
-  `k reboot` has not run anywhere: it sends the request the updater's
-  `reboot` sends (`nsm_control --requestRestart 7 --normal`) and waits for
-  a new boot id.
-- How HmiMain3D's compositor answers a client that binds `wl_drm` and
-  `zwp_linux_dmabuf_v1` and leaves: the probe does what mgu-render does at
-  start, nothing more.
+  lines, restore with the Store reinstalled, the checks, `k reboot`) ran in
+  the emulator. The car's own connection (`--car`) is deploy/hu's. `k
+  reboot` sends the request the updater's `reboot` sends (`nsm_control
+  --requestRestart 7 --normal`) and waits for a new boot id or a new start
+  of the HMI.
+- How HmiMain3D's compositor answers a client that binds
+  `zwp_linux_dmabuf_v1` and leaves: mgu-render binds `wl_drm` there, the
+  probe also `zwp_linux_dmabuf_v1` (for its formats and modifiers), which
+  mgu-render never does.
 - Whether the car's i915 exposes `gt_act_freq_mhz` under
   `/sys/class/drm/card0`; without it `drag` reports no GPU column.

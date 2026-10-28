@@ -14,7 +14,8 @@
  *
  *   --json <file>   also write the results as JSON
  *
- * It reads /proc, /sys and the Wayland sockets only; the one file it writes is the --json file.
+ * It only reads (/proc, /sys, /dev/dri, the Wayland sockets, /etc/passwd and /etc/group, the App
+ * Manager's registry); the one file it writes is the --json file.
  */
 const fs = require('fs');
 const net = require('net');

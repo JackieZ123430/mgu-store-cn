@@ -19,7 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -30,15 +29,10 @@
 
 #include "gfx.h"
 #include "log.h"
+#include "proto.h"
 
 #define MAXBUF 4
 #define FOURCC_XRGB8888 0x34325258u            /* 'X' 'R' '2' '4' */
-/* linux/dma-buf.h */
-struct dma_buf_sync { uint64_t flags; };
-#define DMA_BUF_SYNC_WRITE (2 << 0)
-#define DMA_BUF_SYNC_START (0 << 2)
-#define DMA_BUF_SYNC_END (1 << 2)
-#define DMA_BUF_IOCTL_SYNC _IOW('b', 0, struct dma_buf_sync)
 #ifndef GL_PIXEL_PACK_BUFFER
 #define GL_PIXEL_PACK_BUFFER 0x88EB
 #define GL_STREAM_READ 0x88E1
@@ -260,20 +254,29 @@ void embed_gl_end(int gpu, uint8_t *px, int w, int h)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+/* the frame becomes an opaque picture of a private client, drawn 1:1 (nearest) into the dmabuf: the GL driver writes
+   it, so the dmabuf need not be mappable, and the compositor gets a finished frame as from a GL draw */
 int embed_gl_write(int gpu, const uint8_t *px, int w, int h)
 {
+    static gfx_client pc;
+    static uint8_t *rgba;
     if (gpu < 0 || gpu >= nbuf) return -1;
-    if (!B[gpu].map) {
-        void *m = mmap(NULL, (size_t)B[gpu].stride * h, PROT_WRITE, MAP_SHARED, B[gpu].fd, 0);
-        if (m == MAP_FAILED) { log_warn("embed: mapping a dmabuf failed: %s", strerror(errno)); return -1; }
-        B[gpu].map = m;
+    if (!rgba && !(rgba = malloc((size_t)w * h * 4))) return -1;
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        rgba[i * 4] = px[i * 4 + 2]; rgba[i * 4 + 1] = px[i * 4 + 1]; rgba[i * 4 + 2] = px[i * 4]; rgba[i * 4 + 3] = 255;
     }
-    struct dma_buf_sync s = { DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
-    ioctl(B[gpu].fd, DMA_BUF_IOCTL_SYNC, &s);         /* (absent before Linux 4.6: then plain writes) */
-    for (int y = 0; y < h; y++) memcpy(B[gpu].map + (size_t)y * B[gpu].stride, px + (size_t)y * w * 4, (size_t)w * 4);
-    s.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
-    ioctl(B[gpu].fd, DMA_BUF_IOCTL_SYNC, &s);
-    return 0;
+    current();
+    setup();
+    pc.upstream_ops = 1;
+    if (gfx_image_upstream(&pc, 1, w, h, rgba) < 0) { log_warn("embed: %s", gfx_error()); return -1; }
+    float f[4] = { 0, 0, (float)w, (float)h };
+    uint32_t ops[7] = { OP_IMAGE, 1, 0 };
+    memcpy(&ops[3], f, sizeof f);
+    glBindFramebuffer(GL_FRAMEBUFFER, B[gpu].fbo);
+    gfx_xf xf = { 1, 0, 0 };
+    gfx_draw(&pc, &xf, w, h, ops, 7, GFX_CLEAR | GFX_TOP_DOWN);
+    embed_gl_end(gpu, NULL, w, h);
+    return glGetError() == GL_NO_ERROR ? 0 : -1;
 }
 
 void embed_gl_resolve(void)
