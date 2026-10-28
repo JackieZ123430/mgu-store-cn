@@ -838,45 +838,16 @@ function runWidgetsExtra() {
             app._client.emit('state', done);
             app._client.emit('state', done);
         };
-        // a tool pending a restart: no restart step
+        // a tool pending a restart, an app install queued for the next start: nothing opens by itself
         reset();
         ends('mgu-render', { installed: '0.1.0', status: 'installed', pendingReboot: true });
-        eq(states, [], 'none for a tool pending a restart');
-        // an iDrive 8 app change the Store asked for, queued for the next start: the step opens on the main page or the
-        // app's list, once
-        const asks = (op) => {
-            app._client.emit('state', Object.assign({}, st, { components: [comp({ installed: '1.0.0', status: 'update' }), id8only, id8installed,
-                renderer, held] }));
-            if (op === 'uninstall') {
-                app._removeId = 'doom';
-                app._remove();
-            } else {
-                app._install('doom');
-            }
-            reset();
-        };
-        const later = { pendingReboot: true, nextStart: 'install' };
-        app._states.ST_OnlineApps_Store.emit('focus', { focus: true });
-        asks();
-        ends('doom', later);
-        eq([states, sent], [['open ST_OnlineApps_StoreRestart'], []], 'the restart step after an app install queued for the next start');
+        app._client.emit('state', Object.assign({}, st, { components: [comp({ installed: '1.0.0', status: 'update' }), id8only, id8installed,
+            renderer, held] }));
+        app._install('doom');
         reset();
-        ends('doom', later);
-        eq(states, [], 'once');
-        ends('doom', later);
-        eq(states, [], 'none for an install the Store did not ask for');
-        app._states.ST_OnlineApps_StoreApps.emit('focus', { focus: true });
-        asks('uninstall');
-        ends('doom', { pendingReboot: true, nextStart: 'remove' }, 'uninstall');
-        eq(states, ['open ST_OnlineApps_StoreRestart'], 'and after a removal queued for the next start, on the apps list');
-        app._states.ST_OnlineApps_StoreSources.emit('focus', { focus: true });
-        asks();
-        ends('doom', later);
-        eq(states, [], 'none on another page');
-        app._states.ST_OnlineApps_Store.emit('focus', { focus: true });
-        asks();
-        ends('doom', { installed: '1.0.1', status: 'installed' });
-        eq(states, [], 'none after one that needs no restart');
+        ends('doom', { pendingReboot: true, nextStart: 'install' });
+        eq(states, [], 'no restart step opens by itself');
+        app._client.emit('state', st);
         // a queued first install (the updater's nextStart): its row asks to remove it, and Remove drops it
         reset();
         app._client.emit('state', Object.assign({}, st, { components: [comp({ installed: null, status: 'available', pendingReboot: true,
@@ -947,9 +918,6 @@ function runDrawn() {
         app._client.emit('state', done);
         app._client.emit('state', done);
     };
-    // the confirm step's line under its title
-    const confirmLine = () => require(path.join(SRC, 'store_ui.js'))
-        .view(Object.assign(app._drawnModel(), { stack: drawn.stack, tab: drawn.tab, filter: drawn.filter })).values.text.text;
     app._entryUuid = 'entry';
     reset();
     gpuLog.length = 0;
@@ -1036,13 +1004,13 @@ function runDrawn() {
         return tick();
     }).then(() => {
         eq(sent, [{ op: 'install', id: 'mgu-render' }]);
-        // the install ends with the tool pending a restart: no restart step
+        // the install ends with the tool pending a restart: nothing opens; its page offers Restart head unit
         reset();
         ends('mgu-render', { installed: '0.1.0', status: 'installed', pendingReboot: true });
         return tick();
     }).then(() => {
         eq([states, drawn.top().name], [[], 'app'], 'none for a tool pending a restart');
-        // an iDrive 8 app's update the Store asked for, queued for the next start: the step opens on its page, once
+        // an iDrive 8 app's update queued for the next start: the same
         app._client.emit('state', st);
         app._act({ do: 'install', id: 'doom' });
         drawn.pop();
@@ -1051,49 +1019,9 @@ function runDrawn() {
         ends('doom', { pendingReboot: true, nextStart: 'install' });
         return tick();
     }).then(() => {
-        eq([states, drawn.top()], [[`open ${host(3)}`], { name: 'confirm', kind: 'restart', id: 'doom' }], 'opened once');
-        eq(drawn.items.map((i) => i.label), ['Cancel', 'Restart']);
-        eq(confirmLine(), 'DOOM installs at the next start');
-        // Cancel goes back to the page
-        reset();
-        app._act(drawn.items[0].act);
-        return tick();
-    }).then(() => {
-        eq([states, drawn.top().name, drawn.top().id], [[`close ${host(3)}`], 'app', 'doom'], 'Cancel goes back');
-        ends('doom', { pendingReboot: true, nextStart: 'install' });
-        return tick();
-    }).then(() => {
-        eq([drawn.top().name, drawn.top().id], ['app', 'doom'], 'none for an install the Store did not ask for');
-        // on another component's page: none
+        eq([states, drawn.top().name, drawn.items.map((i) => i.label).indexOf('Restart head unit') >= 0], [[], 'app', true],
+            'none for an app queued for the next start; its page offers Restart head unit');
         drawn.pop();
-        drawn.push({ name: 'app', id: 'gauges' });
-        app._client.emit('state', st);
-        app._act({ do: 'install', id: 'doom' });
-        ends('doom', { pendingReboot: true, nextStart: 'install' });
-        return tick();
-    }).then(() => {
-        eq([drawn.top().name, drawn.top().id], ['app', 'gauges'], 'none on another page');
-        drawn.pop();
-        // a removal queued for the next start: on the main page
-        app._client.emit('state', st);
-        app._act({ do: 'remove', id: 'doom' });
-        app._client.emit('state', Object.assign({}, st, { busy: { id: 'doom', op: 'uninstall', phase: 'uninstall' } }));
-        const done = Object.assign({}, st, { components: st.components.map((c) => (c.id === 'doom' ? Object.assign({}, c, { pendingReboot: true,
-            nextStart: 'remove' }) : c)) });
-        app._client.emit('state', done);
-        return tick();
-    }).then(() => {
-        eq(drawn.top(), { name: 'confirm', kind: 'restart', id: 'doom' });
-        eq(confirmLine(), 'DOOM is removed at the next start');
-        drawn.pop();
-        // an install that needs no restart opens nothing
-        app._client.emit('state', st);
-        app._act({ do: 'install', id: 'gauges' });
-        reset();
-        ends('gauges', { installed: '1.2.0', status: 'installed' });
-        return tick();
-    }).then(() => {
-        eq([states, drawn.top().name], [[], 'main'], 'no restart step without a pending restart');
         app._client.emit('state', st);
         // a drag scrolls without pressing
         reset();

@@ -232,14 +232,6 @@ f = screen('confirm-remove');
 eq(f.labels, ['Cancel', 'Remove']);
 eq(text(f, 'title'), 'Remove Gauges 1.2.0?');
 eq(screen('confirm-restart').items[1].act, { do: 'restart' });
-eq(text(screen('confirm-restart'), 'text'), '', 'Restart head unit from Settings: no component line');
-eq(text(screen('confirm-restart', { stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'display-bridge' }] }), 'text'),
-    '', 'no line for a tool');
-// opened by an app change queued for the next start: its line
-later.components = [Object.assign({}, fixture.state().components[3], { pendingReboot: true, nextStart: 'install' }),
-    Object.assign({}, fixture.state().components[1], { pendingReboot: true, nextStart: 'remove' })];
-eq(text(laterOf({ stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'car_vitals' }] }), 'text'), 'M Vitals installs at the next start');
-eq(text(laterOf({ stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'doom' }] }), 'text'), 'DOOM is removed at the next start');
 f = screen('confirm-account');
 eq(f.items[1].act, { do: 'account-remove', id: '3f9a01c2' });
 eq(text(f, 'text'), 'robertn · robertnisipeanu/mgu-store');

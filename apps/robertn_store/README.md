@@ -43,10 +43,9 @@ USB, Settings) beside:
   holds; installed, it shows as installed, with Remove and no update), `Not for this head unit` / `For
   iDrive 8` (that version is not offered), the failure, what an installed tool says is wrong (the updater's `problem`: `In-page drawing unavailable: <reason>` from the renderer), `Restart pending`; and what can be done:
   Install, Update to, Try again, Restart head unit, Remove (a confirm step). A second renderer
-  installs beside the first. On iDrive 8, an app install or removal asked
-  for in the Store that ends queued for the next start opens the Restart
-  head unit? step by itself, once, naming what it is for (on the widget
-  screens, without that line).
+  installs beside the first. On iDrive 8 an app install or removal is
+  queued for the next start: its row shows `Restart pending`, as a tool
+  pending a restart does.
 - **Installed**: apps and head-unit tools, each with its version and
   source, its update (a press on Update installs it) or state, and Update all.
 - **USB**: the components of the sticks' sources.

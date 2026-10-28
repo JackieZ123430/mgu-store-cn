@@ -7,15 +7,8 @@ app only then) shows `Restart pending` instead of Install or Update
 again, on its tile, its row and the Installed tab, and is not counted
 as an update; its page offers Restart head unit. Before, a first
 install showed Install once it finished (with mgu-updater 0.8.2 the
-updater reports it pending), and a press installed it a second time.
-
-With mgu-updater 0.8.2 (its `nextStart`), an app install or removal asked
-for in the Store that ends queued for the next start opens the Restart
-head unit? step by itself, once, while the Store is on its main page or
-that app's page (on the widget screens: the main page or the Apps list)
-and nothing else waits to install; its line names it (`Car Data installs
-at the next start`, `Car Data is removed at the next start`). Cancel goes
-back. On the widget screens the same step opens, without the line.
+updater reports it pending), and a press installed it a second time. An
+app whose removal is queued shows `Restart pending` too.
 
 With mgu-updater 0.8.2: a queued first install can be removed, which
 drops it from the queue; an app whose removal is queued for the next

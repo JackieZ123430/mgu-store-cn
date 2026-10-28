@@ -357,9 +357,6 @@ function confirmView(m, page) {
         now = button('Remove', { do: 'remove', id: page.id }, { vicon: 'trash', style: 'primary', color: RED });
     } else if (page.kind === 'restart') {
         title = 'Restart head unit?';
-        if (c && c.nextStart) {
-            line = `${named(m, c)} ${c.nextStart === 'remove' ? 'is removed' : 'installs'} at the next start`;
-        }
         now = button('Restart', { do: 'restart' }, { vicon: 'refresh', style: 'primary', color: BLUE });
     } else if (page.kind === 'source-remove') {
         const s = find(sources(m), page.id);
