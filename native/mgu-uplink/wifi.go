@@ -45,13 +45,14 @@ const (
 
 // Replaced by tests.
 var (
-	wifiEvery     = 2 * time.Second  // the provider looks at the supplicant this often
-	joinTimeout   = 40 * time.Second // a connect request that has not joined by then failed
-	scanShown     = 8 * time.Second  // a scan request shows "scanning" this long
-	wifiDropAfter = 6 * time.Second  // a link ends once the network is gone this long
-	wifiRecheck   = 10 * time.Second // an interface the stock system uses is looked at again after this
-	wifiRetry     = 30 * time.Second // after a failure to take the interface or run the supplicant; doubles each time
-	wifiStable    = 2 * time.Minute  // a supplicant running this long ends a run of failures
+	wifiEvery      = 2 * time.Second  // the provider looks at the supplicant this often
+	joinTimeout    = 40 * time.Second // a connect request that has not joined by then failed
+	scanShown      = 8 * time.Second  // a scan request shows "scanning" this long
+	wifiDropAfter  = 6 * time.Second  // a link ends once the network is gone this long
+	wifiRecheck    = 10 * time.Second // an interface the stock system uses is looked at again after this
+	wifiOwnRecheck = 20 * time.Second // while the provider has the interface, the stock system's use is looked at this often
+	wifiRetry      = 30 * time.Second // after a failure to take the interface or run the supplicant; doubles each time
+	wifiStable     = 2 * time.Minute  // a supplicant running this long ends a run of failures
 )
 
 // wifiMaxFails failures in a row stop the provider (link "failed") until
@@ -153,7 +154,7 @@ func (p *wifiProvider) stop() {
 	close(p.stopc)
 	<-p.done
 	p.reqMu.Lock()
-	p.release()
+	p.release(errors.New("Wi-Fi stopped"), false)
 	p.reqMu.Unlock()
 }
 
@@ -193,10 +194,10 @@ func (p *wifiProvider) tick() {
 	p.mu.Unlock()
 	switch {
 	case !st.Enabled:
-		p.release()
+		p.release(errors.New("Wi-Fi switched off"), false)
 		st.Link = "off"
 	case !exists(filepath.Join(p.sys, p.iface)):
-		p.release()
+		p.release(fmt.Errorf("%s is gone", p.iface), false)
 		p.unavailable(&st, fmt.Sprintf("no Wi-Fi radio (%s)", p.iface))
 	default:
 		p.up(&st)
@@ -212,15 +213,18 @@ func (p *wifiProvider) up(st *wifiStatus) {
 	p.mu.Lock()
 	owned, fails, retryAt := p.owned, p.fails, p.retryAt
 	p.mu.Unlock()
-	if !owned {
-		if why := p.stockUse(); why != "" {
-			p.unavailable(st, why)
-			return
-		}
-	}
-	if fails > 0 && time.Now().Before(retryAt) || fails >= wifiMaxFails {
+	// failed, or waiting to try again: nothing is looked at until the next try
+	if fails >= wifiMaxFails || fails > 0 && time.Now().Before(retryAt) {
 		msg := p.failMsg
 		st.Link, st.Error = "failed", &msg
+		return
+	}
+	if why := p.stockUse(owned); why != "" {
+		if owned {
+			logf("wifi: giving %s back: %s", p.iface, why)
+			p.release(errors.New(why), true)
+		}
+		p.unavailable(st, why)
 		return
 	}
 	err := p.own()
@@ -308,21 +312,37 @@ func (p *wifiProvider) failed(st *wifiStatus, err error) {
 	p.mu.Unlock()
 	msg := err.Error()
 	if fails >= wifiMaxFails {
-		p.release()
+		p.release(err, false)
 		logf("wifi: %d failures in a row; not trying again until Wi-Fi is switched on again", fails)
 	} else {
-		msg += fmt.Sprintf(" (trying again in %s)", wait)
+		msg += fmt.Sprintf(" (trying again in %s)", humanDuration(wait))
 	}
 	p.failMsg = msg
 	st.Link, st.Error = "failed", &msg
 }
 
+// humanDuration: "30 s", "2 min".
+func humanDuration(d time.Duration) string {
+	switch {
+	case d >= time.Minute:
+		return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
+	case d >= time.Second:
+		return fmt.Sprintf("%d s", int(d.Round(time.Second)/time.Second))
+	}
+	return fmt.Sprintf("%d ms", d.Milliseconds())
+}
+
 // stockUse says why the stock system uses the interface ("" when it does
-// not), at most every wifiRecheck while it does: an access point, P2P or
-// any mode but station, hostapd on it, another wpa_supplicant on it or a
-// D-Bus one that has it, connman managing it.
-func (p *wifiProvider) stockUse() string {
-	if p.used != "" && time.Since(p.usedAt) < wifiRecheck {
+// not): an access point, P2P or any mode but station, hostapd on it,
+// another wpa_supplicant on it or a D-Bus one that has it, connman
+// managing it. While it does, it is looked at again every wifiRecheck;
+// while the provider has the interface, every wifiOwnRecheck.
+func (p *wifiProvider) stockUse(owned bool) string {
+	every := wifiRecheck
+	if owned && p.used == "" {
+		every = wifiOwnRecheck
+	}
+	if (p.used != "" || owned) && !p.usedAt.IsZero() && time.Since(p.usedAt) < every {
 		return p.used
 	}
 	p.used, p.usedAt = p.findStockUse(), time.Now()
@@ -411,7 +431,7 @@ func (p *wifiProvider) own() error {
 		err = e
 	}
 	if err != nil {
-		restoreWiFi(p.record)
+		restoreWiFi(p.record, false)
 		return err
 	}
 	p.mu.Lock()
@@ -441,16 +461,18 @@ func wifiLinkUp(iface string) (linkState, error) {
 	return st, nil
 }
 
-// release stops the supplicant and puts the interface back. A
-// link on the interface ends first, and the service lets go of it (DHCP's
-// release still goes out) before the interface goes down.
-func (p *wifiProvider) release() {
+// release stops the supplicant and puts the interface back. A link on the
+// interface ends first (why), and the service lets go of it (DHCP's
+// release still goes out) before the interface goes down. toCar: the stock
+// system has taken the interface, so only its IPv6 setting is put back and
+// it stays up or down as the car has it.
+func (p *wifiProvider) release(why error, toCar bool) {
 	p.mu.Lock()
 	owned, l := p.owned, p.link
 	p.owned, p.joining, p.link = false, "", nil
 	p.mu.Unlock()
 	if l != nil {
-		l.end(errors.New("Wi-Fi switched off"))
+		l.end(why)
 		select {
 		case <-l.stop:
 		case <-time.After(3 * time.Second):
@@ -460,7 +482,7 @@ func (p *wifiProvider) release() {
 		return
 	}
 	p.wpa.stop()
-	restoreWiFi(p.record)
+	restoreWiFi(p.record, toCar)
 	logf("wifi: %s off", p.iface)
 	if p.notify != nil {
 		p.notify()
@@ -468,15 +490,21 @@ func (p *wifiProvider) release() {
 }
 
 // restoreWiFi puts back what a record says the provider changed on the
-// interface (its IPv6 setting, down when it was down). The radio's rfkill
-// state stays.
-func restoreWiFi(record string) {
+// interface: its IPv6 setting, and unless ipv6Only, down when it was down.
+// The radio's rfkill state stays.
+func restoreWiFi(record string, ipv6Only bool) {
 	b, err := os.ReadFile(record)
 	if err != nil {
 		return
 	}
 	var rec wifiRecord
-	if json.Unmarshal(b, &rec) == nil && rec.Link.Index > 0 {
+	switch {
+	case json.Unmarshal(b, &rec) != nil || rec.Link.Index <= 0:
+	case ipv6Only:
+		if rec.Link.IPv6 != "" {
+			writeSysctl(ipv6Sysctl(rec.Link.OrigName), rec.Link.IPv6)
+		}
+	default:
 		rec.Link.restore()
 	}
 	os.Remove(record)
@@ -616,11 +644,37 @@ func (p *wifiProvider) cancelJoin() {
 	}
 }
 
+// checkSSID: 1 to 32 bytes that wpa.conf gives back as written. SAVE_CONFIG
+// writes a name of printable ASCII as ssid="<name>" (any other as hex),
+// read back like a passphrase (checkPSK).
 func checkSSID(s string) error {
 	if s == "" || len(s) > 32 {
 		return errors.New("network name: 1 to 32 bytes")
 	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 32 || s[i] > 126 {
+			return nil
+		}
+	}
+	if hashCut(s) {
+		return errors.New(`network name: a # after an odd number of " can't be saved`)
+	}
 	return nil
+}
+
+// hashCut: s has a '#' after an odd number of '"', where wpa_supplicant's
+// wpa_config_get_line would cut "<s>".
+func hashCut(s string) bool {
+	quotes := 0
+	for _, c := range s {
+		switch {
+		case c == '"':
+			quotes++
+		case c == '#' && quotes%2 == 1:
+			return true
+		}
+	}
+	return false
 }
 
 // checkPSK: a WPA passphrase, 8 to 63 printable ASCII characters, that
@@ -632,16 +686,13 @@ func checkPSK(p string) error {
 	if len(p) < 8 || len(p) > 63 {
 		return errors.New("password: 8 to 63 characters")
 	}
-	quotes := 0
 	for _, c := range p {
-		switch {
-		case c < 32 || c > 126:
+		if c < 32 || c > 126 {
 			return errors.New("password: letters, digits and symbols only")
-		case c == '"':
-			quotes++
-		case c == '#' && quotes%2 == 1:
-			return errors.New(`password: a # after an odd number of " can't be saved`)
 		}
+	}
+	if hashCut(p) {
+		return errors.New(`password: a # after an odd number of " can't be saved`)
 	}
 	return nil
 }

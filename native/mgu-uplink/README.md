@@ -130,7 +130,10 @@ The radio is `wlan1` on iDrive 7 and iDrive 8 (on iDrive 8, checked on a
 car, the second adapter of the NXP 88W9098: the first adapter's `wlan0`
 never sends an association request). Switched on, the provider takes
 `wlan1` only while the car does not use it; otherwise Wi-Fi is
-`unavailable`, with the reason, and looked at again every 10 s:
+`unavailable`, with the reason, and looked at again every 10 s. While it
+has `wlan1` it looks every 20 s, and when the car starts using it, gives it
+back: our wpa_supplicant stops, the link ends, IPv6 is put back and the
+link stays as the car has it. The car uses `wlan1` when there is:
 
 - `wlan1` in any mode but station (an access point, P2P), read through nl80211
 - hostapd on `wlan1`
@@ -144,7 +147,8 @@ Once it has `wlan1`, the provider unblocks its radio when rfkill
 soft-blocks it (and leaves it unblocked), turns IPv6 off on `wlan1` and
 brings it up; it puts IPv6 and the link state back when Wi-Fi is switched
 off or the service stops. When taking `wlan1` or running wpa_supplicant
-fails, it is tried again after 30 s, waiting twice as long each time; after
+fails, it is tried again after 30 s, waiting twice as long each time (and
+nothing is looked at meanwhile); after
 5 failures in a row Wi-Fi is `failed` until it is switched on again or the
 service restarts. An iPhone's hotspot is seen with Settings → Personal
 Hotspot → Maximise Compatibility on (2.4 GHz).
@@ -158,8 +162,11 @@ only and never touches another wpa_supplicant. Saved networks are in `/var/opt/m
 in a folder only root can read; a network is saved once it was joined with
 the password given, also when the password of the current network is
 entered again. WPA2 and WPA3 personal (passwords of 8 to 63 printable
-characters; a `#` after an odd number of `"` is refused, since wpa.conf
-can't keep it) and open networks; no enterprise (EAP).
+characters) and open networks; no enterprise (EAP). A password or a
+printable-ASCII network name with a `#` after an odd number of `"` is
+refused: wpa.conf can't keep it. A wpa.conf wpa_supplicant can't read is
+moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks
+(`error` says so).
 
 ### status.json
 

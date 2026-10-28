@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,15 +14,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vishvananda/netlink"
 )
 
 // fastWiFi shortens the provider's timings for a test.
 func fastWiFi(t *testing.T) {
-	every, join, drop, recheck, retry, stable := wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiRetry, wifiStable
+	every, join, drop, recheck, own, retry, stable := wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable
 	wifiEvery, joinTimeout, wifiDropAfter = 50*time.Millisecond, 1500*time.Millisecond, 300*time.Millisecond
-	wifiRecheck, wifiRetry, wifiStable = 100*time.Millisecond, 100*time.Millisecond, time.Hour
+	wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable = 100*time.Millisecond, 200*time.Millisecond, 100*time.Millisecond, time.Hour
 	t.Cleanup(func() {
-		wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiRetry, wifiStable = every, join, drop, recheck, retry, stable
+		wifiEvery, joinTimeout, wifiDropAfter, wifiRecheck, wifiOwnRecheck, wifiRetry, wifiStable = every, join, drop, recheck, own, retry, stable
 	})
 }
 
@@ -228,12 +231,14 @@ func TestWiFiEscapes(t *testing.T) {
 	fastWiFi(t)
 	scan := filepath.Join(t.TempDir(), "scan")
 	name, psk := `Mario’s "Hot\spot"`, `pa"ss"#word1`
-	writeScan(t, scan, "0a:3c:ff:5b:bc:a7\t2437\t-40\t[WPA2-PSK-CCMP][ESS]\t"+name+"\t"+psk)
+	quoted := `Joe's "Cafe" #2` // written between quotes, not as hex
+	writeScan(t, scan, "0a:3c:ff:5b:bc:a7\t2437\t-40\t[WPA2-PSK-CCMP][ESS]\t"+name+"\t"+psk,
+		"0a:3c:ff:5b:bc:a8\t2437\t-50\t[WPA2-PSK-CCMP][ESS]\t"+quoted+"\tcafe#pass1")
 	p, c, _ := testProvider(t, scan)
 	p.setEnabled(true)
 	p.start()
 	defer p.stop()
-	waitWiFi(t, p, "the network seen", func(st wifiStatus) bool { return len(st.Networks) == 1 && st.Networks[0].SSID == name })
+	waitWiFi(t, p, "the networks seen", func(st wifiStatus) bool { return len(st.Networks) == 2 && st.Networks[0].SSID == name })
 	if err := p.connect(name, psk); err != nil {
 		t.Fatal(err)
 	}
@@ -241,13 +246,110 @@ func TestWiFiEscapes(t *testing.T) {
 		return st.Link == "connected" && st.SSID == name && reflect.DeepEqual(st.Saved, []string{name}) &&
 			st.Networks[0].Current && st.Error == nil
 	})
+	if err := p.connect(quoted, "cafe#pass1"); err != nil {
+		t.Fatal(err)
+	}
+	waitWiFi(t, p, "joined the quoted one", func(st wifiStatus) bool {
+		return st.Link == "connected" && st.SSID == quoted && len(st.Saved) == 2
+	})
+	if b, _ := os.ReadFile(c.wpaConf()); !strings.Contains(string(b), "\tssid=\""+quoted+"\"\n") {
+		t.Fatalf("wpa.conf:\n%s", b)
+	}
+	if err := p.connect(`Joe"s #2`, "whatever1"); err == nil || !strings.Contains(err.Error(), "can't be saved") {
+		t.Fatalf("a name wpa.conf can't keep: %v", err)
+	}
 	if b, _ := os.ReadFile(c.wpaConf()); !strings.Contains(string(b), "\tpsk=\""+psk+"\"\n") {
 		t.Fatalf("wpa.conf:\n%s", b)
 	}
 	p.reqMu.Lock()
 	p.wpa.stop()
 	p.reqMu.Unlock()
-	waitWiFi(t, p, "joined after a restart", func(st wifiStatus) bool { return st.Link == "connected" && st.SSID == name })
+	waitWiFi(t, p, "joined after a restart", func(st wifiStatus) bool {
+		return st.Link == "connected" && st.SSID == quoted && len(st.Saved) == 2
+	})
+}
+
+// A wpa.conf the supplicant can't read is set aside, and Wi-Fi starts
+// without saved networks instead of failing at every start.
+func TestWiFiBadConf(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeScan(t, scan)
+	p, c, _ := testProvider(t, scan)
+	os.MkdirAll(filepath.Dir(c.wpaConf()), 0700)
+	bad := fmt.Sprintf("ctrl_interface=%s\nupdate_config=1\n\nnetwork={\n\tssid=\"Joe\"s #2\"\n\tpsk=\"whatever1\"\n}\n", c.wpaCtrl())
+	writeFile(t, c.wpaConf(), bad)
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "set aside", func(st wifiStatus) bool {
+		return st.Link == "failed" && st.Error != nil && strings.Contains(*st.Error, "set aside (wpa.conf.bad)")
+	})
+	waitWiFi(t, p, "idle without saved networks", func(st wifiStatus) bool { return st.Link == "idle" && len(st.Saved) == 0 })
+	if b, err := os.ReadFile(c.wpaConf() + ".bad"); err != nil || string(b) != bad {
+		t.Fatalf("wpa.conf.bad: %q %v", b, err)
+	}
+}
+
+// The stock system taking the interface while the provider has it: the
+// provider gives it back (supplicant stopped, the record's IPv6 put back,
+// the link left as it is, rfkill untouched) and is unavailable until it is
+// free again.
+func TestWiFiTakenBack(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeScan(t, scan)
+	p, c, soft := testProvider(t, scan)
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "taken", func(st wifiStatus) bool { return st.Link == "idle" })
+	if !p.guarding() || !p.wpa.isRunning() {
+		t.Fatal("not taken")
+	}
+	other := filepath.Join(p.proc, "88", "cmdline")
+	writeFile(t, other, "/usr/sbin/hostapd\x00-iwlant0\x00")
+	st := waitWiFi(t, p, "given back", func(st wifiStatus) bool {
+		return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, "hostapd runs on wlant0")
+	})
+	if p.guarding() || p.wpa.isRunning() || exists(p.record) || len(supplicants(p.proc, "", c.wpaConf())) != 0 {
+		t.Fatalf("still held: %+v", st)
+	}
+	if v, _ := readSysctl(soft); v != "0" {
+		t.Fatal("rfkill touched")
+	}
+	os.RemoveAll(filepath.Dir(other))
+	waitWiFi(t, p, "taken again once free", func(st wifiStatus) bool { return st.Link == "idle" })
+}
+
+// Giving the interface to the car puts back IPv6 and leaves the link as the
+// car has it; a switch-off puts the link back down too.
+func TestRestoreWiFiToCar(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (a dummy interface)")
+	}
+	name := "mguwtest0"
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+		t.Skipf("no dummy interface: %v", err)
+	}
+	defer netlink.LinkDel(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}})
+	link, _ := netlink.LinkByName(name)
+	record := filepath.Join(t.TempDir(), "wifi.json")
+	for _, toCar := range []bool{true, false} {
+		netlink.LinkSetDown(link) // down, as stock leaves an unused radio
+		writeSysctl(ipv6Sysctl(name), "0")
+		ls, err := wifiLinkUp(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(record, wifiRecord{Link: ls}, 0644)
+		restoreWiFi(record, toCar)
+		l, _ := netlink.LinkByIndex(link.Attrs().Index)
+		v, _ := readSysctl(ipv6Sysctl(name))
+		if up := l.Attrs().Flags&net.FlagUp != 0; up != toCar || v != ls.IPv6 || exists(record) {
+			t.Fatalf("toCar %v: up %v ipv6 %q (was %q)", toCar, up, v, ls.IPv6)
+		}
+	}
 }
 
 // The stock system using the interface: the provider leaves it alone until
@@ -346,7 +448,7 @@ func TestWiFiBackoff(t *testing.T) {
 		t.Fatalf("failed: %s, guarding %v", *st.Error, p.guarding())
 	}
 	// the waits double; the interface was taken once for the run
-	if want := []string{"100ms)", "200ms)", "400ms)", "800ms)"}; !reflect.DeepEqual(waits, want) || taken() != 1 {
+	if want := []string{"100 ms)", "200 ms)", "400 ms)", "800 ms)"}; !reflect.DeepEqual(waits, want) || taken() != 1 {
 		t.Fatalf("waits %v (want %v), interface taken %d times", waits, want, taken())
 	}
 	time.Sleep(500 * time.Millisecond)

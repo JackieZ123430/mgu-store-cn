@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeWPAEnv makes the test binary, started as "<binary> -i <iface> ... -c
@@ -82,12 +83,29 @@ func TestWiFiChecks(t *testing.T) {
 		if err := checkPSK(bad); err == nil || !strings.Contains(err.Error(), "can't be saved") {
 			t.Errorf("%q: %v", bad, err)
 		}
-		if v, _ := wpaConfValue("\tpsk=\"" + bad + "\""); v == bad {
+		if v, ok := wpaConfValue("\tpsk=\"" + bad + "\""); ok && v == bad {
 			t.Errorf("%q reads back whole", bad)
 		}
 	}
 	if checkSSID("") == nil || checkSSID(strings.Repeat("a", 33)) == nil || checkSSID("ok") != nil {
 		t.Fatal("ssid checks")
+	}
+	// a name SAVE_CONFIG writes between quotes: refused where wpa.conf would cut it
+	for name, ok := range map[string]bool{`Joe"s #2`: false, `Joe's "Cafe" #2`: true, `a#b`: true, `"x"#"y"#`: true,
+		"Mario’s \"#1": true /* hex: has a byte outside ASCII */} {
+		if err := checkSSID(name); (err == nil) != ok {
+			t.Errorf("checkSSID(%q): %v", name, err)
+		}
+		if ok && wpaConfString(name)[0] == '"' {
+			if v, read := wpaConfValue("\tssid=" + wpaConfString(name)); !read || v != name {
+				t.Errorf("%q read back as %q %v", name, v, read)
+			}
+		}
+	}
+	for d, want := range map[time.Duration]string{30 * time.Second: "30 s", time.Minute: "1 min", 4 * time.Minute: "4 min", 100 * time.Millisecond: "100 ms"} {
+		if got := humanDuration(d); got != want {
+			t.Errorf("humanDuration(%v) = %q", d, got)
+		}
 	}
 }
 
@@ -116,6 +134,9 @@ func TestStockUsers(t *testing.T) {
 		{[][]string{{"/usr/sbin/wpa_supplicant_nxp", "-iwfd0", "-Dnl80211"}}, "", false},
 		{[][]string{dbusWPA, nxpConnman}, "", true},
 		{[][]string{dbusWPA, connman}, "connman manages", false},
+		{[][]string{dbusWPA, append([]string{"/usr/sbin/connmand_nxp"}, connman[1:]...)}, "connman manages", false},
+		{[][]string{{"/usr/sbin/connmand_nxp", "-n", "-iwfd0,wlan*"}}, "connman manages", false},
+		{[][]string{{"/usr/sbin/connmand-wait-online_nxp", "-i", "wlan1"}}, "", false},
 		{[][]string{{"/usr/sbin/wpa_supplicant", "-dsu"}}, "", true},
 		{[][]string{{"/usr/sbin/wpa_supplicant", "-c/etc/u.conf", "-iwfd0"}}, "", false},
 		{[][]string{{"/usr/sbin/connmand", "-n", "--device=wlan*"}}, "connman manages", false},
@@ -204,8 +225,8 @@ func printfEncode(s string) string {
 
 // wpaConfValue reads a "key=value" line of wpa.conf as wpa_supplicant 2.10
 // does: wpa_config_get_line cuts it at a '#' outside a pair of quotes, and
-// wpa_config_parse_string takes a quoted value up to its last quote and
-// an unquoted one as hex.
+// wpa_config_parse_string takes a quoted value that ends in its last quote
+// (else refuses it) and an unquoted one as hex.
 func wpaConfValue(line string) (string, bool) {
 	pos := strings.TrimLeft(line, " \t\r")
 	end := strings.IndexByte(pos, '#')
@@ -235,10 +256,11 @@ func wpaConfValue(line string) (string, bool) {
 		return string(b), err == nil
 	}
 	v = v[1:]
-	if i := strings.LastIndexByte(v, '"'); i >= 0 {
-		v = v[:i]
+	i := strings.LastIndexByte(v, '"')
+	if i < 0 || i != len(v)-1 {
+		return v, false
 	}
-	return v, true
+	return v[:i], true
 }
 
 // wpaConfString writes a name as SAVE_CONFIG does: hex when it has a byte
@@ -286,9 +308,13 @@ func fakeWPA(scanFile string, args []string) int {
 				nets[next] = n
 				next++
 			case n != nil && k == "ssid":
-				n.ssid, _ = wpaConfValue(l)
+				var ok bool
+				if n.ssid, ok = wpaConfValue(l); !ok {
+					return false
+				}
 			case n != nil && k == "psk":
-				if n.psk, _ = wpaConfValue(l); len(n.psk) < 8 {
+				var ok bool
+				if n.psk, ok = wpaConfValue(l); !ok || len(n.psk) < 8 {
 					return false
 				}
 			case n != nil && k == "key_mgmt":
@@ -331,6 +357,7 @@ func fakeWPA(scanFile string, args []string) int {
 		}
 	}
 	if !load() {
+		fmt.Printf("Failed to read or parse configuration '%s'.\n", conf)
 		return 255
 	}
 	try()

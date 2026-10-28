@@ -52,7 +52,6 @@ var preferGroups = map[string][]string{
 	"phone": {kindRNDIS, kindNCM, kindIPhone},
 }
 
-// checkPreferred accepts "" (none) and the names of preferGroups.
 func checkPreferred(v string) error {
 	if _, ok := preferGroups[v]; v != "" && !ok {
 		return fmt.Errorf("preferred: %q is none of wifi, usb, phone", v)

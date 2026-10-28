@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -39,10 +40,34 @@ type supplicant struct {
 	conn      *net.UnixConn
 }
 
-// supplicantRun is one started supplicant: err is set before exited closes.
+// supplicantRun is one started supplicant: err is set before exited closes,
+// out holds the end of what it printed.
 type supplicantRun struct {
 	exited chan struct{}
 	err    error
+	out    tail
+}
+
+// tail keeps the last 4 KiB written to it.
+type tail struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > 4096 {
+		t.b = t.b[len(t.b)-4096:]
+	}
+	return len(p), nil
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.b)
 }
 
 func (s *supplicant) isRunning() bool {
@@ -63,7 +88,6 @@ func (s *supplicant) running() bool {
 	}
 }
 
-// upFor is how long the supplicant has been running (0: not running).
 func (s *supplicant) upFor() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,7 +98,10 @@ func (s *supplicant) upFor() time.Duration {
 }
 
 // ensure starts the supplicant unless it runs. One that ended by itself is
-// reported as an error once; the next ensure starts it again.
+// reported as an error once; the next ensure starts it again. One that
+// could not read wpa.conf (a file it wrote that it can't read back) has the
+// file moved aside to wpa.conf.bad, so the next start has no saved networks
+// rather than failing again.
 func (s *supplicant) ensure(proc string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -84,6 +111,12 @@ func (s *supplicant) ensure(proc string) error {
 	s.closeConn()
 	if s.cmd != nil {
 		s.cmd = nil
+		if strings.Contains(s.run.out.String(), "Failed to read or parse configuration") {
+			if err := os.Rename(s.conf, s.conf+".bad"); err == nil {
+				logf("wifi: wpa_supplicant could not read %s; moved to %s.bad", s.conf, s.conf)
+				return fmt.Errorf("the saved networks could not be read and were set aside (%s.bad)", filepath.Base(s.conf))
+			}
+		}
 		return fmt.Errorf("wpa_supplicant ended (%v)", s.run.err)
 	}
 	killOwnSupplicants(proc, s.conf)
@@ -107,12 +140,13 @@ func (s *supplicant) ensure(proc string) error {
 	}
 	os.RemoveAll(s.ctrl) // a killed run's socket would block the start
 	cmd := exec.Command(s.bin, "-i", s.iface, "-D", "nl80211", "-c", s.conf)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
+	run := &supplicantRun{exited: make(chan struct{})}
+	cmd.Stdout = io.MultiWriter(os.Stdout, &run.out)
+	cmd.Stderr = cmd.Stdout
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start wpa_supplicant: %v", err)
 	}
-	run := &supplicantRun{exited: make(chan struct{})}
 	s.cmd, s.run, s.startedAt = cmd, run, time.Now()
 	go func() {
 		run.err = cmd.Wait()

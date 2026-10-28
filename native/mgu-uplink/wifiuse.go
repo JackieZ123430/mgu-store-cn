@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -41,7 +43,6 @@ func iftypeName(t uint32) string {
 	return fmt.Sprintf("type %d", t)
 }
 
-// nl80211Iftype reads the interface's type with NL80211_CMD_GET_INTERFACE.
 func nl80211Iftype(iface string) (uint32, error) {
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
@@ -76,12 +77,16 @@ func nl80211Iftype(iface string) (uint32, error) {
 }
 
 // dbusSupplicantHas asks the D-Bus wpa_supplicant (fi.w1.wpa_supplicant1)
-// whether it has iface, with the unit's dbus-send.
+// whether it has iface, with the unit's dbus-send, killed after 3 s.
 func dbusSupplicantHas(iface string) (bool, error) {
-	out, err := exec.Command("dbus-send", "--system", "--print-reply", "--reply-timeout=2000",
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "dbus-send", "--system", "--print-reply", "--reply-timeout=2000",
 		"--dest=fi.w1.wpa_supplicant1", "/fi/w1/wpa_supplicant1",
 		"fi.w1.wpa_supplicant1.GetInterface", "string:"+iface).CombinedOutput()
 	switch {
+	case ctx.Err() != nil:
+		return false, errors.New("dbus-send: no answer")
 	case err == nil:
 		return true, nil
 	case bytes.Contains(out, []byte("fi.w1.wpa_supplicant1.InterfaceUnknown")):
@@ -133,7 +138,7 @@ func stockUsers(proc, iface, conf, connConf string) stockUse {
 			case dbus:
 				u.dbus = true
 			}
-		case base == "connmand":
+		case base == "connmand" || strings.HasPrefix(base, "connmand_"): // connmand_nxp on the 88W9098 units
 			if connmanManages(args[1:], iface, connConf) {
 				return stockUse{why: fmt.Sprintf("connman manages %s", iface)}
 			}

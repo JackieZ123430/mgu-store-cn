@@ -402,7 +402,7 @@ func cleanup(c config) {
 	deleteVethPair()
 	restoreLinkState(c.linkFile())
 	killOwnSupplicants("/proc", c.wpaConf())
-	restoreWiFi(c.wifiFile())
+	restoreWiFi(c.wifiFile(), false)
 	os.RemoveAll(c.wpaCtrl())
 	os.Remove(c.wpaLocal())
 	os.Remove(c.statusFile())

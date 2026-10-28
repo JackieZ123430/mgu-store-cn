@@ -443,7 +443,6 @@ function loginView(m) {
     };
 }
 
-// a token keeps its last 4 characters in view, a password ('password') none
 const masked = (t, kind) => (kind === 'password' ? '·'.repeat(Math.min(24, t.length))
     : t.length <= 4 ? t : '·'.repeat(Math.min(24, t.length - 4)) + t.slice(-4));
 

@@ -93,10 +93,11 @@ func (s *service) request(r ctlRequest) error {
 		switch {
 		case r.Kind == nil:
 			return errors.New("prefer needs a kind")
-		case checkPreferred(*r.Kind) != nil:
-			return checkPreferred(*r.Kind)
 		case !ok:
 			return errors.New("a preferred uplink needs uplink = auto")
+		}
+		if err := checkPreferred(*r.Kind); err != nil {
+			return err
 		}
 		s.ctlMu.Lock()
 		defer s.ctlMu.Unlock()
