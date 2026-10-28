@@ -2979,29 +2979,54 @@ function testCrashList() {
         r.status === 0 && unchanged() && crashState(r).state === 'pending' && /read-write/.test(crashState(r).reason), r.out);
     write(bare.p('proc/mounts'), 'rootfs / ext4 ro,relatime 0 0\n');
     // app-privacy's boot run, which remounts / itself, has not finished
+    const units = `${bare.R}.units`;
     write(bare.p('etc/systemd/system/app-privacy.service'), '[Service]\nType=oneshot\n');
     fs.symlinkSync('../app-privacy.service', bare.p('etc/systemd/system/multi-user.target.wants/app-privacy.service'));
-    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'activating\n');
+    write(path.join(units, 'system'), 'starting\n');
+    write(path.join(units, 'app-privacy.service.active'), 'inactive\n');
     r = bare.run(['status', '--json']);
-    check('crash list: status waits while app-privacy\'s boot run is activating',
-        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /app-privacy\.service is activating/.test(crashState(r).reason), r.out);
-    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'inactive\n');
-    r = bare.run(['status', '--json']);
-    check('crash list: ... and before it has run', r.status === 0 && unchanged() && crashState(r).state === 'pending', r.out);
-    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'active\n');
+    check('crash list: status waits while the boot has app-privacy\'s run still ahead',
+        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /app-privacy\.service is inactive/.test(crashState(r).reason), r.out);
+    // both at once: app-privacy's boot run starts, remounts / read-write, writes and puts / back,
+    // while the updater's status runs again and again; status writes nothing until it is done
+    const privacyRun = cp.spawn('sh', ['-c',
+        'echo activating > "$1/app-privacy.service.active"; sleep 0.3; ' +
+        'echo "rootfs / ext4 rw,relatime 0 0" > "$2"; sleep 0.6; echo "rootfs / ext4 ro,relatime 0 0" > "$2"; sleep 0.3; ' +
+        'echo active > "$1/app-privacy.service.active"; echo running > "$1/system"', 'sh', units, bare.p('proc/mounts')],
+    { stdio: 'ignore' });
+    const during = [];
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1000) {
+        during.push(crashState(bare.run(['status', '--json'])));
+        if (!unchanged()) break;
+    }
+    cp.spawnSync('sh', ['-c', 'sleep 0.6']);
+    privacyRun.kill();
+    check('crash list: while app-privacy\'s boot run is at work, every status waits and writes nothing',
+        during.length >= 2 && during.every((c) => c && c.state === 'pending') && unchanged(), JSON.stringify(during));
+    // a fresh app-privacy install enables the unit without starting it: after the boot that is not a run ahead
+    write(path.join(units, 'app-privacy.service.active'), 'inactive\n');
     const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
     r = bare.run(['status', '--json']);
-    check('crash list: once it has, status adds the built-in names (in the file\'s line ending), snapshotted, one line, reported',
+    check('crash list: once the boot is done, status adds the built-in names (in the file\'s line ending), snapshotted, one line, reported',
         r.status === 0 && crashState(r) && crashState(r).state === 'changed' &&
         crashState(r).reason === 'added mgu-uplink; / remounted read-write for it and back to read-only' &&
         fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\nmgu-uplink\r\n' &&
         fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 &&
-        r.stderr.split('\n').filter((l) => l.startsWith('crash handler whitelist:')).length === 1 &&
+        r.stderr === 'crash handler whitelist: added mgu-uplink; / remounted read-write for it and back to read-only\n' &&
         !fs.existsSync(bare.p('var/opt/mgu-deploy/lock')), r.out);
     r = bare.run(['status', '--json']);
     check('crash list: status again changes nothing and says ok',
         r.status === 0 && fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 && !r.stderr &&
         crashState(r).state === 'ok', r.out);
+    // a name this tool added that has left the list and that nothing wants: only the record changes, no remount
+    const ownedFile = bare.p('var/opt/mgu-deploy/crash-names.json');
+    write(ownedFile, JSON.stringify({ names: ['gone', 'mgu-uplink'] }) + '\n');
+    const listBefore = fs.readFileSync(bareList, 'utf8');
+    r = bare.run(['status', '--json']);
+    check('crash list: status drops a gone name from its record without touching the list',
+        r.status === 0 && crashState(r).state === 'ok' && JSON.stringify(readJson(ownedFile).names) === '["mgu-uplink"]' &&
+        fs.readFileSync(bareList, 'utf8') === listBefore && !r.stderr, r.out);
     r = bare.run(['status']);
     check('crash list: plain status prints the step\'s result', r.status === 0 && r.stdout.includes('crash handler whitelist: ok (up to date)'), r.out);
     write(bareList, '[ForceRestartList]\ndbus-daemon\n');

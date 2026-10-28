@@ -387,7 +387,7 @@ function groupExists(name) {
 }
 function systemctl(args, opts) { return run(CFG.systemctl, args, opts || { allowFail: true }); }
 function unitState(unit, verb) {
-    var r = systemctl([verb, unit]);
+    var r = systemctl(unit ? [verb, unit] : [verb]);
     return (r.stdout || '').trim() || 'unknown';
 }
 /* Full command lines: busybox's "ps w" cuts them at 131 columns, before
@@ -665,15 +665,20 @@ function crashListDone(plan, remounted) {
 }
 /* What keeps the status sync from remounting /: another writer may be
  * at work on it. app-privacy's boot run remounts / itself, without this
- * tool's lock, and does not remount it again once its unit is active
- * (RemainAfterExit) or failed. Null when / is free to remount. */
+ * tool's lock: it is ahead while the unit is activating, or inactive
+ * while the boot is still starting units; once it is active
+ * (RemainAfterExit) or failed, or the boot is done, it does not remount /
+ * again. Null when / is free to remount. */
 function rootBusy() {
     var mode = rootMountMode();
     if (mode !== 'ro') return '/ is ' + (mode === 'unknown' ? 'in an unknown mount state' : 'read-write') + ': another writer may be at work';
     var privacy = 'app-privacy.service';
     if (lstatOrNull(path.join(CFG.systemd, 'multi-user.target.wants', privacy))) {
         var st = unitState(privacy, 'is-active');
-        if (st !== 'active' && st !== 'failed') return privacy + ' is ' + st + ': its boot run may remount /';
+        if (st === 'activating' || st === 'deactivating' ||
+            st === 'inactive' && ['initializing', 'starting'].indexOf(unitState('', 'is-system-running')) >= 0) {
+            return privacy + ' is ' + st + ' while the unit starts: its boot run may remount /';
+        }
     }
     return null;
 }
@@ -683,18 +688,19 @@ function rootBusy() {
  * firmware update that put the stock list back is undone. It remounts /
  * only for a change, only while / is read-only and no other writer can be
  * at work (rootBusy), under this tool's lock, with a snapshot first; the
- * window puts / back read-only on any exit. What it says goes to stderr.
- * Returns { state: ok | changed | pending | error, reason }: pending is
+ * window puts / back read-only on any exit. It says one line on stderr
+ * for a change. Returns { state: ok | changed | pending | error, reason }: pending is
  * tried again at the next status. */
 function syncCrashList() {
     var out = process.stdout.write, locked = false, mine = LOCK_FILE + '.' + process.pid;
-    process.stdout.write = process.stderr.write.bind(process.stderr);
+    function ownedChanges(p) { return JSON.stringify(p.owned) !== JSON.stringify(crashOwned().slice().sort()); }
+    process.stdout.write = function () { return true; };
     try {
         if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };
         var plan = crashListPlan(installedTools());
         if (!plan) return { state: 'ok', reason: 'no crash handler list on this unit' };
-        if (!plan.op) return { state: 'ok', reason: 'up to date' };
-        var busy = rootBusy();
+        if (!plan.op && !ownedChanges(plan)) return { state: 'ok', reason: 'up to date' };
+        var busy = plan.op && rootBusy();
         if (busy) return { state: 'pending', reason: busy };
         var held = lockState();
         if (!held.free && !held.live) breakStaleLock();
@@ -703,12 +709,18 @@ function syncCrashList() {
         rmrf(mine);
         if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
         plan = crashListPlan(installedTools());
-        if (!plan || !plan.op) return { state: 'ok', reason: 'up to date' };
+        if (!plan || !plan.op && !ownedChanges(plan)) return { state: 'ok', reason: 'up to date' };
+        if (!plan.op) {
+            crashListDone(plan, false);
+            return { state: 'ok', reason: 'the record of names this tool added is up to date' };
+        }
         busy = rootBusy();
         if (busy) return { state: 'pending', reason: busy };
         takeSnapshot('crash-list', [CFG.crashList, CRASH_OWNED]);
+        var remounts = rootMountMode() === 'ro';
         rootfsWindow([plan.op]);
-        var line = crashListDone(plan, true);
+        var line = crashListDone(plan, remounts);
+        process.stderr.write('crash handler whitelist: ' + line + '\n');
         pruneBackups();
         return { state: 'changed', reason: line };
     } catch (e) {
@@ -1752,10 +1764,10 @@ function installTool(a, state, tx) {
     i7.units.forEach(function (u) { ops.push({ type: 'delete', path: path.join(CFG.systemd, u) }); unitChanged = true; });
     var rec = recmgrOp(recmgrWith(recmgrText(), c.recmgr || [], []));
     if (rec) { ops.push(rec); unitChanged = true; }
-    var crash = crashListPlan(installedTools()), wasRw = rootMountMode() === 'rw';
+    var crash = crashListPlan(installedTools()), remounts = rootMountMode() === 'ro';
     if (crash && crash.op) ops.push(crash.op);
     if (ops.length) rootfsWindow(ops);
-    crashListDone(crash, !wasRw && !FAKE);
+    crashListDone(crash, remounts);
     if (unitChanged) runOk(CFG.systemctl, ['daemon-reload']);
     if (i7.paths.length) {
         i7.files.forEach(function (f) { rmrf(path.join(I7_DIR, f)); });
@@ -2690,10 +2702,10 @@ function uninstallTool(id, state) {
     var rec = recmgrOp(recmgrWith(recmgrText(), [], removeRec));
     if (rec) ops.push(rec);
     var unitOps = ops.length;
-    var crash = crashListPlan(installedTools().filter(function (t) { return t.id !== id; })), wasRw = rootMountMode() === 'rw';
+    var crash = crashListPlan(installedTools().filter(function (t) { return t.id !== id; })), remounts = rootMountMode() === 'ro';
     if (crash && crash.op) ops.push(crash.op);
     if (ops.length) rootfsWindow(ops);
-    crashListDone(crash, !wasRw && !FAKE);
+    crashListDone(crash, remounts);
     if (unitOps) runOk(CFG.systemctl, ['daemon-reload']);
     pruneCreatedDirs(state);
     var own = fs.readdirSync(root).filter(function (n) { return ['versions', 'current', 'current.new'].indexOf(n) < 0; });
