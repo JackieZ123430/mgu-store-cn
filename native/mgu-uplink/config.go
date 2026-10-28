@@ -31,7 +31,8 @@ type config struct {
 	Settings  string   // read on top of LocalConf when it exists: what requests set (ctl.go); survives updates
 	StateDir  string   // uids.d/ and apps.d/; survives updates
 	Ignored   []string // settings that pick a device kind or adapter: the uplink takes whatever is plugged in
-	Preferred string   // the kind tried first ("": the order of autoKinds)
+	Preferred string   // the group tried first (preferGroups; "": the order of autoKinds)
+	Skipped   []string // settings left out, logged at the start: a preferred value that is no group, settings_conf lines this version does not take
 	WiFi      bool     // the Wi-Fi provider is switched on
 	WiFiIf    string   // the Wi-Fi interface
 }
@@ -55,22 +56,26 @@ var appNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 // versions do not read, so a rollback never meets a key it lacks.
 func loadConfig(path string) (config, error) {
 	c := defaults()
-	if err := c.read(path, true); err != nil {
+	if err := c.read(path, true, false); err != nil {
 		return c, err
 	}
-	for _, p := range []string{c.LocalConf, c.Settings} {
-		if p == "" {
-			continue
+	if c.LocalConf != "" {
+		if err := c.read(c.LocalConf, false, false); err != nil && !os.IsNotExist(err) {
+			return c, err
 		}
-		if err := c.read(p, false); err != nil && !os.IsNotExist(err) {
+	}
+	if c.Settings != "" {
+		if err := c.read(c.Settings, false, true); err != nil && !os.IsNotExist(err) {
 			return c, err
 		}
 	}
 	return c, c.validate()
 }
 
-// read applies a file of "key = value" lines; '#' starts a comment.
-func (c *config) read(path string, top bool) error {
+// read applies a file of "key = value" lines; '#' starts a comment. lenient
+// (settings_conf, which newer versions may write): a line it can't apply is
+// skipped and noted in Skipped, so a rollback still starts.
+func (c *config) read(path string, top, lenient bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -88,9 +93,17 @@ func (c *config) read(path string, top bool) error {
 		}
 		kv := strings.SplitN(line, "=", 2)
 		if len(kv) != 2 {
+			if lenient {
+				c.Skipped = append(c.Skipped, fmt.Sprintf("%s:%d: expected key = value", path, n))
+				continue
+			}
 			return fmt.Errorf("%s:%d: expected key = value", path, n)
 		}
 		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		if lenient && key != "preferred" && key != "wifi" {
+			c.Skipped = append(c.Skipped, fmt.Sprintf("%s:%d: unknown key %q", path, n, key))
+			continue
+		}
 		if key == "local_conf" && top {
 			c.LocalConf = val
 			continue
@@ -110,6 +123,10 @@ func (c *config) read(path string, top bool) error {
 			continue
 		}
 		if err := c.set(key, val); err != nil {
+			if lenient {
+				c.Skipped = append(c.Skipped, fmt.Sprintf("%s:%d: %v", path, n, err))
+				continue
+			}
 			return fmt.Errorf("%s:%d: %v", path, n, err)
 		}
 	}
@@ -174,8 +191,9 @@ func (c *config) set(key, val string) error {
 	case "usb_device":
 		c.Ignored = append(c.Ignored, key+" = "+val)
 	case "preferred":
-		if val != "" && kindRank(val) == len(autoKinds) {
-			return fmt.Errorf("preferred: %q is none of %s", val, strings.Join(autoKinds, ", "))
+		if err := checkPreferred(val); err != nil {
+			c.Skipped = append(c.Skipped, err.Error())
+			break
 		}
 		c.Preferred = val
 	case "wifi":

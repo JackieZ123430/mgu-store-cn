@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -349,10 +350,10 @@ func (s *service) guarded() []string {
 	if n, ok := s.up.(*netdevUplink); ok {
 		out[0] = n.name
 	}
-	if s.link != nil && !contains(out, s.link.Ifname()) {
+	if s.link != nil && !slices.Contains(out, s.link.Ifname()) {
 		out = append(out, s.link.Ifname())
 	}
-	if s.wifi != nil && s.wifi.guarding() && !contains(out, s.wifi.iface) {
+	if s.wifi != nil && s.wifi.guarding() && !slices.Contains(out, s.wifi.iface) {
 		out = append(out, s.wifi.iface)
 	}
 	return out
@@ -401,7 +402,7 @@ func cleanup(c config) {
 	deleteVethPair()
 	restoreLinkState(c.linkFile())
 	killOwnSupplicants("/proc", c.wpaConf())
-	restoreWiFi(c.wifiFile())
+	restoreWiFi(c.wifiFile(), false)
 	os.RemoveAll(c.wpaCtrl())
 	os.Remove(c.wpaLocal())
 	os.Remove(c.statusFile())

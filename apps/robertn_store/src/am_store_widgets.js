@@ -166,7 +166,6 @@ function appList(cv, t, b, o) {
             tx = b.x + 22 * q + s + 32 * q;
         }
         const boxes = rightBoxes(b, it, cv, q), room = (boxes.length ? boxes[boxes.length - 1].x : b.x + b.w) - tx - 8;
-        // a row without a second line has its title in the middle
         cv.text(W.fit(cv, String(it.title || ''), room, ts, 'bold'), tx, it.sub ? y + h * 0.47 : y + h / 2 + ts * 0.36, ts, t.text, { font: 'bold' });
         if (it.sub) cv.text(W.fit(cv, String(it.sub), room, ss), tx, y + h * 0.83, ss, C(t, it.subColor, t.dim));
         const cy = y + h / 2;

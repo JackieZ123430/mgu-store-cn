@@ -24,7 +24,7 @@
  * "wifi-connect" (with the password typed for a secured network not saved
  * yet), "wifi-forget" (once confirmed) and "uplink-prefer" (the preferred
  * connection). On the drawn screens, Settings has Wi-Fi while the uplink
- * reports it (state.uplink.wifi): the networks, Turn on / off, Scan and the
+ * reports it (state.uplink.wifi): the networks, Use Wi-Fi, Scan and the
  * preferred connection; the widget screens have none of it.
  *
  * The start screen has the status line, Check for updates, the progress of
@@ -97,7 +97,6 @@ const TOKEN_ADD_MS = 30000;             // how long Add token says "Checking tok
 const FOCUS_BACK_MS = 2000;             // how long a page waits for the HMI to give the focus back from the speller
 const PROBE_MS = 30000;                 // how long a repo being added waits for the updater's answer
 const IF_FRONTCCU = 'de.bmw.infotainment.controlelements.FrontCCU';
-/* The updater relays these to mgu-uplink (Wi-Fi, the preferred connection). */
 const UPLINK_OPS = ['uplink-prefer', 'wifi-enable', 'wifi-scan', 'wifi-connect', 'wifi-forget'];
 
 /* The drawn screens' host states and their proxies (tools/gen_rhmi.js). */
@@ -633,7 +632,6 @@ class Store extends OnlineApp {
             } else if (act.page.name === 'confirm' && act.page.kind === 'remove') {
                 this._removeId = act.page.id;
             } else if (act.page.name === 'wifi') {
-                // the networks in range now
                 const w = wifiOf({ connected: this._connected, st: this._st });
                 this._uplinkNote = null;
                 if (w && w.enabled && !w.scanning) {
@@ -696,7 +694,7 @@ class Store extends OnlineApp {
     _wifiPassword(ssid) {
         this._uplinkNote = null;
         this._spell(ssid, (m) => { this._uplinkNote = sourcesMessage(m); this._render(); },
-            { label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63 }).then((psk) => {
+            { label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63, secret: 'password' }).then((psk) => {
             if (!psk) {
                 return;
             }

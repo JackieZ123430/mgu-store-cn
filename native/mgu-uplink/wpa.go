@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -23,10 +24,7 @@ import (
 	"time"
 )
 
-const (
-	restartSupplicant = 5 * time.Second // after it exited by itself
-	maxNetworks       = 20              // rows of the scan list
-)
+const maxNetworks = 20 // rows of the scan list
 
 type supplicant struct {
 	bin   string // the program
@@ -35,11 +33,64 @@ type supplicant struct {
 	ctrl  string // its control socket folder (ctrl_interface)
 	local string // our end of the control socket
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	exited  chan struct{}
-	crashAt time.Time
-	conn    *net.UnixConn
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	run       *supplicantRun
+	startedAt time.Time
+	conn      *net.UnixConn
+	setAside  bool // wpa.conf was moved to wpa.conf.bad (takeSetAside)
+}
+
+// What wpa_supplicant 2.10 prints when it can't read wpa.conf at the start.
+const confUnreadable = "Failed to read or parse configuration"
+
+// setAsideConf moves wpa.conf to wpa.conf.bad, with s.mu held.
+func (s *supplicant) setAsideConf() bool {
+	if err := os.Rename(s.conf, s.conf+".bad"); err != nil {
+		return false
+	}
+	logf("wifi: wpa_supplicant could not read %s; moved to %s.bad", s.conf, s.conf)
+	s.setAside = true
+	return true
+}
+
+// takeSetAside reports, once, that wpa.conf was set aside.
+func (s *supplicant) takeSetAside() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.setAside
+	s.setAside = false
+	return t
+}
+
+// supplicantRun is one started supplicant: err is set before exited closes,
+// out holds the end of what it printed.
+type supplicantRun struct {
+	exited chan struct{}
+	err    error
+	out    tail
+}
+
+// tail keeps the last 4 KiB written to it.
+type tail struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > 4096 {
+		t.b = t.b[len(t.b)-4096:]
+	}
+	return len(p), nil
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.b)
 }
 
 func (s *supplicant) isRunning() bool {
@@ -53,29 +104,41 @@ func (s *supplicant) running() bool {
 		return false
 	}
 	select {
-	case <-s.exited:
+	case <-s.run.exited:
 		return false
 	default:
 		return true
 	}
 }
 
-// ensure starts the supplicant unless it runs; after it exited by itself,
-// at most every restartSupplicant.
+func (s *supplicant) upFor() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running() {
+		return 0
+	}
+	return time.Since(s.startedAt)
+}
+
+// ensure starts the supplicant unless it runs. One that ended by itself is
+// reported as an error once; the next ensure starts it again. One that
+// could not read wpa.conf (a file it wrote that it can't read back) has the
+// file moved aside to wpa.conf.bad, so the next start has no saved networks
+// rather than failing again.
 func (s *supplicant) ensure(proc string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running() {
 		return nil
 	}
+	s.closeConn()
 	if s.cmd != nil {
 		s.cmd = nil
-		s.crashAt = time.Now()
+		if strings.Contains(s.run.out.String(), confUnreadable) && s.setAsideConf() {
+			return fmt.Errorf("the saved networks could not be read and were set aside (%s.bad)", filepath.Base(s.conf))
+		}
+		return fmt.Errorf("wpa_supplicant ended (%v)", s.run.err)
 	}
-	if time.Since(s.crashAt) < restartSupplicant {
-		return fmt.Errorf("wpa_supplicant ended; starting it again")
-	}
-	s.closeConn()
 	killOwnSupplicants(proc, s.conf)
 	if _, err := os.Stat(s.bin); err != nil {
 		return fmt.Errorf("wpa_supplicant: %v", err)
@@ -97,17 +160,19 @@ func (s *supplicant) ensure(proc string) error {
 	}
 	os.RemoveAll(s.ctrl) // a killed run's socket would block the start
 	cmd := exec.Command(s.bin, "-i", s.iface, "-D", "nl80211", "-c", s.conf)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
+	run := &supplicantRun{exited: make(chan struct{})}
+	cmd.Stdout = io.MultiWriter(os.Stdout, &run.out)
+	cmd.Stderr = cmd.Stdout
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start wpa_supplicant: %v", err)
 	}
-	s.cmd, s.exited = cmd, make(chan struct{})
-	go func(c *exec.Cmd, done chan struct{}) {
-		err := c.Wait()
-		logf("wpa_supplicant on %s ended: %v", s.iface, err)
-		close(done)
-	}(cmd, s.exited)
+	s.cmd, s.run, s.startedAt = cmd, run, time.Now()
+	go func() {
+		run.err = cmd.Wait()
+		logf("wpa_supplicant on %s ended: %v", s.iface, run.err)
+		close(run.exited)
+	}()
 	logf("wpa_supplicant started on %s", s.iface)
 	return nil
 }
@@ -120,13 +185,13 @@ func (s *supplicant) stop() {
 	if s.running() {
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-s.exited:
+		case <-s.run.exited:
 		case <-time.After(3 * time.Second):
 			s.cmd.Process.Kill()
-			<-s.exited
+			<-s.run.exited
 		}
 	}
-	s.cmd, s.crashAt = nil, time.Time{}
+	s.cmd = nil
 }
 
 func (s *supplicant) closeConn() {
@@ -242,7 +307,10 @@ func (s *supplicant) networks() ([]wifiNetwork, []string) {
 
 // join adds the network (or updates a saved one's password), gives it the
 // highest priority and selects it, which keeps the others off until
-// joined or reloaded. Nothing is saved yet: joined saves, reload drops it.
+// joined or reloaded. With a password the supplicant disconnects first, so
+// that only an association with that password reaches COMPLETED: selecting
+// the network it is joined to would keep the old association. Nothing is
+// saved yet: joined saves, reload drops it.
 func (s *supplicant) join(ssid, psk string, open bool) error {
 	id, have := s.saved()[ssid]
 	if !have {
@@ -273,6 +341,7 @@ func (s *supplicant) join(ssid, psk string, open bool) error {
 			fmt.Sprintf("SET_NETWORK %d key_mgmt WPA-PSK WPA-PSK-SHA256 SAE", id),
 			fmt.Sprintf("SET_NETWORK %d ieee80211w 1", id),
 			fmt.Sprintf("SET_NETWORK %d psk \"%s\"", id, psk),
+			"DISCONNECT",
 		}
 	case !have:
 		cmds = []string{fmt.Sprintf("SET_NETWORK %d key_mgmt NONE", id)}
@@ -296,8 +365,17 @@ func (s *supplicant) joined() error {
 	return s.ok("SAVE_CONFIG")
 }
 
-// reload drops what join set up: the saved networks as saved.
-func (s *supplicant) reload() error { return s.ok("RECONFIGURE") }
+// reload drops what join set up: the saved networks as saved. When
+// RECONFIGURE fails (2.10: mostly a wpa.conf it can't read) the supplicant
+// is stopped, so that the next ensure starts it again from the file; a file
+// it really can't read is set aside there.
+func (s *supplicant) reload() error {
+	err := s.ok("RECONFIGURE")
+	if err != nil && s.isRunning() {
+		s.stop()
+	}
+	return err
+}
 
 func (s *supplicant) forget(ssid string) error {
 	id, ok := s.saved()[ssid]
@@ -375,7 +453,8 @@ func parseScan(r string) []wifiNetwork {
 	return out
 }
 
-// unescape undoes wpa_supplicant's printf escaping of names (\xNN, \\, \").
+// unescape undoes wpa_supplicant's printf_encode of names (\xNN, \\, \",
+// \e, \n, \r, \t) in STATUS, LIST_NETWORKS and SCAN_RESULTS.
 func unescape(s string) string {
 	if !strings.Contains(s, `\`) {
 		return s
@@ -396,8 +475,8 @@ func unescape(s string) string {
 				b.WriteByte(s[i+1])
 				i++
 				continue
-			case 'n':
-				b.WriteByte('\n')
+			case 'e', 'n', 'r', 't':
+				b.WriteByte(map[byte]byte{'e': 033, 'n': '\n', 'r': '\r', 't': '\t'}[s[i+1]])
 				i++
 				continue
 			}

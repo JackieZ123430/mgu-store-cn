@@ -5,7 +5,7 @@ package main
 // only to the updater, which relays its requests here; status.json shows
 // the results.
 //
-//	{"op": "prefer", "kind": "wifi"}                   the kind tried first ("": none), kept in settings_conf
+//	{"op": "prefer", "kind": "phone"}                  the group tried first: wifi, usb, phone ("": none), kept in settings_conf
 //	{"op": "wifi-enable", "on": true}                  Wi-Fi on or off, kept in settings_conf
 //	{"op": "wifi-scan"}                                scan; status.json's wifi.networks follow
 //	{"op": "wifi-connect", "ssid": "…", "psk": "…"}    join; saved once joined (psk "": a saved or an open network)
@@ -42,7 +42,6 @@ type ctlReply struct {
 	Error string `json:"error,omitempty"`
 }
 
-// listenCtl serves path until the listener is closed.
 func listenCtl(path string, handle func(ctlRequest) error) (net.Listener, error) {
 	os.Remove(path)
 	ln, err := net.Listen("unix", path)
@@ -86,7 +85,6 @@ func serveCtl(conn net.Conn, handle func(ctlRequest) error) {
 
 var errNoWiFi = errors.New("Wi-Fi needs uplink = auto")
 
-// request serves one request (from ctl.sock's goroutines).
 func (s *service) request(r ctlRequest) error {
 	w := s.wifi
 	switch r.Op {
@@ -95,10 +93,11 @@ func (s *service) request(r ctlRequest) error {
 		switch {
 		case r.Kind == nil:
 			return errors.New("prefer needs a kind")
-		case *r.Kind != "" && kindRank(*r.Kind) == len(autoKinds):
-			return fmt.Errorf("kind: %q is none of %v", *r.Kind, autoKinds)
 		case !ok:
-			return errors.New("a preferred kind needs uplink = auto")
+			return errors.New("a preferred uplink needs uplink = auto")
+		}
+		if err := checkPreferred(*r.Kind); err != nil {
+			return err
 		}
 		s.ctlMu.Lock()
 		defer s.ctlMu.Unlock()

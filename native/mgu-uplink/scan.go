@@ -4,21 +4,21 @@ package main
 // Wi-Fi is joined, every 2 s and opens the first usable device of the
 // kinds it covers, in this order:
 //
+//	wifi    the unit's own radio, joined to a saved network (wifi.go)
 //	usb     an adapter the kernel drives (netdev.go)
 //	usbecm  a CDC-ECM stick, a Huawei stick in CD-ROM mode switched first
-//	wifi    the unit's own radio, joined to a saved network (wifi.go)
 //	rndis   an Android phone in RNDIS tethering (most)
 //	ncm     an Android phone in NCM tethering (Pixel 6 and later)
 //	iphone  an iPhone's Personal Hotspot
 //
-// The preferred kind (config Preferred, the prefer request) goes first and
-// the others follow in that order. For the kernel-driven and CDC kinds it
-// takes only devices no driver or process holds; an iPhone it takes from
-// the media daemon itself (iphone.go), so it reaches and takes an iPhone
-// only when no device it ranks higher is present. Once on a later kind it
-// ends that link when an earlier kind's device appears, so a stick plugged
-// in next to a phone takes over, and a change of the preferred kind takes
-// effect within 5 s. An unplugged device ends its link and the next scan
+// The preferred group's kinds (config Preferred, the prefer request:
+// preferGroups) go first and the others follow, each in that order. For
+// the kernel-driven and CDC kinds it takes only devices no driver or
+// process holds; an iPhone it takes from the media daemon itself
+// (iphone.go), so it reaches and takes an iPhone only when no device it
+// ranks higher is present. Once on a later kind it ends that link when an
+// earlier kind's device appears, so a stick plugged in next to a phone
+// takes over, and a change of the preferred group takes effect within 5 s. An unplugged device ends its link and the next scan
 // finds whatever is there, so devices can be unplugged, replugged and
 // swapped while the service runs.
 
@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,7 +43,21 @@ const (
 	switchRepeat = 30 * time.Second
 )
 
-var autoKinds = []string{kindUSB, kindECM, kindWiFi, kindRNDIS, kindNCM, kindIPhone}
+var autoKinds = []string{kindWiFi, kindUSB, kindECM, kindRNDIS, kindNCM, kindIPhone}
+
+// preferGroups are the choices of preferred and the kinds each puts first.
+var preferGroups = map[string][]string{
+	"wifi":  {kindWiFi},
+	"usb":   {kindUSB, kindECM},
+	"phone": {kindRNDIS, kindNCM, kindIPhone},
+}
+
+func checkPreferred(v string) error {
+	if _, ok := preferGroups[v]; v != "" && !ok {
+		return fmt.Errorf("preferred: %q is none of wifi, usb, phone", v)
+	}
+	return nil
+}
 
 func kindRank(kind string) int {
 	for i, k := range autoKinds {
@@ -59,7 +74,7 @@ type scanUplink struct {
 	wifi    *wifiProvider // nil: no Wi-Fi
 
 	mu       sync.Mutex
-	prefer   string               // the kind tried first
+	prefer   string               // the group tried first (preferGroups)
 	failed   map[string]time.Time // device key -> last failed open
 	switched map[string]time.Time
 	logged   map[string]string // device key -> last message logged
@@ -73,20 +88,21 @@ func newScanUplink(c config) *scanUplink {
 
 func (u *scanUplink) String() string { return "auto" }
 
-func (u *scanUplink) setPreferred(kind string) {
+func (u *scanUplink) setPreferred(group string) {
 	u.mu.Lock()
-	u.prefer = kind
+	u.prefer = group
 	u.mu.Unlock()
 }
 
-// rank orders kinds: the preferred one first, then autoKinds' order.
+// rank orders kinds: the preferred group's first, then the others, each in
+// autoKinds' order.
 func (u *scanUplink) rank(kind string) int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if kind == u.prefer {
-		return 0
+	if slices.Contains(preferGroups[u.prefer], kind) {
+		return kindRank(kind)
 	}
-	return 1 + kindRank(kind)
+	return len(autoKinds) + kindRank(kind)
 }
 
 // candidate is one device the uplink could open.
@@ -220,7 +236,7 @@ func (u *scanUplink) Open(ctx context.Context) (Link, error) {
 				delete(u.failed, c.key)
 				delete(u.logged, c.key)
 				u.mu.Unlock()
-				// also on the best kind: the preferred kind can change
+				// also on the best kind: the preferred group can change
 				return u.watchPreferred(l, c), nil
 			}
 			if ctx.Err() != nil {
