@@ -121,7 +121,7 @@ const cases = [
     [rowAction(row({ pendingReboot: true, uninstallable: true }), null), 'remove'],
     [rowAction(row({ pendingReboot: true, error: 'x' }), null), 'install'],
     [groupState([row({ pendingReboot: true })], null), ''],
-    // the updater's nextStart (0.8.1): a queued first install can be removed (dropped), a queued removal not again
+    // the updater's nextStart (0.8.2): a queued first install can be removed (dropped), a queued removal not again
     [rowState(row({ status: 'available', installed: null, pendingReboot: true, nextStart: 'install' }), null), 'Restart pending'],
     [rowAction(row({ status: 'available', installed: null, pendingReboot: true, nextStart: 'install', uninstallable: true }), null), 'remove'],
     [removable(row({ status: 'available', installed: null, pendingReboot: true, nextStart: 'install', uninstallable: true }), null), true],

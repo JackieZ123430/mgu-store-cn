@@ -742,9 +742,12 @@ each request, and whenever it changes (at most every 250 ms):
   installed under, `blocked` why it cannot be installed (else null);
   `pendingReboot` true while the deploy tool reports that id pending a
   restart, also an iDrive 8 app install queued for the next start, or one
-  the last start put in place that MainApp does not list yet; `nextStart`
-  `install` or `remove` for such an iDrive 8 app change (else null; a
-  queued install can be removed, which drops it); `error` also why the
+  this start put in place that MainApp does not list yet (for 5 minutes;
+  after that it is a failed install, `put in place at the last start but
+  not registered`); `nextStart` `install` or `remove` for such an iDrive 8
+  app change (else null; a queued install can be removed, which drops
+  it). An id not installed is pending only on the row of the origin that
+  queued it, and only that row can remove it; `error` also why the
   last start failed to apply its change (the deploy tool's `last_apply`),
   with `applyFailed` `install` or `remove` (else null), until an install
   or removal of it is asked for or a newer start applies

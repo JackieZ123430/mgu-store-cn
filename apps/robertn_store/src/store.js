@@ -850,8 +850,9 @@ class Store extends OnlineApp {
         const row = this._component(id);
         if (row && rowAction(row, this._st.busy) === 'install') {
             logger.info(`install ${row.id} ${row.version}`);
-            this._asked.add(row.id);
-            this._send({ op: 'install', id: row.id });
+            if (this._send({ op: 'install', id: row.id })) {
+                this._asked.add(row.id);
+            }
         }
     }
 
@@ -860,8 +861,9 @@ class Store extends OnlineApp {
         const row = this._component(this._removeId);
         if (row && removable(row, this._st.busy)) {
             logger.info(`uninstall ${row.id}`);
-            this._asked.add(row.id);
-            this._privileged({ op: 'uninstall', id: row.id });
+            if (this._privileged({ op: 'uninstall', id: row.id })) {
+                this._asked.add(row.id);
+            }
         }
     }
 

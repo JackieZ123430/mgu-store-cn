@@ -44,6 +44,8 @@ const HANDOVER_EXIT = 75;
 const TRIAL_WAIT_MS = Number(process.env.MGU_UPDATER_TRIAL_WAIT_MS || 120000);
 // A restart the unit has not carried out by then is reported as failed.
 const REBOOT_WAIT_MS = Number(process.env.MGU_UPDATER_REBOOT_WAIT_MS || 180000);
+// how long after the start that put an app in place (iDrive 8) MainApp may take to list it
+const PLACED_GRACE_MS = 5 * 60 * 1000;
 // The uplink takes up a new fetch uid within its 5 s rescan of uids.d.
 const UPLINK_RESCAN_MS = Number(process.env.MGU_UPDATER_UPLINK_RESCAN_MS || 6000);
 
@@ -806,7 +808,8 @@ class Updater {
             this.webEnabled = readJson(path.join(conf.state_dir, 'web.json')).enabled === true;
         } catch (e) { /* off */ }
         try {
-            this.applySeen = readJson(path.join(conf.state_dir, 'apply-seen.json'));
+            const seen = readJson(path.join(conf.state_dir, 'apply-seen.json'));
+            this.applySeen = seen && typeof seen === 'object' && !Array.isArray(seen) ? seen : {};
         } catch (e) { /* none */ }
         if (conf.sources) {
             this.loadSources();
@@ -1130,16 +1133,42 @@ class Updater {
         return out;
     }
 
-    /* The last start's failed apply of id ({ op, why }), until an install or
-     * removal of id is asked for (or a newer start applies), else null. */
+    /* The last start's failed apply of id ({ op, why, unlisted }), until an
+     * install or removal of id is asked for (or a newer start applies), else
+     * null. An app it put in place that MainApp has not listed by the end of
+     * PLACED_GRACE_MS counts as a failed install (unlisted). */
     applyError(id) {
-        const f = this.lastApply.failed[id];
+        const unlisted = this.lastApply.installed.indexOf(id) >= 0 && !this.placed(id, 'app') && !this.installedOf(id);
+        const f = this.lastApply.failed[id] ||
+            (unlisted ? { op: 'install', why: 'put in place at the last start but not registered', unlisted } : null);
         return f && this.applySeen[id] !== this.lastApply.at ? f : null;
     }
 
-    /* An app the last start put in place (iDrive 8) that MainApp does not list yet. */
+    /* When this start of the head unit began (ms). */
+    bootAt() {
+        try {
+            return Date.now() - Number(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]) * 1000;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    /* An app this start put in place (iDrive 8) that MainApp does not list
+     * yet, within PLACED_GRACE_MS of it. */
     placed(id, kind) {
-        return kind === 'app' && this.lastApply.installed.indexOf(id) >= 0 && !this.installedOf(id, kind);
+        const at = Date.parse(this.lastApply.at || '');
+        return kind === 'app' && this.lastApply.installed.indexOf(id) >= 0 && at >= this.bootAt() &&
+            Date.now() - at < PLACED_GRACE_MS && !this.installedOf(id, kind);
+    }
+
+    /* The state goes out again when an app the last start put in place is
+     * listed by MainApp, or its time to be listed runs out. */
+    watchPlaced() {
+        const now = this.lastApply.installed.map((id) => `${id}:${!!this.installedOf(id, 'app')}:${this.placed(id, 'app')}`).join();
+        if (now !== this.placedSeen) {
+            this.placedSeen = now;
+            this.changed();
+        }
     }
 
     /* Puts aside the last start's failed apply of id, also across restarts. */
@@ -1189,7 +1218,10 @@ class Updater {
             const entry = resolved[i].entry;
             const unit = entry.installAs || entry.id;
             const failed = this.applyError(unit);
-            const placed = !row.installed && this.placed(unit, entry.kind);
+            // not installed: only the row of the origin that queued it (or put it in place) is pending
+            const rec = this.origins[unit];
+            const ours = !!row.installed || (rec ? rec.source === this.originOf(resolved[i].source) : row.id === unit);
+            const placed = ours && !row.installed && this.placed(unit, entry.kind);
             const o = this.origins[row.id];
             // a branch's new commit of the same version
             if (row.status === 'installed' && entry.revision && o && o.source === row.source && o.commit && o.commit !== entry.commit) {
@@ -1214,9 +1246,9 @@ class Updater {
                 // why it cannot be installed: another origin's component has its id
                 blocked: entry.blocked || null,
                 // also an install queued for the next start (iDrive 8), not installed until then
-                pendingReboot: placed || this.pending.indexOf(unit) >= 0,
+                pendingReboot: placed || (ours && this.pending.indexOf(unit) >= 0),
                 problem: row.installed && entry.kind === 'tool' ? toolProblem(this.conf, unit) : null,
-                nextStart: this.nextStart[unit] || (placed ? 'install' : null),
+                nextStart: (ours && this.nextStart[unit]) || (placed ? 'install' : null),
                 queued: this.queue.some((q) => q.id === row.id),
                 error: this.errors[row.id] || (failed && failed.why) || null,
                 // what the last start failed to apply, while its error shows
@@ -1783,22 +1815,28 @@ class Updater {
         if (!r) {
             return `${id} is not in any source`;
         }
-        if (!r.entry.uninstallable || id === SELF || id === this.conf.deploy_tool ||
+        const unit = r.entry.installAs || id;
+        // the row of the origin that installed (or queued) the id decides
+        const rec = this.origins[unit];
+        const owner = this.installedOf(unit, r.entry.kind) ? all.get(unit) || r :
+            rec ? Array.from(all.values()).find((o) => (o.entry.installAs || o.entry.id) === unit && this.originOf(o.source) === rec.source) || r : r;
+        if (owner !== r || !r.entry.uninstallable || id === SELF || id === this.conf.deploy_tool ||
             (selfComponent().requires || {})[id]) {
             return `${id} cannot be removed`;
         }
-        const unit = r.entry.installAs || id;
         // an install queued for the next start (iDrive 8) is dropped from the deploy tool's queue
         if (!this.installedVersion(unit, r.entry.kind) && !(id === APP_MANAGER && this.amPresent()) && this.nextStart[unit] !== 'install' &&
             !this.placed(unit, r.entry.kind)) {
             const failed = this.applyError(unit);
-            if (failed && !this.queue.some((q) => q.id === id) && !(this.busy && this.busy.id === id)) {
+            if (failed && !failed.unlisted && !this.queue.some((q) => q.id === id) && !(this.busy && this.busy.id === id)) {
                 console.log(`${unit}: the failed ${failed.op} at the start put aside`);
                 this.putAside(unit);
                 this.changed();
                 return null;
             }
-            return `${id} is not installed`;
+            if (!failed || !failed.unlisted) {
+                return `${id} is not installed`;
+            }
         }
         const needs = Array.from(all.values()).find((o) => o.entry.requires[id] && this.installedVersion(o.entry.id, o.entry.kind));
         if (needs) {
@@ -3113,6 +3151,7 @@ class Updater {
             setInterval(() => {
                 this.scanUsb();
                 this.scanTokens();
+                this.watchPlaced();
                 if (this.uidsPending) {
                     this.checkUids();
                 }
