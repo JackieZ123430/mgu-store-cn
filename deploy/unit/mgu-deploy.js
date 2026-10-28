@@ -646,50 +646,80 @@ function crashListPlan(tools) {
         add: add, remove: remove
     };
 }
-/* After the plan's op went through. */
-function crashListDone(plan) {
-    if (!plan) return;
+/* After the plan's op went through (remounted: / was remounted for it):
+ * the names this tool owns recorded, and one line for a change. */
+function crashListDone(plan, remounted) {
+    if (!plan) return null;
     if (JSON.stringify(plan.owned) !== JSON.stringify(crashOwned().slice().sort())) {
         mkdirp(DEPLOY_DIR);
         writeAtomic(CRASH_OWNED, JSON.stringify({ names: plan.owned }) + '\n', 0o644);
     }
-    if (plan.add.length) say('crash handler whitelist: added ' + plan.add.join(', '));
-    if (plan.remove.length) say('crash handler whitelist: removed ' + plan.remove.join(', '));
+    if (!plan.op) return null;
+    var parts = [];
+    if (plan.add.length) parts.push('added ' + plan.add.join(', '));
+    if (plan.remove.length) parts.push('removed ' + plan.remove.join(', '));
+    if (remounted) parts.push('/ remounted read-write for it and back to read-only');
+    var line = parts.join('; ');
+    say('crash handler whitelist: ' + line);
+    return line;
 }
-/* status, run as root while no other run holds the lock, brings the list
- * to what the installed tools want: a deploy tool update, which the
- * version before it installs, writes it at the updater's status check
- * after it, and a firmware update that put the stock list back is undone.
- * A change is snapshotted first; what it says goes to stderr. */
-function crashListSyncQuiet() {
-    if (!FAKE && process.getuid() !== 0) return;
-    var plan = crashListPlan(installedTools());
-    if (!plan || (!plan.op && JSON.stringify(plan.owned) === JSON.stringify(crashOwned().slice().sort()))) return;
-    var mine = LOCK_FILE + '.' + process.pid, out = process.stdout.write;
+/* What keeps the status sync from remounting /: another writer may be
+ * at work on it. app-privacy's boot run remounts / itself, without this
+ * tool's lock, and does not remount it again once its unit is active
+ * (RemainAfterExit) or failed. Null when / is free to remount. */
+function rootBusy() {
+    var mode = rootMountMode();
+    if (mode !== 'ro') return '/ is ' + (mode === 'unknown' ? 'in an unknown mount state' : 'read-write') + ': another writer may be at work';
+    var privacy = 'app-privacy.service';
+    if (lstatOrNull(path.join(CFG.systemd, 'multi-user.target.wants', privacy))) {
+        var st = unitState(privacy, 'is-active');
+        if (st !== 'active' && st !== 'failed') return privacy + ' is ' + st + ': its boot run may remount /';
+    }
+    return null;
+}
+/* status's step: brings the crash handler's list to what the installed
+ * tools want, so a deploy tool update (which the version before it
+ * installs) writes it at the updater's status check after it, and a
+ * firmware update that put the stock list back is undone. It remounts /
+ * only for a change, only while / is read-only and no other writer can be
+ * at work (rootBusy), under this tool's lock, with a snapshot first; the
+ * window puts / back read-only on any exit. What it says goes to stderr.
+ * Returns { state: ok | changed | pending | error, reason }: pending is
+ * tried again at the next status. */
+function syncCrashList() {
+    var out = process.stdout.write, locked = false, mine = LOCK_FILE + '.' + process.pid;
+    process.stdout.write = process.stderr.write.bind(process.stderr);
     try {
+        if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };
+        var plan = crashListPlan(installedTools());
+        if (!plan) return { state: 'ok', reason: 'no crash handler list on this unit' };
+        if (!plan.op) return { state: 'ok', reason: 'up to date' };
+        var busy = rootBusy();
+        if (busy) return { state: 'pending', reason: busy };
         var held = lockState();
         if (!held.free && !held.live) breakStaleLock();
         fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 });
-        fs.linkSync(mine, LOCK_FILE);
-    } catch (e) { rmrf(mine); return; }
-    rmrf(mine);
-    process.stdout.write = process.stderr.write.bind(process.stderr);
-    try {
+        try { fs.linkSync(mine, LOCK_FILE); locked = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+        rmrf(mine);
+        if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
         plan = crashListPlan(installedTools());
-        if (plan.op) {
-            takeSnapshot('crash-list', [CFG.crashList, CRASH_OWNED]);
-            rootfsWindow([plan.op]);
-        }
-        crashListDone(plan);
+        if (!plan || !plan.op) return { state: 'ok', reason: 'up to date' };
+        busy = rootBusy();
+        if (busy) return { state: 'pending', reason: busy };
+        takeSnapshot('crash-list', [CFG.crashList, CRASH_OWNED]);
+        rootfsWindow([plan.op]);
+        var line = crashListDone(plan, true);
         pruneBackups();
+        return { state: 'changed', reason: line };
     } catch (e) {
         process.stderr.write('mgu-deploy: crash handler whitelist not updated: ' + e.message + '\n');
+        return { state: 'error', reason: e.message };
     } finally {
+        rmrf(mine);
+        if (locked) releaseLock();
         process.stdout.write = out;
-        releaseLock();
     }
 }
-
 
 /* ---- backups ------------------------------------------------------------ */
 /* A snapshot covers every file an operation touches: unit files,
@@ -1722,10 +1752,10 @@ function installTool(a, state, tx) {
     i7.units.forEach(function (u) { ops.push({ type: 'delete', path: path.join(CFG.systemd, u) }); unitChanged = true; });
     var rec = recmgrOp(recmgrWith(recmgrText(), c.recmgr || [], []));
     if (rec) { ops.push(rec); unitChanged = true; }
-    var crash = crashListPlan(installedTools());
+    var crash = crashListPlan(installedTools()), wasRw = rootMountMode() === 'rw';
     if (crash && crash.op) ops.push(crash.op);
     if (ops.length) rootfsWindow(ops);
-    crashListDone(crash);
+    crashListDone(crash, !wasRw && !FAKE);
     if (unitChanged) runOk(CFG.systemctl, ['daemon-reload']);
     if (i7.paths.length) {
         i7.files.forEach(function (f) { rmrf(path.join(I7_DIR, f)); });
@@ -2660,10 +2690,10 @@ function uninstallTool(id, state) {
     var rec = recmgrOp(recmgrWith(recmgrText(), [], removeRec));
     if (rec) ops.push(rec);
     var unitOps = ops.length;
-    var crash = crashListPlan(installedTools().filter(function (t) { return t.id !== id; }));
+    var crash = crashListPlan(installedTools().filter(function (t) { return t.id !== id; })), wasRw = rootMountMode() === 'rw';
     if (crash && crash.op) ops.push(crash.op);
     if (ops.length) rootfsWindow(ops);
-    crashListDone(crash);
+    crashListDone(crash, !wasRw && !FAKE);
     if (unitOps) runOk(CFG.systemctl, ['daemon-reload']);
     pruneCreatedDirs(state);
     var own = fs.readdirSync(root).filter(function (n) { return ['versions', 'current', 'current.new'].indexOf(n) < 0; });
@@ -3924,9 +3954,11 @@ function collectStatus(state) {
         idrive7: { apps: i7Apps(state) },
         stock_backup: fs.existsSync(path.join(BACKUPS_DIR, 'stock')) };
 }
-function cmdStatus(args) {
+function cmdStatus(args, crashList) {
     var s = collectStatus(loadState());
+    s.crash_list = crashList;
     if (args.json) { say(JSON.stringify(s)); return 0; }
+    say('crash handler whitelist: ' + crashList.state + ' (' + crashList.reason + ')');
     say('mgu-deploy ' + VERSION);
     say('head unit: ' + (s.unit.hmi ? hmiName(s.unit.hmi) : 'unknown') + ' (' + unitInfo().basis + '), firmware ' +
         (s.unit.firmware || 'unknown'));
@@ -4717,7 +4749,7 @@ function runCommand() {
         if (args.command === 'help' || args.command === '--help') { say(HELP); return 0; }
         if (args.command === 'check') return cmdCheck(args);
         if (args.command === 'install') return cmdInstall(args);
-        if (args.command === 'status') { crashListSyncQuiet(); return cmdStatus(args); }
+        if (args.command === 'status') return cmdStatus(args, syncCrashList());
         if (args.command === 'uninstall') return cmdUninstall(args);
         if (args.command === 'rollback') return cmdRollback(args);
         if (args.command === 'restore') return cmdRestore(args);

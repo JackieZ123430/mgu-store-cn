@@ -2,7 +2,7 @@
 
 ## 0.6.0
 
-- A crash of one of our programs does not reboot the head unit: the crash handler's restart whitelist (`/etc/crashhandler-restartlist.conf`, `[Whitelist]`) gets the names of the installed tools' programs, from their `component.json` `crashNames`, or this tool's own list for a tool that has none (`mgu-uplink`, `mgu-render`, `python3`). Each tool install and uninstall updates it in the same snapshot, adding after the last entry and removing only names this tool added; other lines and sections stay as they are. `status`, run as root, brings the list up to date too, so it is written right after a deploy tool update and again after a firmware update. The crash handler reads the list at boot. A head unit without the file is left alone.
+- A crash of one of our programs does not reboot the head unit: the crash handler's restart whitelist (`/etc/crashhandler-restartlist.conf`, `[Whitelist]`) gets the names of the installed tools' programs, from their `component.json` `crashNames`, or this tool's own list for a tool that has none (`mgu-uplink`, `mgu-render`, `python3`). Each tool install and uninstall updates it in the same snapshot, adding after the last entry and removing only names this tool added; other lines and sections stay as they are. `status`, run as root, brings the list up to date too, so it is written right after a deploy tool update and again after a firmware update; it remounts `/` only for a change, never while `/` is read-write or app-privacy's boot run has not finished, and reports the result as `crash_list` in `status --json`. The crash handler reads the list at boot. A head unit without the file is left alone.
 
 ## 0.5.10
 

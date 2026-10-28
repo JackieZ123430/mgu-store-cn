@@ -1060,10 +1060,15 @@ Every tool install and uninstall puts the names of the installed tools into
 `[Whitelist]`, after its last entry, and takes out the ones it added that no
 installed tool still names; the change is in the install's snapshot. A name
 already in the list is left as it is and never removed. Other lines and
-sections stay byte for byte. `status`, run as root while no other run holds
-the lock, does the same (with a snapshot of its own when it changes the
-list), so a deploy tool update brings the names at the updater's check after
-it, and a firmware update that put back the stock list gets them again. The
+sections stay byte for byte. `status`, run as root, does the same: a deploy
+tool update brings the names at the updater's check after it, and a firmware
+update that put back the stock list gets them again. It remounts `/` only for
+a change, under this tool's lock and with a snapshot of its own, and puts it
+back read-only on any exit. It waits while `/` is read-write, while
+app-privacy's boot run (which remounts `/` itself) has not finished, or while
+another run holds the lock, and tries again at the next `status`. `status
+--json` reports it as `crash_list: {state, reason}`, `state` being `ok`,
+`changed`, `pending` or `error`; a change is also one line on stderr. The
 crash handler reads the list when it starts: a change counts from the next
 boot. A unit without the file is left alone.
 

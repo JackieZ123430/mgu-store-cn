@@ -2964,27 +2964,58 @@ function testCrashList() {
     check('crash list: a unit without the list gets none', r.status === 0 && !fs.existsSync(bareList) &&
         !fs.existsSync(bare.p('var/opt/mgu-deploy/crash-names.json')), r.out);
     write(bareList, '[Whitelist]\r\nnode\r\n');
+    const crashState = (res) => { try { return JSON.parse(res.stdout).crash_list; } catch (e) { return null; } };
+    const unchanged = () => fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\n';
     write(bare.p('var/opt/mgu-deploy/lock'), `1 ${fs.readFileSync(bare.p('proc/boot_id'), 'utf8').trim()}\n`);
     r = bare.run(['status', '--json']);
-    check('crash list: status leaves it while another run holds the lock',
-        r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\n', r.out);
+    check('crash list: status leaves it while another run holds the lock, and says so',
+        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /holds the lock/.test(crashState(r).reason), r.out);
     // a lock from an earlier boot is stale
     write(bare.p('var/opt/mgu-deploy/lock'), '1 boot-0\n');
+    // / read-write: another writer (app-privacy's boot run, someone's shell) may be at work
+    write(bare.p('proc/mounts'), 'rootfs / ext4 rw,relatime 0 0\n');
+    r = bare.run(['status', '--json']);
+    check('crash list: status does not touch it while / is read-write',
+        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /read-write/.test(crashState(r).reason), r.out);
+    write(bare.p('proc/mounts'), 'rootfs / ext4 ro,relatime 0 0\n');
+    // app-privacy's boot run, which remounts / itself, has not finished
+    write(bare.p('etc/systemd/system/app-privacy.service'), '[Service]\nType=oneshot\n');
+    fs.symlinkSync('../app-privacy.service', bare.p('etc/systemd/system/multi-user.target.wants/app-privacy.service'));
+    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'activating\n');
+    r = bare.run(['status', '--json']);
+    check('crash list: status waits while app-privacy\'s boot run is activating',
+        r.status === 0 && unchanged() && crashState(r).state === 'pending' && /app-privacy\.service is activating/.test(crashState(r).reason), r.out);
+    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'inactive\n');
+    r = bare.run(['status', '--json']);
+    check('crash list: ... and before it has run', r.status === 0 && unchanged() && crashState(r).state === 'pending', r.out);
+    write(path.join(`${bare.R}.units`, 'app-privacy.service.active'), 'active\n');
     const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
     r = bare.run(['status', '--json']);
-    let json = null;
-    try { json = JSON.parse(r.stdout); } catch (e) { /* checked below */ }
-    check('crash list: status adds the built-in names (in the file\'s line ending), snapshotted, stdout still JSON',
-        r.status === 0 && json && fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\nmgu-uplink\r\n' &&
+    check('crash list: once it has, status adds the built-in names (in the file\'s line ending), snapshotted, one line, reported',
+        r.status === 0 && crashState(r) && crashState(r).state === 'changed' &&
+        crashState(r).reason === 'added mgu-uplink; / remounted read-write for it and back to read-only' &&
+        fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\nmgu-uplink\r\n' &&
         fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 &&
-        r.stderr.includes('crash handler whitelist: added mgu-uplink') && !fs.existsSync(bare.p('var/opt/mgu-deploy/lock')), r.out);
+        r.stderr.split('\n').filter((l) => l.startsWith('crash handler whitelist:')).length === 1 &&
+        !fs.existsSync(bare.p('var/opt/mgu-deploy/lock')), r.out);
     r = bare.run(['status', '--json']);
-    check('crash list: status again changes nothing',
-        r.status === 0 && fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 && !r.stderr, r.out);
+    check('crash list: status again changes nothing and says ok',
+        r.status === 0 && fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 && !r.stderr &&
+        crashState(r).state === 'ok', r.out);
+    r = bare.run(['status']);
+    check('crash list: plain status prints the step\'s result', r.status === 0 && r.stdout.includes('crash handler whitelist: ok (up to date)'), r.out);
     write(bareList, '[ForceRestartList]\ndbus-daemon\n');
     r = bare.run(['status', '--json']);
     check('crash list: a list without [Whitelist] gets one at the end',
         r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[ForceRestartList]\ndbus-daemon\n\n[Whitelist]\nmgu-uplink\n', r.out);
+    // a list that cannot be read: status reports the error and still answers; an install fails before it changes anything
+    const unreadable = { MGU_DEPLOY_CRASHLIST: '/proc/self/mem' };
+    r = bare.run(['status', '--json'], unreadable);
+    check('crash list: an unreadable list is an error in status, which still answers',
+        r.status === 0 && crashState(r) && crashState(r).state === 'error', r.out);
+    r = bare.run(['install', '--artifact', namedTool('mgu-render', '0.4.0'), '--yes'], unreadable);
+    check('crash list: an install with an unreadable list fails at its snapshot, nothing installed',
+        r.status !== 0 && !fs.existsSync(bare.p('var/opt/mgu-render')), r.out);
 }
 
 function testInternet() {
