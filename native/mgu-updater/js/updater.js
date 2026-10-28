@@ -357,6 +357,33 @@ function pendingOf(st) {
     return ((st && st.pending_reboot) || []).map((p) => (p && p.id) || p);
 }
 
+/* iDrive 8's app changes queued for the next start, by id: 'install' or
+ * 'remove' (the deploy tool's pending_reboot reasons). */
+const NEXT_START = { 'installs at the next start': 'install', 'removed at the next start': 'remove' };
+function nextStartOf(st) {
+    const out = {};
+    ((st && st.pending_reboot) || []).forEach((p) => {
+        if (p && NEXT_START[p.reason]) {
+            out[p.id] = NEXT_START[p.reason];
+        }
+    });
+    return out;
+}
+
+/* The changes the last start applied that failed (the deploy tool's
+ * last_apply, iDrive 8): { at, failed: { <id>: why } }. */
+function lastApplyOf(st) {
+    const la = st && st.last_apply;
+    const failed = {};
+    ((la && Array.isArray(la.results)) ? la.results : []).forEach((r) => {
+        if (r && typeof r.id === 'string' && !r.ok) {
+            failed[r.id] = `${r.action === 'remove' ? 'the removal' : 'the install'} at the start of the head unit failed` +
+                `${r.error ? `: ${r.error}` : ''}`;
+        }
+    });
+    return { at: (la && la.at) || null, failed };
+}
+
 /* The head unit (deploy tool's status: { hmi: "ID7"|"ID8"|null, firmware }),
  * null when the deploy tool does not say. */
 function unitOf(st) {
@@ -719,6 +746,12 @@ class Updater {
         this.queue = [];
         this.errors = {};
         this.pending = [];
+        // iDrive 8: the app changes the deploy tool queued for the next start, by id ('install' or 'remove')
+        this.nextStart = {};
+        // the deploy tool's last start's apply (last_apply): { at, failed: { <id>: why } }; and, by id,
+        // the apply whose failure an install or removal asked for since put aside
+        this.lastApply = { at: null, failed: {} };
+        this.applySeen = {};
         this.unit = null;
         this.providers = {};
         // the deploy tool's word on IterioDev's App Manager (status --json appmanager)
@@ -1087,6 +1120,13 @@ class Updater {
         return out;
     }
 
+    /* Why the last start's apply of id failed, until an install or removal
+     * of id is asked for (or a newer start applies), else null. */
+    applyError(id) {
+        const why = this.lastApply.failed[id];
+        return why && this.applySeen[id] !== this.lastApply.at ? why : null;
+    }
+
     installedOf(id, kind, wantTitle) {
         if (kind === 'app') {
             return installedApp(this.conf, id, wantTitle);
@@ -1143,10 +1183,13 @@ class Updater {
                 installAs: entry.installAs || entry.id,
                 // why it cannot be installed: another origin's component has its id
                 blocked: entry.blocked || null,
-                pendingReboot: !!row.installed && this.pending.indexOf(entry.installAs || entry.id) >= 0,
+                // also an install queued for the next start (iDrive 8), not installed until then
+                pendingReboot: this.pending.indexOf(entry.installAs || entry.id) >= 0,
                 problem: row.installed && entry.kind === 'tool' ? toolProblem(this.conf, entry.installAs || entry.id) : null,
+                // iDrive 8: 'install' or 'remove' queued for the next start, else null
+                nextStart: this.nextStart[entry.installAs || entry.id] || null,
                 queued: this.queue.some((q) => q.id === row.id),
-                error: this.errors[row.id] || null
+                error: this.errors[row.id] || this.applyError(entry.installAs || entry.id) || null
             });
         });
         const sources = this.defs().map((d) => this.sourceState(d));
@@ -1620,6 +1663,7 @@ class Updater {
             return refused;
         }
         delete this.errors[item.id];
+        this.applySeen[item.unit || item.id] = this.lastApply.at;
         this.queue.push(item);
         return null;
     }
@@ -1695,8 +1739,9 @@ class Updater {
         return (this.providers[cap] || []).map((x) => x.id);
     }
 
-    /* Queues a removal of id: one its source marks uninstallable, installed,
-     * that nothing installed, nor the updater itself, requires. */
+    /* Queues a removal of id: one its source marks uninstallable, installed
+     * (or its install queued for the next start), that nothing installed,
+     * nor the updater itself, requires. */
     requestUninstall(id) {
         if (this.rebooting) {
             return 'the head unit is restarting';
@@ -1710,7 +1755,8 @@ class Updater {
             (selfComponent().requires || {})[id]) {
             return `${id} cannot be removed`;
         }
-        if (!this.installedVersion(id, r.entry.kind) && !(id === APP_MANAGER && this.amPresent())) {
+        // an install queued for the next start (iDrive 8) is dropped from the deploy tool's queue
+        if (!this.installedVersion(id, r.entry.kind) && !(id === APP_MANAGER && this.amPresent()) && this.nextStart[id] !== 'install') {
             return `${id} is not installed`;
         }
         const needs = Array.from(all.values()).find((o) => o.entry.requires[id] && this.installedVersion(o.entry.id, o.entry.kind));
@@ -2125,7 +2171,9 @@ class Updater {
     refresh() {
         return Promise.all([deployStatus(this.conf), privacyState(this.conf)]).then(([st, privacy]) => {
             this.pending = pendingOf(st);
+            this.nextStart = nextStartOf(st);
             if (st) {
+                this.lastApply = lastApplyOf(st);
                 this.unit = unitOf(st);
                 this.providers = providersOf(st);
                 this.appmanager = st.appmanager && typeof st.appmanager === 'object' ? st.appmanager : null;

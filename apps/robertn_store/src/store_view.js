@@ -37,6 +37,16 @@ function listed(row) {
     return row.compat !== 'no' || !!row.installed;
 }
 
+/* An app install queued for the next start (iDrive 8: MainApp takes it
+ * only then): the updater reports it pending (nextStart "install", an
+ * updater before 0.8.1 reports no nextStart: an app pending a restart that
+ * would update) while the car still lists the old version, or none. Not
+ * offered again. */
+function startPending(row) {
+    return row.nextStart !== undefined ? row.nextStart === 'install'
+        : !!row.pendingReboot && row.kind === 'app' && (row.status === 'update' || row.status === 'available');
+}
+
 /* Each source's short name, by id: an https URL's host, else the last part
  * of its owner/repo or folder path, or the whole label where another
  * source's last part is the same (two people's `apps`). */
@@ -75,6 +85,9 @@ function rowState(row, busy) {
     if (row.error) {
         return 'Failed, retry';
     }
+    if (startPending(row)) {
+        return 'Restart pending';
+    }
     switch (row.status) {
     case 'update': return `Update ${row.revision && row.version === row.installed ? row.revision : row.version}`;
     case 'available': return `Install ${row.version}`;
@@ -88,15 +101,18 @@ function rowAction(row, busy) {
     if ((busy && busy.id === row.id) || row.queued) {
         return null;
     }
-    if (!notForUnit(row) && !row.blocked && (row.status === 'update' || row.status === 'available' || row.error)) {
+    if (!notForUnit(row) && !row.blocked && (((row.status === 'update' || row.status === 'available') && !startPending(row)) || row.error)) {
         return 'install';
     }
-    return row.uninstallable === true && row.installed ? 'remove' : null;
+    return removable(row, busy) ? 'remove' : null;
 }
 
-/* Whether the component can be removed now (after a confirm step). */
+/* Whether the component can be removed now (after a confirm step): one
+ * installed, or whose install is queued for the next start (the removal
+ * drops it); not one whose removal is queued already. */
 function removable(row, busy) {
-    return row.uninstallable === true && !!row.installed && !row.queued && !(busy && busy.id === row.id);
+    return row.uninstallable === true && (!!row.installed || row.nextStart === 'install') && row.nextStart !== 'remove' &&
+        !row.queued && !(busy && busy.id === row.id);
 }
 
 /* The second column of the start screen's Apps and Head-unit tools rows,
@@ -110,7 +126,7 @@ function groupState(rows, busy) {
     if (rows.some((r) => r.error)) {
         return 'Failed';
     }
-    const updates = rows.filter((r) => r.status === 'update' && !notForUnit(r) && !r.blocked).length;
+    const updates = rows.filter((r) => r.status === 'update' && !notForUnit(r) && !r.blocked && !startPending(r)).length;
     return updates ? `${updates} update${updates > 1 ? 's' : ''}` : '';
 }
 
@@ -358,6 +374,6 @@ function sourcesMessage(m) {
     }
 }
 
-module.exports = { listed, sourceNames, withSources, removable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
+module.exports = { listed, startPending, sourceNames, withSources, removable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode,
     phoneState, phoneAddress };

@@ -830,6 +830,33 @@ function runWidgetsExtra() {
         return tick();
     }).then(() => {
         eq([states, sent], [[], [{ op: 'install', id: 'mgu-render' }]], 'a second renderer installs beside the first, no confirm step');
+        // it ends pending a restart: the Restart head unit step opens, once; one ending without opens nothing
+        const ends = (o) => {
+            const done = Object.assign({}, st, { components: [comp({}), id8only, id8installed, Object.assign({}, renderer, o), held] });
+            app._client.emit('state', Object.assign({}, st, { busy: { id: 'mgu-render', op: 'install', phase: 'install' } }));
+            app._client.emit('state', done);
+            app._client.emit('state', done);
+        };
+        reset();
+        ends({ installed: '0.1.0', status: 'installed', pendingReboot: true });
+        eq(states, ['open ST_OnlineApps_StoreRestart'], 'the restart step after an install pending a restart');
+        reset();
+        ends({ installed: '0.1.0', status: 'installed' });
+        eq(states, [], 'none after one that needs no restart');
+        // a queued first install (the updater's nextStart): its row asks to remove it, and Remove drops it
+        reset();
+        app._client.emit('state', Object.assign({}, st, { components: [comp({ installed: null, status: 'available', pendingReboot: true,
+            nextStart: 'install' }), id8only, id8installed, renderer, held] }));
+        return tick();
+    }).then(() => {
+        eq(last(/storeAppList\.0\.Text2ndCol/), 'storeAppList.0.Text2ndCol=Restart pending');
+        app._onRow('app', 0);
+        return tick();
+    }).then(() => {
+        eq([states, last(/storeRemoveName\.0\.Text=/)], [['open ST_OnlineApps_StoreRemove'], 'storeRemoveName.0.Text=DOOM']);
+        reset();
+        app._remove();
+        eq(sent.map(secretless), [{ op: 'uninstall', id: 'doom' }]);
         reset();
         app._client.emit('state', Object.assign({}, st, { signin: true }));
         return tick();
@@ -879,6 +906,16 @@ function runDrawn() {
             comp({ id: 'mgu-render', kind: 'tool', title: 'Renderer', version: '0.1.0', installed: null, status: 'available',
                 provides: 'renderer' }),
             comp({ id: 'mgu-renderd', kind: 'tool', title: 'GPU renderer', version: '1.1.0', installed: '1.1.0', provides: 'renderer' })] });
+    // an install of id running, then ending with its row changed by o
+    const ends = (id, o) => {
+        app._client.emit('state', Object.assign({}, st, { busy: { id, op: 'install', phase: 'install' } }));
+        const done = Object.assign({}, st, { components: st.components.map((c) => (c.id === id ? Object.assign({}, c, o) : c)) });
+        app._client.emit('state', done);
+        app._client.emit('state', done);
+    };
+    // the confirm step's line under its title
+    const confirmLine = () => require(path.join(SRC, 'store_ui.js'))
+        .view(Object.assign(app._drawnModel(), { stack: drawn.stack, tab: drawn.tab, filter: drawn.filter })).values.text.text;
     app._entryUuid = 'entry';
     reset();
     gpuLog.length = 0;
@@ -965,6 +1002,36 @@ function runDrawn() {
         return tick();
     }).then(() => {
         eq(sent, [{ op: 'install', id: 'mgu-render' }]);
+        // the install ends with the tool pending a restart: the Restart head unit step opens for it, once
+        reset();
+        ends('mgu-render', { installed: '0.1.0', status: 'installed', pendingReboot: true });
+        return tick();
+    }).then(() => {
+        eq([states, drawn.top()], [[`open ${host(3)}`], { name: 'confirm', kind: 'restart', id: 'mgu-render' }], 'opened once');
+        eq(drawn.items.map((i) => i.label), ['Cancel', 'Restart']);
+        eq(confirmLine(), 'Renderer 0.1.0 takes effect after a restart');
+        // Cancel goes back to the page
+        reset();
+        app._act(drawn.items[0].act);
+        return tick();
+    }).then(() => {
+        eq([states, drawn.top().name], [[`close ${host(3)}`], 'app'], 'Cancel goes back');
+        // an iDrive 8 app's update queued for the next start: open on the main page too
+        drawn.pop();
+        reset();
+        ends('doom', { pendingReboot: true });
+        return tick();
+    }).then(() => {
+        eq(drawn.top(), { name: 'confirm', kind: 'restart', id: 'doom' });
+        eq(confirmLine(), 'DOOM 1.0.1 installs at the next start');
+        drawn.pop();
+        // an install that needs no restart opens nothing
+        reset();
+        ends('gauges', { installed: '1.2.0', status: 'installed' });
+        return tick();
+    }).then(() => {
+        eq([states, drawn.top().name], [[], 'main'], 'no restart step without a pending restart');
+        app._client.emit('state', st);
         // a drag scrolls without pressing
         reset();
         app._act({ do: 'tab', tab: 'settings' });

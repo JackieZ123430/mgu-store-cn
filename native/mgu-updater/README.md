@@ -733,13 +733,20 @@ each request, and whenever it changes (at most every 250 ms):
     "build": null, "optional": false, "uninstallable": true, "revision": null,
     "description": "…", "author": "…", "icon": "/var/opt/mgu-updater/state/icons/…png",
     "mguHmi": ["ID7"], "compat": "yes", "provides": null, "service": null,
-    "listedId": null, "installAs": "doom", "blocked": null, "pendingReboot": false, "problem": null, "queued": false, "error": null } ] }
+    "listedId": null, "installAs": "doom", "blocked": null, "pendingReboot": false, "problem": null, "nextStart": null, "queued": false, "error": null } ] }
 ```
 
 - `components`: each origin's component of an id (Sources, "Ids"); `id`
   the row's id (requests and `busy` name it), `listedId` the id its source
   lists when `id` is another, `installAs` the id it is or would be
   installed under, `blocked` why it cannot be installed (else null);
+  `pendingReboot` true while the deploy tool reports that id pending a
+  restart, also an iDrive 8 app install queued for the next start (not
+  installed until then); `nextStart` `install` or `remove` for an iDrive 8
+  app change queued for the next start (else null; a queued install can
+  be removed, which drops it); `error` also why the last start failed to
+  apply its change (the deploy tool's `last_apply`), until an install or
+  removal of it is asked for or a newer start applies;
   `source` is null for an installed component without an origin. `status` is `installed`,
   `update`, `available` or `newer` (a local build ahead of its source);
   `build` is `"unit"` for what is built on the unit; `revision` the short

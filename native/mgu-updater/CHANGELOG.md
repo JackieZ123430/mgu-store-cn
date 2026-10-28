@@ -1,5 +1,12 @@
 # Updater changelog
 
+## 0.8.2
+
+- A component's `pendingReboot` is true whenever the deploy tool reports its id pending, also before it is installed: an iDrive 8 app install the deploy tool queued for the next start (`installs at the next start`), which the car's app list does not have until then. Before, the row of a first install showed `available` with no pending restart, and the Store offered Install again.
+- A component's `nextStart`: `install` or `remove` for an iDrive 8 app change the deploy tool queued for the next start (its `pending_reboot` reasons), else null.
+- A queued first install can be removed: `uninstall` takes an id whose install is queued for the next start, and the deploy tool drops it from its queue.
+- A change the last start failed to apply (the deploy tool's `last_apply`, read with its status) shows on its row's `error`: `the install at the start of the head unit failed: <why>` (or `the removal`), until an install or removal of that id is asked for or a newer start applies. Before, a failed install or removal at boot showed the app as available or installed again, with no reason.
+
 ## 0.8.1
 
 - A component's `problem`: what an installed tool says is wrong, the `problem` line of its `/var/opt/<id>/status.json` (mgu-render 0.4.1: `In-page drawing unavailable: <reason>`), else null.

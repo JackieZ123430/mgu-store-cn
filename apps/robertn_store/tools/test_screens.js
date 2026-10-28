@@ -190,12 +190,42 @@ eq([text(f, 'problem'), text(f, 'note1')], ['In-page drawing unavailable: no ide
 f = screen('app-downloading');
 eq(own(f), ['Back'], 'nothing to press while it downloads');
 eq([f.values.progress.label, f.values.progress.right, f.values.icon.progress], ['Downloading', '42 %', 0.42]);
+// an app install queued for the next start (iDrive 8): Restart pending and Restart head unit, no Install or Update
+const later = Object.assign(fixture.state(), { busy: null });
+later.components = [Object.assign({}, later.components[3], { pendingReboot: true }), Object.assign({}, later.components[1], { pendingReboot: true })];
+const laterOf = (over) => frame(fixture.model(over, later), { textScale: 1, focus: 0, scroll: {} });
+f = laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }] });
+eq([f.items.map((i) => i.label).slice(0, -4), text(f, 'note1')], [['Restart head unit', 'Back'], 'Restart pending'], 'first install');
+eq(laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'doom' }] }).items.map((i) => i.label).slice(0, -4),
+    ['Restart head unit', 'Remove', 'Back'], 'update of an installed app');
+f = laterOf({});
+eq([f.values.grid.items.map((t) => [t.id, t.sub, t.badge]), f.values.nav.items[1].badge],
+    [[['car_vitals', 'Restart pending', ''], ['doom', 'Restart pending', 'installed']], ''], 'tiles; not counted as an update');
+f = laterOf({ tab: 'installed' });
+eq([f.values.apps.items.map((i) => [i.id, i.right, i.chipAct]), f.values.updateAll.hidden], [[['doom', 'chip:Restart pending', null]], true]);
+// with the updater's nextStart: a queued first install has Remove (drops it), a queued removal none; a failed apply shows why
+later.components = [Object.assign({}, later.components[0], { nextStart: 'install' }),
+    Object.assign({}, later.components[1], { status: 'installed', installed: '1.0.1', nextStart: 'remove' })];
+eq(laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }] }).items.map((i) => i.label).slice(0, -4),
+    ['Restart head unit', 'Remove', 'Back'], 'a queued first install can be removed');
+eq(laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'doom' }] }).items.map((i) => i.label).slice(0, -4),
+    ['Restart head unit', 'Back'], 'a queued removal: not offered again');
+eq(text(laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }, { name: 'confirm', kind: 'remove', id: 'car_vitals' }] }), 'title'),
+    'Remove M Vitals?');
+later.components = [Object.assign({}, later.components[0], { pendingReboot: false, nextStart: null,
+    error: 'the install at the start of the head unit failed: package checksum mismatch at /x' })];
+f = laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }] });
+eq([f.items.map((i) => i.label).slice(0, -4), text(f, 'note1')],
+    [['Try again', 'Back'], 'Failed: the install at the start of the head unit failed: package checksum mismatch at /x'.slice(0, 80)]);
 
 // confirm steps: Cancel first
 f = screen('confirm-remove');
 eq(f.labels, ['Cancel', 'Remove']);
 eq(text(f, 'title'), 'Remove Gauges 1.2.0?');
 eq(screen('confirm-restart').items[1].act, { do: 'restart' });
+eq(text(screen('confirm-restart'), 'text'), '', 'Restart head unit from Settings: no component line');
+eq(text(screen('confirm-restart', { stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'display-bridge' }] }), 'text'),
+    'Display bridge 0.2.3 takes effect after a restart', 'opened for a tool pending a restart');
 f = screen('confirm-account');
 eq(f.items[1].act, { do: 'account-remove', id: '3f9a01c2' });
 eq(text(f, 'text'), 'robertn · robertnisipeanu/mgu-store');

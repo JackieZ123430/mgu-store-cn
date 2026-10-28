@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.8
+
+An app install queued for the next start (iDrive 8: MainApp takes the
+app only then) shows `Restart pending` instead of Install or Update
+again, on its tile, its row and the Installed tab, and is not counted
+as an update; its page offers Restart head unit. Before, a first
+install showed Install once it finished (with mgu-updater 0.8.1 the
+updater reports it pending), and a press installed it a second time.
+
+An install that ends pending a restart (that queued app, or a tool that
+takes effect after a reboot) opens the Restart head unit? step by itself,
+once, while the Store is on its main page or that component's page and
+nothing else waits to install; its line names it (`Car Data 1.1.4
+installs at the next start`, `Display bridge 0.2.3 takes effect after a
+restart`). Cancel goes back. On the widget screens the same step opens,
+without the line.
+
+With mgu-updater 0.8.1 (its `nextStart`): a queued first install can be
+removed, which drops it from the queue; an app whose removal is queued
+for the next start offers no Remove again. A change the last start
+failed to apply shows as Failed with the reason (the updater's error).
+
 ## 0.9.7
 
 An installed tool's page shows what the tool says is wrong (the updater's

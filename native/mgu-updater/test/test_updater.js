@@ -2393,6 +2393,9 @@ function testUnitServices(certs, pubDir) {
     const priv = (req) => ask(sock, Object.assign({ secret: u.secret }, req));
     const settled = () => until(st, (s) => !s.busy && !s.components.some((c) => c.queued) && !s.sources.some((x) => x.status === 'checking'), 60000, 'settled');
     const cached = (sha) => path.join(state, 'index', 'idx', `${sha}.tgz`);
+    // the deploy tool's last_apply: both_app's install at, ok or not
+    const apply = (at, ok) => JSON.stringify({ at, results: [{ id: 'both_app', action: 'install', version: '1.0.0', ok,
+        error: ok ? undefined : 'package checksum mismatch at /x', log: [] }, { id: 'mgu-renderd', action: 'install', ok: true, log: [] }] });
     return u.serve()
         .then(() => u.check())
         .then(() => {
@@ -2418,6 +2421,52 @@ function testUnitServices(certs, pubDir) {
                 JSON.stringify(comp('oap-cardash').mguHmi) === '["ID8"]' && comp('oap-cardash').compat === 'no' && comp('both_app').compat === 'yes',
                 JSON.stringify([comp('oap-cardash'), comp('both_app')]));
             fs.unlinkSync(path.join(pubDir, 'mgu-renderd@1.1.0.tgz'));
+            // the last start's apply (iDrive 8 last_apply): a failed install shows on its row
+            process.env.FAKE_LAST_APPLY = apply('2026-10-28T08:00:00.000Z', false);
+            return u.refresh();
+        })
+        .then(() => {
+            ok('apply: a change the last start failed to apply shows its reason on the row',
+                comp('both_app').error === 'the install at the start of the head unit failed: package checksum mismatch at /x' &&
+                comp('mgu-renderd').error === null, comp('both_app').error);
+            // an install the deploy tool queued for the next start: pending before it is installed, and can be dropped
+            process.env.FAKE_PENDING = 'both_app=installs at the next start';
+            return u.refresh();
+        })
+        .then(() => {
+            ok('pending: an app the deploy tool reports pending is pendingReboot before it is installed',
+                comp('both_app').status === 'available' && !comp('both_app').installed && comp('both_app').pendingReboot === true &&
+                comp('both_app').nextStart === 'install' && comp('mgu-renderd').pendingReboot === false && comp('mgu-renderd').nextStart === null,
+                JSON.stringify(comp('both_app')));
+            return priv({ op: 'uninstall', id: 'both_app' });
+        })
+        .then((err) => {
+            ok('pending: a queued install can be removed: the deploy tool drops it', err === null, err);
+            return settled();
+        })
+        .then(() => {
+            ok('pending: removed through the deploy tool; the asked removal puts the failed apply aside',
+                deployed().indexOf('uninstall both_app --yes') >= 0 && comp('both_app').error === null, JSON.stringify([deployed(), comp('both_app')]));
+            fs.writeFileSync(deployLog, '');
+            process.env.FAKE_PENDING = 'both_app=removed at the next start';
+            return u.refresh();
+        })
+        .then(() => {
+            ok('pending: a removal queued for the next start', comp('both_app').nextStart === 'remove' && comp('both_app').pendingReboot === true);
+            // a newer start's apply that failed shows again
+            delete process.env.FAKE_PENDING;
+            process.env.FAKE_LAST_APPLY = apply('2026-10-29T08:00:00.000Z', false);
+            return u.refresh();
+        })
+        .then(() => {
+            ok('apply: a newer start\'s failure shows', /^the install at the start of the head unit failed/.test(comp('both_app').error || ''));
+            process.env.FAKE_LAST_APPLY = apply('2026-10-30T08:00:00.000Z', true);
+            return u.refresh();
+        })
+        .then(() => {
+            ok('pending, apply: neither once the deploy tool reports none', comp('both_app').pendingReboot === false &&
+                comp('both_app').nextStart === null && comp('both_app').error === null, JSON.stringify(comp('both_app')));
+            delete process.env.FAKE_LAST_APPLY;
             return ask(sock, { op: 'install', id: 'oap-cardash' });
         })
         .then((err) => {

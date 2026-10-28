@@ -1,4 +1,4 @@
-# robertn_store 0.9.6
+# robertn_store 0.9.7
 
 The Store: every app and head-unit tool of every source, each with its
 state, the progress of the running install, the sources, the phone page
@@ -43,7 +43,8 @@ USB, Settings) beside:
   holds; installed, it shows as installed, with Remove and no update), `Not for this head unit` / `For
   iDrive 8` (that version is not offered), the failure, what an installed tool says is wrong (the updater's `problem`: `In-page drawing unavailable: <reason>` from the renderer), `Restart pending`; and what can be done:
   Install, Update to, Try again, Restart head unit, Remove (a confirm step). A second renderer
-  installs beside the first.
+  installs beside the first. An install that ends pending a restart opens
+  the Restart head unit? step by itself, once, naming what it is for.
 - **Installed**: apps and head-unit tools, each with its version and
   source, its update (a press on Update installs it) or state, and Update all.
 - **USB**: the components of the sticks' sources.
@@ -104,6 +105,7 @@ installs it; the same package runs on iDrive 7.
 | `DOOM` · `42%` / `Verifying` / `Building` / `Installing` / `Removing` | nothing (in progress) |
 | `Extended dashboard` · `Waiting` | nothing (queued) |
 | `Display bridge` · `Restart pending` | nothing (installed; active after the next reboot) |
+| `Car Data` · `Restart pending` | an iDrive 8 app install queued for the next start (the updater's `nextStart: "install"`): *Remove?* when `uninstallable`, which drops it; a queued removal (`nextStart: "remove"`) offers nothing |
 | `Car Data` · `Not for this head unit` | nothing (installed; the updater marks the new version `compat: "no"`); *Remove?* when `uninstallable` |
 | `DOOM` · `Failed, retry` | try again (the status line names the error) |
 | `Renderer` · `Install 0.2.0` | install it (beside another installed renderer) |

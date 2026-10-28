@@ -41,7 +41,7 @@
  */
 const { PHASE, percent, rowAction, statusLine, sourceLabel, sourceState, sourceActions, sourceChannel, sourceAccount,
     tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress, hmiNames,
-    notForUnit, removable, pickOptions, probeStatus, sourceNames, listed } = require('./store_view.js');
+    notForUnit, removable, pickOptions, probeStatus, sourceNames, listed, startPending } = require('./store_view.js');
 
 const GREEN = '#35d07f';
 const BLUE = '#3d9bff';
@@ -134,6 +134,9 @@ function tileState(c, busy) {
     if (c.error) {
         return { sub: 'Failed', subColor: RED, badge: '', progress: -1 };
     }
+    if (startPending(c)) {
+        return { sub: 'Restart pending', subColor: AMBER, badge: c.installed ? 'installed' : '', progress: -1 };
+    }
     if (c.status === 'update') {
         return { sub: `Update ${target(c)}`, subColor: BLUE, badge: 'update', progress: -1 };
     }
@@ -151,10 +154,10 @@ function tile(m, c, busy) {
 }
 
 function nav(m, sel) {
-    const updates = comps(m).filter((c) => c.status === 'update' && !notForUnit(c) && !c.blocked).length;
+    const updates = comps(m).filter((c) => c.status === 'update' && !notForUnit(c) && !c.blocked && !startPending(c)).length;
     const usbIds = (sources(m) || []).filter((s) => s.usb).map((s) => s.id);
     const usbNew = comps(m).filter((c) => usbIds.indexOf(c.source) >= 0 && (c.status === 'available' || c.status === 'update') &&
-        !notForUnit(c) && !c.blocked).length;
+        !notForUnit(c) && !c.blocked && !startPending(c)).length;
     return { sel, items: [['Store', 'grid', ''], ['Installed', 'check', updates || ''], ['USB', 'usb', usbNew || ''], ['Settings', 'gear', '']]
         .map(([label, vicon, badge], i) => ({ id: TABS[i], label, vicon, badge: String(badge), act: { do: 'tab', tab: TABS[i] } })) };
 }
@@ -350,6 +353,11 @@ function confirmView(m, page) {
         now = button('Remove', { do: 'remove', id: page.id }, { vicon: 'trash', style: 'primary', color: RED });
     } else if (page.kind === 'restart') {
         title = 'Restart head unit?';
+        // opened by the install it is for (store.js _restartAfter)
+        if (c) {
+            line = startPending(c) ? `${named(m, c)} ${target(c)} installs at the next start`
+                : `${named(m, c)} ${c.installed || c.version} takes effect after a restart`;
+        }
         now = button('Restart', { do: 'restart' }, { vicon: 'refresh', style: 'primary', color: BLUE });
     } else if (page.kind === 'source-remove') {
         const s = find(sources(m), page.id);

@@ -259,11 +259,13 @@ class Store extends OnlineApp {
         this._connected = false;
         this._client = new UpdaterClient(SOCKET, { reconnectMs: RECONNECT_MS });
         this._client.on('state', (st) => {
+            const ran = this._connected && this._st ? this._st.busy : null;
             this._connected = true;
             this._st = st;
             this._tokenAdded(st);
             this._reprobe();
             this._render();
+            this._restartAfter(ran);
         });
         this._client.on('probe', (answer) => this._probed(answer));
         this._client.on('down', () => {
@@ -721,6 +723,28 @@ class Store extends OnlineApp {
     _closeState(name) {
         return Promise.resolve(this.rhmiApplication.closeState(name))
             .catch((err) => logger.warn(`closeState ${name} failed: ${err && err.message}`));
+    }
+
+    /* An install that ended (ran: the busy of the state before) with its
+     * component pending a restart, an iDrive 8 app queued for the next start
+     * or a tool that takes effect after a reboot, opens the Restart head unit
+     * confirm step for it, once: while the Store is on screen on its main
+     * page or that component's, with nothing else to install. */
+    _restartAfter(ran) {
+        const st = this._st;
+        if (!ran || ran.op === 'uninstall' || st.busy || !this._visible || st.rebooting !== false || st.components.some((c) => c.queued)) {
+            return;
+        }
+        const c = st.components.find((x) => x.id === ran.id);
+        if (!c || !c.pendingReboot || c.error) {
+            return;
+        }
+        const top = this._drawnUi() ? this._drawn.top() : null;
+        if (top && top.name !== 'main' && !(top.name === 'app' && top.id === c.id)) {
+            return;
+        }
+        logger.info(`${c.id}: restart pending, asking for the restart`);
+        this._openPage('restart', { name: 'confirm', kind: 'restart', id: c.id });
     }
 
     /* The confirm step's Restart; the updater refuses it while an install runs. */
@@ -1370,7 +1394,8 @@ class Store extends OnlineApp {
             this._rows[kind] = rows.map((r) => r.id);
         });
         const removingComponent = this._component(this._removeId);
-        this._text(C.removeName, removingComponent ? `${removingComponent.title} ${removingComponent.installed}` : '');
+        // a queued install (iDrive 8) has no installed version
+        this._text(C.removeName, removingComponent ? [removingComponent.title, removingComponent.installed].filter(Boolean).join(' ') : '');
 
         // an updater that reports no sources or web hides Sources and Phone access
         const sources = connected && Array.isArray(st.sources) ? st.sources : null;
