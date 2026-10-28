@@ -104,9 +104,10 @@ link, or the `https://` address of a `catalog.json`. For a GitHub
 repository, pick what to follow from what it has: **Releases**, **Tags** or
 one of its branches.
 
-On iDrive 8 the Store types on its own on-screen keyboard (iDrive 7 on
-the car's speller). Sources and tokens can also be added from the phone
-page or the computer, or with **Sign in with GitHub**.
+On iDrive 8, Add source and Add token open the Store's on-screen keyboard
+while mgu-render draws the Store. On the Store's widget screens (no
+mgu-render), typing doesn't work yet on iDrive 8: add sources and tokens
+from the phone page or the computer, or use **Sign in with GitHub**.
 
 ### Private repositories
 

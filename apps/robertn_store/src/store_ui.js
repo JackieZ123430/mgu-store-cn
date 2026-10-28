@@ -467,8 +467,12 @@ function typeKey(page, key) {
         page.sym = key === '#+=';
     } else if (key === 'Delete') {
         page.text = (page.text || '').slice(0, -1);
-    } else if ((page.text || '').length < (page.max || 300)) {
-        page.text = (page.text || '') + (key === 'Space' ? ' ' : key);
+    } else {
+        // a key that would go past max types nothing (the URL keys type several characters)
+        const text = page.text || '', add = key === 'Space' ? ' ' : key;
+        if (text.length + add.length <= (page.max || 300)) {
+            page.text = text + add;
+        }
     }
     return false;
 }

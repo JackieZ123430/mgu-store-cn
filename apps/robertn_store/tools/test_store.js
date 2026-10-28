@@ -1166,6 +1166,106 @@ function runDrawn() {
         drawn.pop();
         app._states[host(2)].emit('visible', { visible: false });
         app._states[host(1)].emit('focus', { focus: true });
+    }).then(() => {
+        if (HMI === 'ID7') {
+            return null;
+        }
+        // the HMI showing host state d over d - 1, and closing it back to d - 1
+        const enter = (d) => {
+            app._states[host(d - 1)].emit('focus', { focus: false });
+            app._states[host(d)].emit('visible', { visible: true });
+            app._states[host(d)].emit('focus', { focus: true });
+        };
+        const leave = (d) => {
+            app._states[host(d)].emit('focus', { focus: false });
+            app._states[host(d)].emit('visible', { visible: false });
+            app._states[host(d - 1)].emit('focus', { focus: true });
+        };
+        const names = () => drawn.stack.map((p) => p.name);
+        const tokensSent = () => sent.map(secretless).filter((m) => m.op === 'token-add');
+        // the repo's page on the third level: the keyboard takes its place while the token is typed and gives it
+        // back after OK, the repo still being added
+        reset();
+        app._act({ do: 'open', page: { name: 'accounts' } });
+        enter(2);
+        app._startPick('o/deep');
+        app._client.emit('probe', { type: 'probe', repo: 'o/deep', status: 'auth-needed' });
+        return tick().then(() => {
+            eq([names(), states], [['main', 'accounts', 'pick'], [`open ${host(2)}`, `open ${host(3)}`]], 'the repo\'s page third');
+            enter(3);
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            eq([names(), states.length], [['main', 'accounts', 'type'], 2], 'the keyboard in its place');
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq(app._pick && app._pick.repo, 'o/deep', 'the repo still being added while the token is typed');
+            ['g', 'h', 'p', '_', 'x', 'OK'].forEach(tap);
+            eq([names(), states.length], [['main', 'accounts', 'pick'], 2], 'OK: the repo\'s page back');
+            eq(drawn.items.some((i) => i.label === 'Add token'), true, 'its keys pressable again');
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq([app._pick && app._pick.repo, tokensSent()], ['o/deep', [{ op: 'token-add', token: 'ghp_x' }]],
+                'the token sent, the repo still being added');
+            // the keyboard's back button: the same, nothing typed sent
+            reset();
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            eq(names(), ['main', 'accounts', 'type']);
+            ['a', 'Back'].forEach(tap);
+            eq([names(), states], [['main', 'accounts', 'pick'], []], 'its back button: the repo\'s page back in its host state');
+            eq(drawn.items.some((i) => i.label === 'Add token'), true, 'its keys pressable again');
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq([app._pick && app._pick.repo, tokensSent()], ['o/deep', []], 'its back button: nothing sent, the repo still being added');
+            // the HMI's BACK closes host state 3 with the keyboard's page: the repo's page opens there again once the
+            // focus is back on Accounts
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            reset();
+            leave(3);
+            eq([names(), states], [['main', 'accounts', 'pick'], [`open ${host(3)}`]], 'BACK: the repo\'s page opens again');
+            enter(3);
+            return tick(HIDE_MS + 100);
+        }).then(() => {
+            eq([app._pick && app._pick.repo, names(), tokensSent()], ['o/deep', ['main', 'accounts', 'pick'], []],
+                'BACK: nothing sent, the repo still being added');
+            app._endPick();
+            app._endTokenAdd(null);
+            drawn.setTab('settings');
+            leave(3);
+            leave(2);
+            // Add source again while the first repo is checked: its page waits for the keyboard's page; after BACK
+            // there it opens, and Add token on it types over it
+            reset();
+            app._act({ do: 'add-source' });
+            enter(2);
+            ['o', '/', 'a', 'OK'].forEach(tap);
+            leave(2);
+            return tick();
+        }).then(() => {
+            eq(sent.map(secretless).slice(-1), [{ op: 'source-probe', repo: 'o/a' }]);
+            app._act({ do: 'add-source' });
+            enter(2);
+            app._client.emit('probe', { type: 'probe', repo: 'o/a', status: 'auth-needed' });
+            return tick();
+        }).then(() => {
+            eq(names(), ['main', 'type'], 'the repo\'s page waits for the keyboard');
+            tap('Back');
+            leave(2);
+            return tick();
+        }).then(() => {
+            eq(names(), ['main', 'pick'], 'then opens');
+            enter(2);
+            app._act(drawn.items.find((i) => i.label === 'Add token').act);
+            enter(3);
+            ['g', 'h', 'p', '_', 'y', 'OK'].forEach(tap);
+            leave(3);
+            eq(names(), ['main', 'pick'], 'no keyboard page left behind');
+            return tick();
+        }).then(() => {
+            eq([app._pick && app._pick.repo, tokensSent()], ['o/a', [{ op: 'token-add', token: 'ghp_y' }]]);
+            app._endPick();
+            drawn.setTab('settings');
+            leave(2);
+        });
+    }).then(() => {
         reset();
         app._client.emit('state', st);
         app._endTokenAdd(null);

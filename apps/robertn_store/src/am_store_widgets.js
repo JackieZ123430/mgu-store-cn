@@ -325,14 +325,12 @@ const TRY = {
         tapped(o, items[i].id, 'nav');
     },
     keyboard: Object.assign((cv, b, o, p) => {
-        const ks = keyBoxes(b, o), i = ks.findIndex((k) => p.x >= k.x && p.x < k.x + k.w && p.y >= k.y && p.y < k.y + k.h);
+        const ks = keyBoxes(b), i = ks.findIndex((k) => p.x >= k.x && p.x < k.x + k.w && p.y >= k.y && p.y < k.y + k.h);
         if (i < 0) return false;
         const text = shown(ks[i], o);
         if (text === 'Shift') o.shift = !o.shift;
-        if (text === SYM_KEY || text === ABC_KEY) o.sym = text === SYM_KEY;
         o.pressed = i; o.keyN = (o.keyN || 0) + 1; o.key = { text, n: o.keyN };
-    // the release only un-presses: the key was typed at the touch (o.key cleared, or the app's 'change' types it twice)
-    }, { up: (cv, b, o) => { if (o.pressed == null) return false; o.pressed = null; o.key = null; } }),
+    }, { up: (cv, b, o) => { if (o.pressed == null) return false; o.pressed = null; } }),
 };
 
 // (the Store: shown is what a key types, store_frame.js's items)
