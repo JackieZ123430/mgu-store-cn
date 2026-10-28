@@ -216,7 +216,7 @@ module.exports = {
      "x": 480,
      "y": 470,
      "w": 1560,
-     "h": 340,
+     "h": 250,
      "opts": {
       "text": "",
       "size": 40,
@@ -397,6 +397,23 @@ module.exports = {
       "style": "outline"
      },
      "onTap": "event:secondary"
+    },
+    {
+     "name": "problem",
+     "rtype": "gpu",
+     "gpu": "text",
+     "x": 480,
+     "y": 730,
+     "w": 1560,
+     "h": 90,
+     "opts": {
+      "text": "",
+      "size": 36,
+      "font": "label",
+      "align": "left",
+      "color": "#ffb020",
+      "wrap": true
+     }
     }
    ]
   },
