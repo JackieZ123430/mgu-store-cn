@@ -313,9 +313,15 @@ class Drawn extends EventEmitter {
     }
 
     /* Draws the frame (sent while the renderer is ready and the page is
-     * shown, one at a time) and writes the top host state's proxies. */
+     * shown, one at a time) and writes the top host state's proxies. While
+     * the renderer has the frame before, the next one is built on its TICK. */
     render() {
         if (!this.mode || !this.w) {
+            return;
+        }
+        const now = Date.now();
+        if (this.on_ && this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
+            this.dirty = true;
             return;
         }
         const m = Object.assign(this.host.model(), { stack: this.stack, tab: this.tab, filter: this.filter });
@@ -326,11 +332,6 @@ class Drawn extends EventEmitter {
         this._proxies();
         this._pictures(r.icons);
         if (!this.on_) {
-            return;
-        }
-        const now = Date.now();
-        if (this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
-            this.dirty = true;
             return;
         }
         this.dirty = false;
