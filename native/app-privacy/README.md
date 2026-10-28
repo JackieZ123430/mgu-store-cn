@@ -133,7 +133,7 @@ remounted read-write for the write only; a file bind-mounted over a bundle
 path is written in place. With `--json`, the last stdout line is
 `{"version","command","state","changed","files":[...],"restartNeeded","unit","mainapp"}`;
 `mainapp` names the MainApp release whose edits the bundles take (`8.3.2`,
-`8.1.1`; null on a mismatch). On iDrive 8 `changed` and `restartNeeded` are always false, since
+`8.1.1`, on iDrive 8 `9.3.4`; null on a mismatch). On iDrive 8 `changed` and `restartNeeded` are always false, since
 MainApp-21 is not to be bounced for this patch, whoever runs the tool;
 `nextStart` is true while the running MainApp-21 has not loaded the
 bundles as they are now.
