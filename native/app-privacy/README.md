@@ -6,8 +6,8 @@ on the head unit) enumerates every app in its registry in several off-car
 paths; the patch in this directory makes each of them skip local-only
 apps. It also makes MainApp only restart a local-only app that crashed.
 Genuine backend-delivered apps are reported, updated, diagnosed and
-recovered exactly as before. It covers iDrive 7's MainApp
-(`/usr/lib/oap-mainapp`) and iDrive 8's MainApp-21
+recovered exactly as before. It covers iDrive 7's MainApp 8.3.2 and
+8.1.1 (`/usr/lib/oap-mainapp`) and iDrive 8's MainApp-21
 (`/usr/lib/oap-mainapp21`).
 
 ## Which apps are local-only
@@ -38,7 +38,9 @@ without the marker. Installers do not maintain it.
 ### iDrive 7
 
 All sites are in `/usr/lib/oap-mainapp/src/main.js` and
-`/usr/lib/oap-mainapp/src/AppManagement/AppManagement.js`:
+`/usr/lib/oap-mainapp/src/AppManagement/AppManagement.js`. MainApp 8.1.1
+has no platform analytics, no `getAvailableUpdatesFromBackend` sweep and no
+`DiagOapProvider`, so those rows apply to 8.3.2 only.
 
 | Path | Site |
 |---|---|
