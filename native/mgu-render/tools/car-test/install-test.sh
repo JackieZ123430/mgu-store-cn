@@ -35,7 +35,7 @@ DROPIN_DIR=/run/systemd/system/mgu-render.service.d
 DROPIN=$DROPIN_DIR/car-test.conf
 STATS_FILE=/run/mgu-render/stats-log
 STORE_STATS=/dev/shm/robertn_store-stats.log    # the Store's own per-second line while stats-log is on
-AB_KEYS="embed_zero_copy tick_early readback_pbo verbose"
+AB_KEYS="embed_zero_copy tick_early readback_pbo embed_finish verbose"
 # on the unit: what a pid runs (its binary, else its command line)
 # shellcheck disable=SC2016
 RUNS_FN='runs() { e=$(readlink /proc/$1/exe 2>/dev/null); case "$e" in *mgu-render*) printf "%s" "$e" ;; *) tr "\0" " " </proc/$1/cmdline ;; esac; }'
