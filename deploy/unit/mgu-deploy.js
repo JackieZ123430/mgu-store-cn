@@ -2188,7 +2188,7 @@ function placePreinstalled(a) {
     if (sha256File(dest) !== sha) throw fail('preinstalled package checksum mismatch at ' + dest);
 }
 /* Whether the app manager records where it installed an app from (its
- * registry entry's installationSource, written last by an install) and
+ * registry entry's installationSource) and
  * updates an app whose record is null at its start: its AppManagement.js
  * names installationSource. MainApp 8.3.2 and MainApp-21 do; MainApp 8.1.1
  * does neither. An unreadable AppManagement.js counts as recording. */
@@ -2456,6 +2456,7 @@ function installInPlace(a, existing) {
 /* The update of an app by the restarted manager in place, for a manager
  * that updates no app at its start (MainApp 8.1.1). */
 function updateAfterBounce(a, existing) {
+    waitStartedUp('updating ' + a.id + ' ' + a.version);
     var r = installInPlace(a, existing);
     if (r.uid) return r.uid;
     throw fail('the app manager could not update ' + a.id + ' ' + a.version + ' after its restart: ' +
