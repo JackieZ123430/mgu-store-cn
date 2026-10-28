@@ -1,5 +1,11 @@
 # mgu-render changelog
 
+## 0.5.1
+
+- A zero-copy frame is committed once its GL commands are flushed (`glFlush`), relying on the GPU driver's implicit sync, so the renderer's loop is not held while the GPU draws; `embed_finish = 1` waits for the GPU (`glFinish`).
+- A display-bridge app's frame (DOOM) on zero-copy is uploaded at its own size and scaled into the GPU buffer by GL, to the nearest pixel, black around it.
+- While `/run/mgu-render/stats-log` exists, an embed app's stats line has the HMI's frame callbacks in that second and the time from commit to callback.
+
 ## 0.5.0
 
 - Embed frames are drawn straight into GPU buffers the HMI's compositor shows (zero-copy): three linear XRGB8888 dmabufs from GBM (`libgbm.so.1`, loaded when needed), each the texture of an FBO, given to the compositor with `wl_drm`'s `create_prime_buffer`. Used when the compositor offers `wl_drm` v2 with PRIME and XRGB8888 and the renderer's EGL imports dmabufs; otherwise frames are read back into its shared memory as before, and so until mgu-render restarts once the compositor refused the buffers (a `wl_drm` protocol error; mgu-render reconnects at once) or they could not be made. The journal says `embed: zero-copy` or `embed: readback fallback (<why>)`, and lists the compositor's globals. `embed_zero_copy = 0` reads back always.

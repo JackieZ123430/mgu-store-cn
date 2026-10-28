@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.10
+
+While mgu-render's stats-log (`/run/mgu-render/stats-log`) exists, the
+Store logs once a second the frames it built and sent, their times, the
+touch events and its CPU.
+
 ## 0.9.9
 
 Dragging a list builds the drawn frame only when the renderer asks for the
