@@ -308,6 +308,7 @@ function fakeRoot(opts) {
         MGU_DEPLOY_VAR_OPT: p('var/opt'),
         MGU_DEPLOY_SYSTEMD: p('etc/systemd/system'),
         MGU_DEPLOY_RECMGR: p('etc/recmgr-restartlist.conf'),
+        MGU_DEPLOY_CRASHLIST: p('etc/crashhandler-restartlist.conf'),
         MGU_DEPLOY_MAINAPP: p('usr/lib/oap-mainapp'),
         MGU_DEPLOY_MAINAPP21: p('usr/lib/oap-mainapp21'),
         MGU_DEPLOY_PROV: p('usr/share/tm/prov'),
@@ -2896,6 +2897,79 @@ function namedTool(id, version, edit) {
     return path.join(out, `${id}@${version}.tgz`);
 }
 
+/* The crash handler's restart list, as iDrive 8 ships it (no newline at
+ * the end). */
+const CRASH_LIST = '\n[Whitelist]\nMonitor\nnode\n; a comment\nsocat\n\n[ForceRestartList]\ndbus-daemon\nNodeStateManager';
+
+/* Our tools' names go into the crash handler's [Whitelist] while they are
+ * installed (crashNames, or the built-in names of a tool that has none),
+ * idempotently and snapshotted, and come out with them; nothing else in
+ * the file changes, a stock name stays, and a unit without the list is
+ * left alone. status (as root, lock free) catches up a list written
+ * without them. */
+function testCrashList() {
+    const root = fakeRoot();
+    const list = root.p('etc/crashhandler-restartlist.conf');
+    const owned = root.p('var/opt/mgu-deploy/crash-names.json');
+    write(list, CRASH_LIST);
+    fs.chmodSync(list, 0o640);
+    const uplink = namedTool('mgu-uplink', '0.8.0', (c) => { c.crashNames = ['mgu-uplink', 'mgu-wpa', 'node']; });
+    let r = root.run(['install', '--artifact', uplink, '--yes']);
+    const after = CRASH_LIST.replace('socat\n', 'socat\nmgu-uplink\nmgu-wpa\n');
+    check('crash list: install adds the names after [Whitelist]\'s last entry, the rest byte for byte',
+        r.status === 0 && fs.readFileSync(list, 'utf8') === after && mode(list) === 0o640 &&
+        r.out.includes('crash handler whitelist: added mgu-uplink, mgu-wpa'), r.out + fs.readFileSync(list, 'utf8'));
+    check('crash list: only the names it added are recorded as its own (node is stock)',
+        JSON.stringify(readJson(owned).names) === JSON.stringify(['mgu-uplink', 'mgu-wpa']));
+    const backups = fs.readdirSync(root.p('var/opt/mgu-deploy/backups')).filter((b) => b !== 'stock').sort();
+    const manifest = readJson(root.p(`var/opt/mgu-deploy/backups/${backups[backups.length - 1]}/manifest.json`));
+    check('crash list: the install\'s snapshot holds the list as it was',
+        manifest.entries.some((e) => e.path === list && e.kind === 'file' && e.sha256 === sha256(Buffer.from(CRASH_LIST))));
+    r = root.run(['install', '--artifact', uplink, '--yes']);
+    check('crash list: a reinstall changes nothing', r.status === 0 && fs.readFileSync(list, 'utf8') === after &&
+        !r.out.includes('crash handler whitelist'), r.out);
+    r = root.run(['install', '--artifact', namedTool('mgu-render', '0.4.0'), '--yes']);
+    check('crash list: a tool without crashNames gets its built-in names',
+        r.status === 0 && fs.readFileSync(list, 'utf8') === after.replace('mgu-wpa\n', 'mgu-wpa\nmgu-render\n'), r.out);
+    r = root.run(['uninstall', 'mgu-uplink', '--yes']);
+    check('crash list: uninstalling removes its names, the stock one stays',
+        r.status === 0 && fs.readFileSync(list, 'utf8') === CRASH_LIST.replace('socat\n', 'socat\nmgu-render\n') &&
+        JSON.stringify(readJson(owned).names) === JSON.stringify(['mgu-render']) &&
+        r.out.includes('crash handler whitelist: removed mgu-uplink, mgu-wpa'), r.out);
+    r = root.run(['uninstall', 'mgu-render', '--yes']);
+    check('crash list: with none of ours left the file is as it was', r.status === 0 && fs.readFileSync(list, 'utf8') === CRASH_LIST, r.out);
+    r = root.run(['install', '--artifact', namedTool('mgu-uplink', '0.8.1', (c) => { c.crashNames = ['mgu-uplink-and-more']; }), '--yes']);
+    check('crash list: a name over 15 characters is refused', r.status === 2 && r.out.includes('crashNames'), r.out);
+
+    // a tool installed while the list was absent: nothing written; status catches up once it is there
+    const bare = fakeRoot();
+    const bareList = bare.p('etc/crashhandler-restartlist.conf');
+    r = bare.run(['install', '--artifact', namedTool('mgu-uplink', '0.7.0'), '--yes']);
+    check('crash list: a unit without the list gets none', r.status === 0 && !fs.existsSync(bareList) &&
+        !fs.existsSync(bare.p('var/opt/mgu-deploy/crash-names.json')), r.out);
+    write(bareList, '[Whitelist]\r\nnode\r\n');
+    write(bare.p('var/opt/mgu-deploy/lock'), `1 ${fs.readFileSync(bare.p('proc/boot_id'), 'utf8').trim()}\n`);
+    r = bare.run(['status', '--json']);
+    check('crash list: status leaves it while another run holds the lock',
+        r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\n', r.out);
+    fs.unlinkSync(bare.p('var/opt/mgu-deploy/lock'));
+    const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
+    r = bare.run(['status', '--json']);
+    let json = null;
+    try { json = JSON.parse(r.stdout); } catch (e) { /* checked below */ }
+    check('crash list: status adds the built-in names (in the file\'s line ending), snapshotted, stdout still JSON',
+        r.status === 0 && json && fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\nmgu-uplink\r\n' &&
+        fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 &&
+        r.stderr.includes('crash handler whitelist: added mgu-uplink') && !fs.existsSync(bare.p('var/opt/mgu-deploy/lock')), r.out);
+    r = bare.run(['status', '--json']);
+    check('crash list: status again changes nothing',
+        r.status === 0 && fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length === before + 1 && !r.stderr, r.out);
+    write(bareList, '[ForceRestartList]\ndbus-daemon\n');
+    r = bare.run(['status', '--json']);
+    check('crash list: a list without [Whitelist] gets one at the end',
+        r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[ForceRestartList]\ndbus-daemon\n\n[Whitelist]\nmgu-uplink\n', r.out);
+}
+
 function testInternet() {
     const root = fakeRoot();
     const uids = root.p('var/opt/mgu-uplink/uids.d/net-tool');
@@ -4382,6 +4456,7 @@ const SUITES = [
     testSourcePackages,
     testThirdParty,
     testInternet,
+    testCrashList,
     testSourcesAndDonor,
     testMguInstall,
     testMguInstallUsb,
