@@ -699,6 +699,16 @@ function rootBusy() {
  * window puts / back read-only on any exit. It says one line on stderr
  * for a change. Returns { state: ok | changed | pending | error, reason }: pending is
  * tried again at the next status. */
+/* The lock for a status step, taken only when free: true when held (the
+ * step releases it), false when another run holds it. */
+function statusLock() {
+    var mine = LOCK_FILE + '.' + process.pid, held = lockState();
+    if (!held.free && !held.live) breakStaleLock();
+    mkdirp(DEPLOY_DIR);
+    fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 });
+    try { fs.linkSync(mine, LOCK_FILE); return true; } catch (e) { if (e.code !== 'EEXIST') throw e; return false; }
+    finally { rmrf(mine); }
+}
 function syncCrashList() {
     var out = process.stdout.write, locked = false, mine = LOCK_FILE + '.' + process.pid;
     function ownedChanges(p) { return JSON.stringify(p.owned) !== JSON.stringify(crashOwned().slice().sort()); }
@@ -711,11 +721,7 @@ function syncCrashList() {
         if (!plan.op && !ownedChanges(plan)) return { state: 'ok', reason: 'up to date' };
         var busy = plan.op && rootBusy();
         if (busy) return { state: 'pending', reason: busy };
-        var held = lockState();
-        if (!held.free && !held.live) breakStaleLock();
-        fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 });
-        try { fs.linkSync(mine, LOCK_FILE); locked = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
-        rmrf(mine);
+        locked = statusLock();
         if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
         plan = crashListPlan(installedTools());
         if (!plan || !plan.op && !ownedChanges(plan)) return { state: 'ok', reason: 'up to date' };
@@ -737,6 +743,58 @@ function syncCrashList() {
         return { state: 'error', reason: e.message };
     } finally {
         rmrf(mine);
+        if (locked) releaseLock();
+        process.stdout.write = out;
+    }
+}
+
+/* status's step on iDrive 8: turns live app changes on once the installed
+ * deploy tool can make them, so the updater's status check after a deploy
+ * tool update does it with nothing else to do. It installs and enables
+ * the boot unit only, when it is absent and a copy of this MainApp-21's
+ * main.js builds, takes app-privacy's patch and parses (preflightFallback);
+ * the boot unit binds the copy at the next start, and until then app
+ * changes are queued as without it. A MainApp-21 the copy does not fit is
+ * recorded with its main.js's checksum (id8-live.json) and not built
+ * again until that changes. Same rules for remounting / as the crash
+ * list's step. Returns { state: ok | changed | pending | error, reason },
+ * null off iDrive 8. */
+var ID8_LIVE_RECORD = path.join(DEPLOY_DIR, 'id8-live.json');
+function syncLiveId8() {
+    if (!isId8()) return null;
+    var out = process.stdout.write, locked = false;
+    process.stdout.write = function () { return true; };
+    try {
+        if (fallbackPresent()) return { state: 'ok', reason: 'on' };
+        if (!FAKE && process.getuid() !== 0) return { state: 'pending', reason: 'status not run as root' };
+        if (!runningInstalled() && !FAKE) return { state: 'pending', reason: 'this deploy tool is not the installed one' };
+        var sha = shaOrNull(mainJs()), rec = readJsonOrNull(ID8_LIVE_RECORD);
+        if (rec && rec.sha256 === sha) return { state: 'ok', reason: 'off: ' + rec.why };
+        var busy = rootBusy();
+        if (busy) return { state: 'pending', reason: busy };
+        locked = statusLock();
+        if (!locked) return { state: 'pending', reason: 'another mgu-deploy run holds the lock' };
+        if (fallbackPresent()) return { state: 'ok', reason: 'on' };
+        try { preflightFallback(); } catch (e) {
+            if (!isRefusal(e)) throw e;
+            writeAtomic(ID8_LIVE_RECORD, JSON.stringify({ sha256: sha, why: e.message }) + '\n', 0o644);
+            return { state: 'ok', reason: 'off: ' + e.message };
+        }
+        busy = rootBusy();
+        if (busy) return { state: 'pending', reason: busy };
+        var link = path.join(CFG.systemd, 'multi-user.target.wants', FALLBACK_UNIT);
+        takeSnapshot('live-installs', fallbackTouched());
+        rootfsWindow([{ type: 'copy', src: fallbackUnitSource(), path: path.join(CFG.systemd, FALLBACK_UNIT), mode: 0o644 },
+            { type: 'mkdir', path: path.dirname(link) }, { type: 'symlink', path: link, target: '../' + FALLBACK_UNIT }]);
+        runOk(CFG.systemctl, ['daemon-reload']);
+        rmrf(ID8_LIVE_RECORD);
+        pruneBackups();
+        process.stderr.write('live app installs: on from the next start of the head unit\n');
+        return { state: 'changed', reason: 'on from the next start' };
+    } catch (e) {
+        process.stderr.write('mgu-deploy: live app installs not turned on: ' + e.message + '\n');
+        return { state: 'error', reason: e.message };
+    } finally {
         if (locked) releaseLock();
         process.stdout.write = out;
     }
@@ -4123,11 +4181,13 @@ function collectStatus(state) {
         idrive7: { apps: i7Apps(state) },
         stock_backup: fs.existsSync(path.join(BACKUPS_DIR, 'stock')) };
 }
-function cmdStatus(args, crashList) {
+function cmdStatus(args, crashList, live) {
     var s = collectStatus(loadState());
     s.crash_list = crashList;
+    if (live) s.live_installs = live;
     if (args.json) { say(JSON.stringify(s)); return 0; }
     say('crash handler whitelist: ' + crashList.state + ' (' + crashList.reason + ')');
+    if (live) say('live app installs: ' + live.state + ' (' + live.reason + ')');
     say('mgu-deploy ' + VERSION);
     say('head unit: ' + (s.unit.hmi ? hmiName(s.unit.hmi) : 'unknown') + ' (' + unitInfo().basis + '), firmware ' +
         (s.unit.firmware || 'unknown'));
@@ -4916,7 +4976,7 @@ function runCommand() {
         if (args.command === 'help' || args.command === '--help') { say(HELP); return 0; }
         if (args.command === 'check') return cmdCheck(args);
         if (args.command === 'install') return cmdInstall(args);
-        if (args.command === 'status') return cmdStatus(args, syncCrashList());
+        if (args.command === 'status') return cmdStatus(args, syncCrashList(), syncLiveId8());
         if (args.command === 'uninstall') return cmdUninstall(args);
         if (args.command === 'rollback') return cmdRollback(args);
         if (args.command === 'restore') return cmdRestore(args);

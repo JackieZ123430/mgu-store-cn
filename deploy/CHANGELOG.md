@@ -2,7 +2,7 @@
 
 ## 0.6.2
 
-- iDrive 8: app installs, updates and uninstalls happen live, with no head-unit restart. MainApp-21 installs, updates or removes the one app itself, and its tile appears or goes at once. The first app install on a car turns this on and is still applied at the next start; every change after that start is live.
+- iDrive 8: app installs, updates and uninstalls happen live, with no head-unit restart. MainApp-21 installs, updates or removes the one app itself, and its tile appears or goes at once. It turns itself on after the update: from the next start of the head unit every change is live, and until then changes are applied at the next start, as before.
 - iDrive 8: a change that MainApp-21 does not take live is applied at the next start, as before. MainApp-21 is never restarted by the deploy tool, `restore` and `fallback on|off` included.
 - iDrive 8: the boot unit leaves MainApp-21's own `main.js` in effect when its copy does not match this firmware or does not parse. If MainApp-21 restarts within a minute of starting, or during a live change, live changes stay off until the next start of the head unit.
 - `fallback on` and `fallback off` work on iDrive 8; `fallback migrate` stays iDrive 7 only.

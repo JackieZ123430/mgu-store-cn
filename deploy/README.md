@@ -444,8 +444,13 @@ once. The package (`preinstalled_apps/<id>@<version>.tgz`) and the app's
 das lines go in first, as `apply-pending` puts them (below), so every later
 start has the app; its `custom_apps.json` entry gives it its provisioning
 section until then (the copy fills only a listed app's empty section and
-never adds to `installable_apps`). The first app install turns the
-fallback on and is queued; from the next start on, changes are live. A
+never adds to `installable_apps`). `status`, run as root (the updater
+runs it right after it installs the deploy tool), installs and enables the
+boot unit once a copy of this MainApp-21's `main.js` builds, with the
+crash list's rules for remounting `/`; it reports `live_installs` in
+`status --json`. A MainApp-21 the copy does not fit is not tried again
+until its `main.js` changes (`id8-live.json`). From the next start on,
+changes are live; until then they are queued. A
 change the running MainApp-21 does not take (no hook, the request not
 taken or refused, MainApp-21 restarted) is queued instead, with what was
 placed for it put back; one its installer failed fails, rolled back. On a
@@ -1449,12 +1454,7 @@ whole iDrive 8 path:
   Manager installed is refused here; remove it there first);
 - MainApp-21 running as node with `oap-mainapp21/src/main.js` as its script
   (`apply-pending` refuses while it runs, by that);
-- live changes: the car's MainApp-21 build carrying the copy's three
-  anchors once each (else every change queues), `mgu-app-fallback.service`
-  binding the copy before oapcontroller, MainApp-21 announcing the hook,
-  and a live install, update and uninstall showing and removing the tile
-  with a working keychain, ACLs and appletId; the das lines making the app
-  MainApp-21's again at the next start; and no corruption handling in
-  oapcontroller's log around a live change;
+- live changes (the copy bound at boot, the hook, tiles shown and removed
+  at once) on the car's MainApp-21 build;
 - MainApp-21 supplying `oap-sdk` to an npm package that names it in
   `dependencies` without shipping it (IterioDev's packages do so).

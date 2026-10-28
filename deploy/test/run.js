@@ -4240,6 +4240,44 @@ function testId8Inplace() {
     });
 }
 
+/* After a deploy tool update the updater's status check turns live app
+ * changes on: the boot unit only, the copy bound at the next start. */
+function testId8LiveOn() {
+    const live = (root) => { const r = root.run(['status', '--json']); try { return JSON.parse(r.stdout).live_installs; } catch (e) { return r.out; } };
+    const root = id8Root();
+    const unit = root.p('etc/systemd/system/mgu-app-fallback.service');
+    const l1 = live(root);
+    check('id8 live on: status turns live changes on from the next start: the boot unit installed and enabled, no copy bound',
+        l1 && l1.state === 'changed' && fs.readFileSync(unit, 'utf8') ===
+        fs.readFileSync(path.join(HERE, '..', 'unit', 'mgu-app-fallback-id8.service'), 'utf8') &&
+        fs.readlinkSync(root.p('etc/systemd/system/multi-user.target.wants/mgu-app-fallback.service')) === '../mgu-app-fallback.service' &&
+        !fs.existsSync(root.p(ID8_COPY)) && root.kills().length === 0, JSON.stringify(l1));
+    const st = root.status();
+    check('id8 live on: nothing pending for it, and the next status says it is on', st.pending_reboot.length === 0 &&
+        JSON.stringify(st.live_installs) === JSON.stringify({ state: 'ok', reason: 'on' }), JSON.stringify(st));
+    const r = root.run(['install', '--artifact', rhmiApp('first8', '1.0.0', ['ID8'], { npm: true, acl: ACL, marked: true }), '--yes']);
+    check('id8 live on: until the next start an install is queued, as without it', r.status === 0 &&
+        r.out.includes('first8 1.0.0 installs at the next start') && !r.out.includes('provisioning fallback turned on') &&
+        root.kills().length === 0, r.out);
+
+    const nf = id8Root({ main: fs.readFileSync(path.join(HERE, 'fixtures', 'main21.js'), 'utf8').replace('Promise.all([mainApp.init()])', 'Promise.all([mainApp.init(1)])') });
+    const n1 = live(nf);
+    check('id8 live on: on a MainApp-21 the copy does not fit it stays off, saying why, nothing written but its record',
+        n1 && n1.state === 'ok' && /^off: fallback build refused/.test(n1.reason) &&
+        !fs.existsSync(nf.p('etc/systemd/system/mgu-app-fallback.service')) && fs.existsSync(nf.p('var/opt/mgu-deploy/id8-live.json')), JSON.stringify(n1));
+    const rec = fs.statSync(nf.p('var/opt/mgu-deploy/id8-live.json')).mtimeMs;
+    const n2 = live(nf);
+    check('id8 live on: that MainApp-21 is not built again at the next status', n2 && n2.state === 'ok' &&
+        fs.statSync(nf.p('var/opt/mgu-deploy/id8-live.json')).mtimeMs === rec, JSON.stringify(n2));
+
+    const busy = id8Root();
+    fs.writeFileSync(busy.p('proc/mounts'), 'rootfs / ext4 rw,relatime 0 0\n');
+    const b1 = live(busy);
+    check('id8 live on: with / read-write it waits for a later status', b1 && b1.state === 'pending' &&
+        !fs.existsSync(busy.p('etc/systemd/system/mgu-app-fallback.service')), JSON.stringify(b1));
+    check('id8 live on: not on iDrive 7', !('live_installs' in fakeRoot().status()));
+}
+
 /* The guard in a copy of the MainApp-21 fixture, loaded as MainApp-21
  * loads it, one process per start. */
 function testId8Guard() {
@@ -4804,6 +4842,7 @@ const SUITES = [
     testId8Apps,
     testId8Inplace,
     testId8Guard,
+    testId8LiveOn,
     testAppManager,
     testId8Complete
 ];
