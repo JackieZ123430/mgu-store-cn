@@ -2952,6 +2952,10 @@ function testCrashList() {
         r.status === 0 && r1.status === 0 && r2.status === 0 && text1 === CRASH_LIST.replace('socat\n', 'socat\nrobertn-logger-enet\n') &&
         fs.readFileSync(list, 'utf8') === text1, r.out + r1.out + r2.out + text1);
     root.run(['uninstall', 'long-names', '--yes']);
+    r = root.run(['install', '--artifact', namedTool('constructor', '0.1.0'), '--yes']);
+    check('crash list: a tool whose id is an Object property name has no built-in names',
+        r.status === 0 && fs.readFileSync(list, 'utf8') === CRASH_LIST, r.out);
+    root.run(['uninstall', 'constructor', '--yes']);
 
     // a tool installed while the list was absent: nothing written; status catches up once it is there
     const bare = fakeRoot();

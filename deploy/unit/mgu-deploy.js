@@ -591,7 +591,8 @@ var CRASH_NAMES_BUILTIN = {
 };
 var CRASH_NAME = /^[A-Za-z0-9._+-]{1,255}$/;
 function crashNamesOf(c) {
-    return (Array.isArray(c.crashNames) ? c.crashNames : CRASH_NAMES_BUILTIN[c.id] || []).filter(function (n) {
+    var builtin = Object.prototype.hasOwnProperty.call(CRASH_NAMES_BUILTIN, c.id) ? CRASH_NAMES_BUILTIN[c.id] : [];
+    return (Array.isArray(c.crashNames) ? c.crashNames : builtin).filter(function (n) {
         return typeof n === 'string' && CRASH_NAME.test(n);
     });
 }
@@ -665,10 +666,12 @@ function crashListSyncQuiet() {
     var plan = crashListPlan(installedTools());
     if (!plan || (!plan.op && JSON.stringify(plan.owned) === JSON.stringify(crashOwned().slice().sort()))) return;
     var mine = LOCK_FILE + '.' + process.pid, out = process.stdout.write;
-    var held = lockState();
-    if (!held.free && !held.live) breakStaleLock();
-    try { fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 }); fs.linkSync(mine, LOCK_FILE); }
-    catch (e) { rmrf(mine); return; }
+    try {
+        var held = lockState();
+        if (!held.free && !held.live) breakStaleLock();
+        fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 });
+        fs.linkSync(mine, LOCK_FILE);
+    } catch (e) { rmrf(mine); return; }
     rmrf(mine);
     process.stdout.write = process.stderr.write.bind(process.stderr);
     try {
