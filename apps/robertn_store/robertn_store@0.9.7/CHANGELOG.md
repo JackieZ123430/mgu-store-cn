@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.7
+
+An installed tool's page shows what the tool says is wrong (the updater's
+`problem`, mgu-updater 0.8.1): the Renderer's `In-page drawing unavailable:
+<reason>` when it could not make its HMI page template (mgu-render 0.4.1).
+
 ## 0.9.6
 
 Wi-Fi and the preferred connection, on the drawn screens (from IterioDev
