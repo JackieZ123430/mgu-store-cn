@@ -370,18 +370,25 @@ function nextStartOf(st) {
     return out;
 }
 
-/* The changes the last start applied that failed (the deploy tool's
- * last_apply, iDrive 8): { at, failed: { <id>: why } }. */
+/* What the last start applied (the deploy tool's last_apply, iDrive 8):
+ * { at, failed: { <id>: { op: 'install'|'remove', why } }, installed: [ids] }. */
 function lastApplyOf(st) {
     const la = st && st.last_apply;
     const failed = {};
+    const installed = [];
     ((la && Array.isArray(la.results)) ? la.results : []).forEach((r) => {
-        if (r && typeof r.id === 'string' && !r.ok) {
-            failed[r.id] = `${r.action === 'remove' ? 'the removal' : 'the install'} at the start of the head unit failed` +
-                `${r.error ? `: ${r.error}` : ''}`;
+        if (!r || typeof r.id !== 'string') {
+            return;
+        }
+        const op = r.action === 'remove' ? 'remove' : 'install';
+        if (!r.ok) {
+            failed[r.id] = { op, why: `${op === 'remove' ? 'the removal' : 'the install'} at the start of the head unit failed` +
+                `${r.error ? `: ${r.error}` : ''}` };
+        } else if (op === 'install') {
+            installed.push(r.id);
         }
     });
-    return { at: (la && la.at) || null, failed };
+    return { at: (la && la.at) || null, failed, installed };
 }
 
 /* The head unit (deploy tool's status: { hmi: "ID7"|"ID8"|null, firmware }),
@@ -748,9 +755,9 @@ class Updater {
         this.pending = [];
         // iDrive 8: the app changes the deploy tool queued for the next start, by id ('install' or 'remove')
         this.nextStart = {};
-        // the deploy tool's last start's apply (last_apply): { at, failed: { <id>: why } }; and, by id,
-        // the apply whose failure an install or removal asked for since put aside
-        this.lastApply = { at: null, failed: {} };
+        // the deploy tool's last start's apply (last_apply, lastApplyOf); and, by id, the apply whose
+        // failure an install or removal asked for since put aside (apply-seen.json)
+        this.lastApply = { at: null, failed: {}, installed: [] };
         this.applySeen = {};
         this.unit = null;
         this.providers = {};
@@ -798,6 +805,9 @@ class Updater {
         try {
             this.webEnabled = readJson(path.join(conf.state_dir, 'web.json')).enabled === true;
         } catch (e) { /* off */ }
+        try {
+            this.applySeen = readJson(path.join(conf.state_dir, 'apply-seen.json'));
+        } catch (e) { /* none */ }
         if (conf.sources) {
             this.loadSources();
             this.addDefaultSources();
@@ -1120,11 +1130,28 @@ class Updater {
         return out;
     }
 
-    /* Why the last start's apply of id failed, until an install or removal
-     * of id is asked for (or a newer start applies), else null. */
+    /* The last start's failed apply of id ({ op, why }), until an install or
+     * removal of id is asked for (or a newer start applies), else null. */
     applyError(id) {
-        const why = this.lastApply.failed[id];
-        return why && this.applySeen[id] !== this.lastApply.at ? why : null;
+        const f = this.lastApply.failed[id];
+        return f && this.applySeen[id] !== this.lastApply.at ? f : null;
+    }
+
+    /* An app the last start put in place (iDrive 8) that MainApp does not list yet. */
+    placed(id, kind) {
+        return kind === 'app' && this.lastApply.installed.indexOf(id) >= 0 && !this.installedOf(id, kind);
+    }
+
+    /* Puts aside the last start's failed apply of id, also across restarts. */
+    putAside(id) {
+        if (!this.applyError(id)) {
+            return;
+        }
+        const at = this.lastApply.at;
+        this.applySeen = Object.keys(this.applySeen).filter((k) => this.applySeen[k] === at)
+            .reduce((o, k) => Object.assign(o, { [k]: at }), { [id]: at });
+        mkdirp(this.conf.state_dir, 0o755);
+        writeAtomic(path.join(this.conf.state_dir, 'apply-seen.json'), JSON.stringify(this.applySeen));
     }
 
     installedOf(id, kind, wantTitle) {
@@ -1160,6 +1187,9 @@ class Updater {
         const installed = resolved.map((r) => this.installedOf(r.entry.id, r.entry.kind, r.entry.title === r.entry.id)).filter(Boolean);
         const rows = catalogLib.plan(resolved, installed).map((row, i) => {
             const entry = resolved[i].entry;
+            const unit = entry.installAs || entry.id;
+            const failed = this.applyError(unit);
+            const placed = !row.installed && this.placed(unit, entry.kind);
             const o = this.origins[row.id];
             // a branch's new commit of the same version
             if (row.status === 'installed' && entry.revision && o && o.source === row.source && o.commit && o.commit !== entry.commit) {
@@ -1184,12 +1214,13 @@ class Updater {
                 // why it cannot be installed: another origin's component has its id
                 blocked: entry.blocked || null,
                 // also an install queued for the next start (iDrive 8), not installed until then
-                pendingReboot: this.pending.indexOf(entry.installAs || entry.id) >= 0,
-                problem: row.installed && entry.kind === 'tool' ? toolProblem(this.conf, entry.installAs || entry.id) : null,
-                // iDrive 8: 'install' or 'remove' queued for the next start, else null
-                nextStart: this.nextStart[entry.installAs || entry.id] || null,
+                pendingReboot: placed || this.pending.indexOf(unit) >= 0,
+                problem: row.installed && entry.kind === 'tool' ? toolProblem(this.conf, unit) : null,
+                nextStart: this.nextStart[unit] || (placed ? 'install' : null),
                 queued: this.queue.some((q) => q.id === row.id),
-                error: this.errors[row.id] || this.applyError(entry.installAs || entry.id) || null
+                error: this.errors[row.id] || (failed && failed.why) || null,
+                // what the last start failed to apply, while its error shows
+                applyFailed: !this.errors[row.id] && failed ? failed.op : null
             });
         });
         const sources = this.defs().map((d) => this.sourceState(d));
@@ -1663,7 +1694,7 @@ class Updater {
             return refused;
         }
         delete this.errors[item.id];
-        this.applySeen[item.unit || item.id] = this.lastApply.at;
+        this.putAside(item.unit || item.id);
         this.queue.push(item);
         return null;
     }
@@ -1741,7 +1772,8 @@ class Updater {
 
     /* Queues a removal of id: one its source marks uninstallable, installed
      * (or its install queued for the next start), that nothing installed,
-     * nor the updater itself, requires. */
+     * nor the updater itself, requires. Of one not installed whose change
+     * the last start failed to apply, it puts the failure aside. */
     requestUninstall(id) {
         if (this.rebooting) {
             return 'the head unit is restarting';
@@ -1755,8 +1787,17 @@ class Updater {
             (selfComponent().requires || {})[id]) {
             return `${id} cannot be removed`;
         }
+        const unit = r.entry.installAs || id;
         // an install queued for the next start (iDrive 8) is dropped from the deploy tool's queue
-        if (!this.installedVersion(id, r.entry.kind) && !(id === APP_MANAGER && this.amPresent()) && this.nextStart[id] !== 'install') {
+        if (!this.installedVersion(unit, r.entry.kind) && !(id === APP_MANAGER && this.amPresent()) && this.nextStart[unit] !== 'install' &&
+            !this.placed(unit, r.entry.kind)) {
+            const failed = this.applyError(unit);
+            if (failed && !this.queue.some((q) => q.id === id) && !(this.busy && this.busy.id === id)) {
+                console.log(`${unit}: the failed ${failed.op} at the start put aside`);
+                this.putAside(unit);
+                this.changed();
+                return null;
+            }
             return `${id} is not installed`;
         }
         const needs = Array.from(all.values()).find((o) => o.entry.requires[id] && this.installedVersion(o.entry.id, o.entry.kind));
@@ -1770,7 +1811,7 @@ class Updater {
         if (needer) {
             return `${needer.entry.title} needs a ${cap}: remove it first, or install another ${cap}`;
         }
-        const refused = this.enqueue({ op: 'uninstall', id });
+        const refused = this.enqueue(Object.assign({ op: 'uninstall', id }, unit !== id ? { unit } : {}));
         if (refused) {
             return refused;
         }
@@ -2054,8 +2095,10 @@ class Updater {
 
     /* Removes a component through the deploy tool's uninstall. */
     uninstall(item) {
-        const id = item.id;
-        this.busy = { id, op: 'uninstall', phase: 'uninstall' };
+        // the row's id; the id it is installed (or queued) under
+        const key = item.id;
+        const id = item.unit || item.id;
+        this.busy = { id: key, op: 'uninstall', phase: 'uninstall' };
         this.changed();
         console.log(`${id}: uninstall`);
         return this.deployTool(['uninstall', id, '--yes'])
@@ -2074,7 +2117,7 @@ class Updater {
             })
             .catch((err) => {
                 console.log(`${id}: ${err.message}`);
-                this.errors[id] = err.message;
+                this.errors[key] = err.message;
             })
             .then(() => this.refresh())
             .then(() => {

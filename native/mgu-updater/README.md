@@ -741,12 +741,15 @@ each request, and whenever it changes (at most every 250 ms):
   lists when `id` is another, `installAs` the id it is or would be
   installed under, `blocked` why it cannot be installed (else null);
   `pendingReboot` true while the deploy tool reports that id pending a
-  restart, also an iDrive 8 app install queued for the next start (not
-  installed until then); `nextStart` `install` or `remove` for an iDrive 8
-  app change queued for the next start (else null; a queued install can
-  be removed, which drops it); `error` also why the last start failed to
-  apply its change (the deploy tool's `last_apply`), until an install or
-  removal of it is asked for or a newer start applies;
+  restart, also an iDrive 8 app install queued for the next start, or one
+  the last start put in place that MainApp does not list yet; `nextStart`
+  `install` or `remove` for such an iDrive 8 app change (else null; a
+  queued install can be removed, which drops it); `error` also why the
+  last start failed to apply its change (the deploy tool's `last_apply`),
+  with `applyFailed` `install` or `remove` (else null), until an install
+  or removal of it is asked for or a newer start applies
+  (`state/apply-seen.json`); the removal of an app not installed whose
+  change failed only puts the failure aside;
   `source` is null for an installed component without an origin. `status` is `installed`,
   `update`, `available` or `newer` (a local build ahead of its source);
   `build` is `"unit"` for what is built on the unit; `revision` the short

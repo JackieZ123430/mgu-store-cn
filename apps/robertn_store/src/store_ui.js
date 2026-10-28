@@ -326,7 +326,11 @@ function appView(m, page) {
         sub: busy.phase === 'download' && busy.total ? `${size(busy.progress)} of ${size(busy.total)}` : '' }
         : c.queued ? { hidden: false, label: 'Waiting', value: 0, right: '', sub: '' } : hidden;
     const action = rowAction(c, busy);
-    if (action === 'install') {
+    const retryRemove = action === 'remove' && !!c.error;
+    if (retryRemove) {
+        v.primary = button('Try again', { do: 'open', page: { name: 'confirm', kind: 'remove', id: c.id } },
+            { vicon: 'refresh', style: 'primary', color: BLUE });
+    } else if (action === 'install') {
         v.primary = button(c.error ? 'Try again' : c.status === 'update' ? `Update to ${target(c)}` : 'Install', { do: 'install', id: c.id },
             { vicon: c.error ? 'refresh' : 'arrowDown', style: 'primary', color: BLUE });
     } else if (c.pendingReboot && canRestart(m)) {
@@ -335,7 +339,7 @@ function appView(m, page) {
     } else {
         v.primary = hidden;
     }
-    v.secondary = removable(c, busy) ? button('Remove', { do: 'open', page: { name: 'confirm', kind: 'remove', id: c.id } },
+    v.secondary = removable(c, busy) && !retryRemove ? button('Remove', { do: 'open', page: { name: 'confirm', kind: 'remove', id: c.id } },
         { vicon: 'trash', style: 'outline' }) : hidden;
     return v;
 }
@@ -353,10 +357,8 @@ function confirmView(m, page) {
         now = button('Remove', { do: 'remove', id: page.id }, { vicon: 'trash', style: 'primary', color: RED });
     } else if (page.kind === 'restart') {
         title = 'Restart head unit?';
-        // opened by the install it is for (store.js _restartAfter)
-        if (c) {
-            line = startPending(c) ? `${named(m, c)} ${target(c)} installs at the next start`
-                : `${named(m, c)} ${c.installed || c.version} takes effect after a restart`;
+        if (c && c.nextStart) {
+            line = `${named(m, c)} ${c.nextStart === 'remove' ? 'is removed' : 'installs'} at the next start`;
         }
         now = button('Restart', { do: 'restart' }, { vicon: 'refresh', style: 'primary', color: BLUE });
     } else if (page.kind === 'source-remove') {

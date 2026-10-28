@@ -217,6 +217,15 @@ later.components = [Object.assign({}, later.components[0], { pendingReboot: fals
 f = laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }] });
 eq([f.items.map((i) => i.label).slice(0, -4), text(f, 'note1')],
     [['Try again', 'Back'], 'Failed: the install at the start of the head unit failed: package checksum mismatch at /x'.slice(0, 80)]);
+// with the updater's applyFailed: a failed first install also has Remove (clears it); a failed removal's Try again removes
+later.components[0].applyFailed = 'install';
+eq(laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'car_vitals' }] }).items.map((i) => i.label).slice(0, -4),
+    ['Try again', 'Remove', 'Back'], 'a failed first install can be cleared');
+later.components = [Object.assign({}, fixture.state().components[1], { status: 'installed', installed: '1.0.1', applyFailed: 'remove',
+    error: 'the removal at the start of the head unit failed: x' })];
+f = laterOf({ stack: [{ name: 'main' }, { name: 'app', id: 'doom' }] });
+eq([f.items.map((i) => i.label).slice(0, -4), f.items[0].act], [['Try again', 'Back'], { do: 'open', page: { name: 'confirm', kind: 'remove', id: 'doom' } }],
+    'a failed removal is tried again');
 
 // confirm steps: Cancel first
 f = screen('confirm-remove');
@@ -225,7 +234,12 @@ eq(text(f, 'title'), 'Remove Gauges 1.2.0?');
 eq(screen('confirm-restart').items[1].act, { do: 'restart' });
 eq(text(screen('confirm-restart'), 'text'), '', 'Restart head unit from Settings: no component line');
 eq(text(screen('confirm-restart', { stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'display-bridge' }] }), 'text'),
-    'Display bridge 0.2.3 takes effect after a restart', 'opened for a tool pending a restart');
+    '', 'no line for a tool');
+// opened by an app change queued for the next start: its line
+later.components = [Object.assign({}, fixture.state().components[3], { pendingReboot: true, nextStart: 'install' }),
+    Object.assign({}, fixture.state().components[1], { pendingReboot: true, nextStart: 'remove' })];
+eq(text(laterOf({ stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'car_vitals' }] }), 'text'), 'M Vitals installs at the next start');
+eq(text(laterOf({ stack: [{ name: 'main' }, { name: 'confirm', kind: 'restart', id: 'doom' }] }), 'text'), 'DOOM is removed at the next start');
 f = screen('confirm-account');
 eq(f.items[1].act, { do: 'account-remove', id: '3f9a01c2' });
 eq(text(f, 'text'), 'robertn · robertnisipeanu/mgu-store');

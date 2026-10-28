@@ -104,6 +104,7 @@ const cases = [
     [rowAction(row({ compat: 'yes' }), null), 'install'],
     [groupState([row({}), row({ id: 'vc', compat: 'no' })], null), '1 update'],
     [statusLine(st({ components: [row({}), row({ id: 'vc', compat: 'no' })] }), true, true), '1 update, checked 14:02'],
+    [statusLine(st({ components: [row({}), row({ id: 'vc', pendingReboot: true, nextStart: 'install' })] }), true, true), '1 update, checked 14:02'],
     [listed(row({ status: 'available', installed: null, compat: 'no' })), false],
     [listed(row({ compat: 'no' })), true],
     [listed(row({ status: 'available', installed: null, compat: 'unknown' })), true],
@@ -132,6 +133,12 @@ const cases = [
     [rowAction(row({ pendingReboot: true, nextStart: null }), null), 'install'],
     // a change the last start failed to apply: the updater's error
     [rowState(row({ status: 'available', installed: null, error: 'the install at the start of the head unit failed: x' }), null), 'Failed, retry'],
+    // what failed decides the retry: a failed removal is removed again, a failed first install installed again or cleared by Remove
+    [rowAction(row({ status: 'installed', uninstallable: true, error: 'x', applyFailed: 'remove' }), null), 'remove'],
+    [rowAction(row({ status: 'installed', error: 'x', applyFailed: 'remove' }), null), null],
+    [rowAction(row({ status: 'available', installed: null, uninstallable: true, error: 'x', applyFailed: 'install' }), null), 'install'],
+    [removable(row({ status: 'available', installed: null, uninstallable: true, error: 'x', applyFailed: 'install' }), null), true],
+    [removable(row({ status: 'available', installed: null, uninstallable: true, error: 'x' }), null), false],
     [rowAction(row({}), null), 'install'],
     [rowAction(row({ status: 'available' }), null), 'install'],
     [rowAction(row({ status: 'installed' }), null), null],

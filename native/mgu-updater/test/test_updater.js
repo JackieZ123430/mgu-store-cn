@@ -1576,7 +1576,7 @@ function testSources(certs) {
     // a second source: a folder with the same id at another version
     const second = path.join(M, 'second');
     mkdirp(second);
-    publish(second, [entry(appTgz(second, 'dup_app', '2.0.0'), 'app', 'Dup two')]);
+    publish(second, [Object.assign(entry(appTgz(second, 'dup_app', '2.0.0'), 'app', 'Dup two'), { uninstallable: true })]);
     // a private repo with its own catalog
     ghRepo('owner/private', { private: true, tokens: ['tok-all', 'tok-device'] });
     gh.repos['owner/private'].catalog = Buffer.from(JSON.stringify({ schema: 1, components:
@@ -1940,7 +1940,18 @@ function testSources(certs) {
             ok('uninstall: through the deploy tool\'s uninstall; the row is available again', err === null &&
                 /^uninstall needs_app --yes$/m.test(fs.readFileSync(deployLog, 'utf8')) &&
                 !JSON.parse(fs.readFileSync(path.join(state, 'origins.json'), 'utf8')).needs_app);
-            return ask(sock, { op: 'install', id: 'dup_app' }).then(() => installed('dup_app'));
+            // another source's row of an id whose install is queued for the next start (iDrive 8)
+            process.env.FAKE_PENDING = 'dup_app=installs at the next start';
+            fs.writeFileSync(deployLog, '');
+            return u.refresh().then(() => priv({ op: 'uninstall', id: 'dup_app@second' }))
+                .then((err) => until(st, () => !st().busy && !comp('dup_app@second').queued, 20000, 'dup_app@second removed').then(() => err));
+        })
+        .then((err) => {
+            ok('pending: another source\'s row of a queued install removes it, under the id it is queued as',
+                err === null && deployed().join() === 'uninstall dup_app --yes' && comp('dup_app@second').error === null,
+                JSON.stringify([err, deployed(), comp('dup_app@second')]));
+            delete process.env.FAKE_PENDING;
+            return u.refresh().then(() => ask(sock, { op: 'install', id: 'dup_app' })).then(() => installed('dup_app'));
         })
         .then(() => {
             ok('collision: only the source that installed an id updates it; another source\'s newer one is beside it, not installable',
@@ -2393,9 +2404,10 @@ function testUnitServices(certs, pubDir) {
     const priv = (req) => ask(sock, Object.assign({ secret: u.secret }, req));
     const settled = () => until(st, (s) => !s.busy && !s.components.some((c) => c.queued) && !s.sources.some((x) => x.status === 'checking'), 60000, 'settled');
     const cached = (sha) => path.join(state, 'index', 'idx', `${sha}.tgz`);
-    // the deploy tool's last_apply: both_app's install at, ok or not
-    const apply = (at, ok) => JSON.stringify({ at, results: [{ id: 'both_app', action: 'install', version: '1.0.0', ok,
+    // the deploy tool's last_apply: both_app's install (or removal) at, ok or not
+    const apply = (at, ok, action) => JSON.stringify({ at, results: [{ id: 'both_app', action: action || 'install', version: '1.0.0', ok,
         error: ok ? undefined : 'package checksum mismatch at /x', log: [] }, { id: 'mgu-renderd', action: 'install', ok: true, log: [] }] });
+    const seenFile = path.join(state, 'apply-seen.json');
     return u.serve()
         .then(() => u.check())
         .then(() => {
@@ -2428,7 +2440,27 @@ function testUnitServices(certs, pubDir) {
         .then(() => {
             ok('apply: a change the last start failed to apply shows its reason on the row',
                 comp('both_app').error === 'the install at the start of the head unit failed: package checksum mismatch at /x' &&
-                comp('mgu-renderd').error === null, comp('both_app').error);
+                comp('both_app').applyFailed === 'install' && comp('mgu-renderd').error === null && comp('mgu-renderd').applyFailed === null,
+                JSON.stringify(comp('both_app')));
+            return priv({ op: 'uninstall', id: 'both_app' });
+        })
+        .then((err) => {
+            ok('apply: removing an app whose first install failed at the start puts the failure aside, the deploy tool not asked',
+                err === null && !comp('both_app').busy && comp('both_app').error === null && comp('both_app').applyFailed === null &&
+                !comp('both_app').queued && !deployed().length, JSON.stringify([err, comp('both_app'), deployed()]));
+            const again = new Updater(conf);
+            return again.refresh().then(() => again);
+        })
+        .then((again) => {
+            ok('apply: a failure put aside stays aside after a restart of the updater',
+                again.applyError('both_app') === null && JSON.parse(fs.readFileSync(seenFile, 'utf8')).both_app === '2026-10-28T08:00:00.000Z',
+                fs.existsSync(seenFile) && fs.readFileSync(seenFile, 'utf8'));
+            process.env.FAKE_LAST_APPLY = apply('2026-10-28T09:00:00.000Z', false, 'remove');
+            return u.refresh();
+        })
+        .then(() => {
+            ok('apply: a failed removal shows as such', comp('both_app').applyFailed === 'remove' &&
+                /^the removal at the start of the head unit failed/.test(comp('both_app').error || ''), JSON.stringify(comp('both_app')));
             // an install the deploy tool queued for the next start: pending before it is installed, and can be dropped
             process.env.FAKE_PENDING = 'both_app=installs at the next start';
             return u.refresh();
@@ -2464,9 +2496,21 @@ function testUnitServices(certs, pubDir) {
             return u.refresh();
         })
         .then(() => {
+            ok('apply: an app the last start put in place stays pending until MainApp lists it', comp('both_app').pendingReboot === true &&
+                comp('both_app').nextStart === 'install' && comp('both_app').status === 'available' && comp('both_app').error === null,
+                JSON.stringify(comp('both_app')));
+            return priv({ op: 'uninstall', id: 'both_app' }).then((err) => settled().then(() => err));
+        })
+        .then((err) => {
+            ok('apply: an app put in place can be removed through the deploy tool', err === null && deployed().join() === 'uninstall both_app --yes',
+                JSON.stringify([err, deployed()]));
+            fs.writeFileSync(deployLog, '');
+            delete process.env.FAKE_LAST_APPLY;
+            return u.refresh();
+        })
+        .then(() => {
             ok('pending, apply: neither once the deploy tool reports none', comp('both_app').pendingReboot === false &&
                 comp('both_app').nextStart === null && comp('both_app').error === null, JSON.stringify(comp('both_app')));
-            delete process.env.FAKE_LAST_APPLY;
             return ask(sock, { op: 'install', id: 'oap-cardash' });
         })
         .then((err) => {

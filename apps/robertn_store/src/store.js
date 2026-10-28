@@ -212,6 +212,7 @@ class Store extends OnlineApp {
         this._removalRefused = false;
         this._focusedPage = null;       // the page the HMI last gave its focus: a widget state, or 'drawn:<page>'
         this._removeId = null;          // the component the Remove confirm step names
+        this._asked = new Set();        // the ids this Store asked to install or remove, until their run ends
         this._tokenId = null;           // the account the Remove account confirm step names
         /* The sign-in this app started: waiting until the updater reports it
          * pending, or the updater's refusal. */
@@ -725,22 +726,23 @@ class Store extends OnlineApp {
             .catch((err) => logger.warn(`closeState ${name} failed: ${err && err.message}`));
     }
 
-    /* An install that ended (ran: the busy of the state before) with its
-     * component pending a restart, an iDrive 8 app queued for the next start
-     * or a tool that takes effect after a reboot, opens the Restart head unit
-     * confirm step for it, once: while the Store is on screen on its main
-     * page or that component's, with nothing else to install. */
     _restartAfter(ran) {
         const st = this._st;
-        if (!ran || ran.op === 'uninstall' || st.busy || !this._visible || st.rebooting !== false || st.components.some((c) => c.queued)) {
+        const asked = !!ran && !(st.busy && st.busy.id === ran.id) && this._asked.delete(ran.id);
+        if (!asked || (ran.op !== 'install' && ran.op !== 'uninstall') || st.busy || !this._visible || st.rebooting !== false ||
+            st.components.some((c) => c.queued)) {
             return;
         }
         const c = st.components.find((x) => x.id === ran.id);
-        if (!c || !c.pendingReboot || c.error) {
+        if (!c || c.error || c.nextStart !== (ran.op === 'uninstall' ? 'remove' : 'install') || !LISTS[c.kind]) {
             return;
         }
-        const top = this._drawnUi() ? this._drawn.top() : null;
-        if (top && top.name !== 'main' && !(top.name === 'app' && top.id === c.id)) {
+        if (this._drawnUi()) {
+            const top = this._drawn.top();
+            if (top && top.name !== 'main' && !(top.name === 'app' && top.id === c.id)) {
+                return;
+            }
+        } else if (this._focusedPage !== S.main && this._focusedPage !== LISTS[c.kind].state) {
             return;
         }
         logger.info(`${c.id}: restart pending, asking for the restart`);
@@ -848,6 +850,7 @@ class Store extends OnlineApp {
         const row = this._component(id);
         if (row && rowAction(row, this._st.busy) === 'install') {
             logger.info(`install ${row.id} ${row.version}`);
+            this._asked.add(row.id);
             this._send({ op: 'install', id: row.id });
         }
     }
@@ -857,6 +860,7 @@ class Store extends OnlineApp {
         const row = this._component(this._removeId);
         if (row && removable(row, this._st.busy)) {
             logger.info(`uninstall ${row.id}`);
+            this._asked.add(row.id);
             this._privileged({ op: 'uninstall', id: row.id });
         }
     }

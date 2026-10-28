@@ -96,10 +96,13 @@ function rowState(row, busy) {
 }
 
 /* What a press on the row does: install, remove (after a confirm step), or
- * nothing. */
+ * nothing. A removal the last start failed to apply is tried again. */
 function rowAction(row, busy) {
     if ((busy && busy.id === row.id) || row.queued) {
         return null;
+    }
+    if (row.error && row.applyFailed === 'remove') {
+        return removable(row, busy) ? 'remove' : null;
     }
     if (!notForUnit(row) && !row.blocked && (((row.status === 'update' || row.status === 'available') && !startPending(row)) || row.error)) {
         return 'install';
@@ -108,11 +111,12 @@ function rowAction(row, busy) {
 }
 
 /* Whether the component can be removed now (after a confirm step): one
- * installed, or whose install is queued for the next start (the removal
- * drops it); not one whose removal is queued already. */
+ * installed, whose install is queued for the next start (the removal
+ * drops it), or whose change the last start failed to apply (the removal
+ * clears the failure); not one whose removal is queued already. */
 function removable(row, busy) {
-    return row.uninstallable === true && (!!row.installed || row.nextStart === 'install') && row.nextStart !== 'remove' &&
-        !row.queued && !(busy && busy.id === row.id);
+    return row.uninstallable === true && (!!row.installed || row.nextStart === 'install' || !!row.applyFailed) &&
+        row.nextStart !== 'remove' && !row.queued && !(busy && busy.id === row.id);
 }
 
 /* The second column of the start screen's Apps and Head-unit tools rows,
@@ -160,7 +164,7 @@ function statusLine(st, connected, secret) {
     if (st.catalog.error) {
         return `Check failed: ${st.catalog.error}`;
     }
-    const updates = st.components.filter((c) => c.status === 'update' && !notForUnit(c) && !c.blocked).length;
+    const updates = st.components.filter((c) => c.status === 'update' && !notForUnit(c) && !c.blocked && !startPending(c)).length;
     return `${updates ? `${updates} update${updates > 1 ? 's' : ''}` : 'Up to date'}, ${checked}`;
 }
 
