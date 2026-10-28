@@ -54,6 +54,7 @@ static GLboolean (*unmap)(GLenum);
 /* zero-copy */
 static struct { int fd; uint32_t stride; GLuint tex, fbo; EGLImageKHR img; uint8_t *map; } B[MAXBUF];
 static int nbuf, bw, bh;
+static char failed[160];                        /* making the buffers failed: why (not tried again) */
 
 static void current(void) { eglMakeCurrent(dpy, surf, surf, ctx); }
 
@@ -116,7 +117,7 @@ static int alloc_bo(int i, int w, int h, char *why, size_t len)
     }
     struct gbm_bo *bo = gbm.bo_create(dev, (uint32_t)w, (uint32_t)h, FOURCC_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
     if (!bo) { snprintf(why, len, "gbm_bo_create %dx%d XRGB8888 linear failed", w, h); return -1; }
-    B[i].fd = gbm.bo_get_fd(bo);               /* the bo stays: its memory lives as long as the fd and our image */
+    B[i].fd = gbm.bo_get_fd(bo);               /* kept, with the bo and the image, for later connections */
     B[i].stride = gbm.bo_get_stride(bo);
     if (B[i].fd < 0) { snprintf(why, len, "gbm_bo_get_fd failed"); return -1; }
     static PFNEGLCREATEIMAGEKHRPROC create_image;
@@ -158,11 +159,12 @@ static int alloc_bo(int i, int w, int h, char *why, size_t len)
 int embed_gl_buffers(int n, int w, int h, int fd[], uint32_t stride[], char *why, size_t len)
 {
     if (n > MAXBUF) n = MAXBUF;
+    if (failed[0]) { snprintf(why, len, "%s", failed); return -1; }
     if (nbuf && (w != bw || h != bh)) { snprintf(why, len, "buffers made for %dx%d", bw, bh); return -1; }
     current();
     setup();
     for (int i = nbuf; i < n; i++) {
-        if (alloc_bo(i, w, h, why, len) < 0) return -1;
+        if (alloc_bo(i, w, h, why, len) < 0) goto fail;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glGenFramebuffers(1, &B[i].fbo);
@@ -170,17 +172,25 @@ int embed_gl_buffers(int n, int w, int h, int fd[], uint32_t stride[], char *why
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, B[i].tex, 0);
         GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        if (st != GL_FRAMEBUFFER_COMPLETE) { snprintf(why, len, "dmabuf framebuffer incomplete 0x%x", st); return -1; }
+        if (st != GL_FRAMEBUFFER_COMPLETE) { snprintf(why, len, "dmabuf framebuffer incomplete 0x%x", st); goto fail; }
         nbuf = i + 1; bw = w; bh = h;
     }
     for (int i = 0; i < n; i++) { fd[i] = B[i].fd; stride[i] = B[i].stride; }
     return 0;
+fail:                                           /* the buffer being made goes (its GBM object stays), the reason stays */
+    if (B[nbuf].fbo) glDeleteFramebuffers(1, &B[nbuf].fbo);
+    if (B[nbuf].tex) glDeleteTextures(1, &B[nbuf].tex);
+    if (B[nbuf].fd > 0) close(B[nbuf].fd);
+    B[nbuf].fbo = 0; B[nbuf].tex = 0; B[nbuf].fd = 0;
+    snprintf(failed, sizeof failed, "%s", why);
+    return -1;
 }
 
 /* ---------------- drawing ---------------- */
 static int readback_target(int w, int h)
 {
     if (rb_fbo) { glBindFramebuffer(GL_FRAMEBUFFER, rb_fbo); return 0; }
+    if (!read_bgra && !(map_range && unmap) && !(rb_px = malloc((size_t)w * h * 4))) return -1;
     glGenTextures(1, &rb_tex); glBindTexture(GL_TEXTURE_2D, rb_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glGenFramebuffers(1, &rb_fbo); glBindFramebuffer(GL_FRAMEBUFFER, rb_fbo);
@@ -192,7 +202,6 @@ static int readback_target(int w, int h)
         glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)w * h * 4, NULL, GL_STREAM_READ);
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     }
-    if (!read_bgra && !(rb_px = malloc((size_t)w * h * 4))) return -1;
     return 0;
 }
 

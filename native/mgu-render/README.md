@@ -118,8 +118,8 @@ An embed app's frames reach the HMI's compositor one of two ways, decided when m
   PRIME and XRGB8888 on the compositor and dmabuf import (`EGL_EXT_image_dma_buf_import`) in mgu-render's own EGL.
 - **readback**: drawn into an offscreen FBO and read into the compositor's shared memory (`wl_shm`), through a pixel
   buffer when the context is GLES 3. Used when anything zero-copy needs is missing, with `embed_zero_copy = 0`, and
-  after the compositor refused the GPU buffers (a protocol error on `wl_drm`; the next connection, at once, reads
-  back).
+  once the compositor refused the GPU buffers (a protocol error on `wl_drm`) or they could not be made: from then on
+  until mgu-render restarts, reconnecting at once after a refusal.
 
 Both draw top-down and give the same bytes (`test/test_embed.c`). display-bridge's apps write their pixels into the
 shared memory either way. The journal names the path (`embed: zero-copy` or `embed: readback fallback (<why>)`);
@@ -301,7 +301,7 @@ HMI only where the HMI's controller gate is loaded (`info.controller`).
 | Command | What |
 |---|---|
 | `make target` | `build/target/mgu-render`: x86-64, glibc 2.27, loader `/lib/ld-linux-x86-64.so.2`, built in Ubuntu 18.04 (Docker, linux/amd64) |
-| `make check-target` | the binary's architecture, loader, libraries (`libwayland-client`, `libwayland-egl`, `libEGL`, `libGLESv2`, libc, libm) and glibc versions |
+| `make check-target` | the binary's architecture, loader, libraries (`libwayland-client`, `libwayland-egl`, `libEGL`, `libGLESv2`, libc, libm, libdl) and glibc versions |
 | `make test` | in Ubuntu 24.04 with Mesa's llvmpipe (Docker): `test/test_embed.c` (embed's buffer paths against a mock HMI compositor, `test/mock_hmi.c`: zero-copy through `wl_drm` with memfds standing in for dmabufs, readback with and without a pixel buffer, no `wl_drm`, no PRIME, buffers refused; every committed frame's CRC equal to the frame GL drew), `test/test_dialect.c`, `test/test_touch.c` (routing; our table and ports only, in while claimed, out when not and when the renderer dies), `test/test_share.c` (the community socket beside a fake second renderer: handover, restart, take-back, the drop race, foreign sockets kept), `test/test_video.c` (a frame file shorter than its header, the frame file's owner, the video limits), `test/test_hmi.sh` (the page-template script: built at install, only mounted at boot, a refused build not retried, a timeout or signal retried), and `test/replay.sh`: every session in `test/sessions/` (recorded from upstream's and IterioDev's kits, `test/sessions/README.md`) and the synthetic ones (`test/gen_sessions.js`) replayed through the original daemons (`test/reference/`) and mgu-render, every frame compared byte for byte; native pixmaps compared with the same pictures sent as IterioDev pictures; video sessions read frame files in `/dev/shm` and their last frame is checked for the videos' colours; a frame file of another uid is refused |
 | `deploy/hu install mgu-render` | build and install on a unit or the emulator (deploy/README.md) |
 

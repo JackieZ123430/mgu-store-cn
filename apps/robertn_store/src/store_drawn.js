@@ -313,15 +313,9 @@ class Drawn extends EventEmitter {
     }
 
     /* Draws the frame (sent while the renderer is ready and the page is
-     * shown, one at a time) and writes the top host state's proxies. While
-     * the renderer has the frame before, the next one is built on its TICK. */
+     * shown, one at a time) and writes the top host state's proxies. */
     render() {
         if (!this.mode || !this.w) {
-            return;
-        }
-        const now = Date.now();
-        if (this.on_ && this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
-            this.dirty = true;
             return;
         }
         const m = Object.assign(this.host.model(), { stack: this.stack, tab: this.tab, filter: this.filter });
@@ -332,6 +326,11 @@ class Drawn extends EventEmitter {
         this._proxies();
         this._pictures(r.icons);
         if (!this.on_) {
+            return;
+        }
+        const now = Date.now();
+        if (this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
+            this.dirty = true;
             return;
         }
         this.dirty = false;
@@ -367,7 +366,11 @@ class Drawn extends EventEmitter {
             if (t.drag) {
                 this.scroll[t.region.key] = Math.max(0, Math.min(t.region.max, t.from + (t.y - y) / t.region.step));
                 this.focus = -1;
-                this.render();
+                if (this.on_ && this.gpu.waiting) {
+                    this.dirty = true;          // built on the renderer's TICK
+                } else {
+                    this.render();
+                }
             }
         } else if (this.touch && phase === 'up') {
             const t = this.touch;
