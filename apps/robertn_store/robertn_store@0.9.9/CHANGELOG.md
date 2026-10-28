@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.9
+
+Dragging a list builds the drawn frame only when the renderer asks for the
+next one (its TICK), not on every finger move while the renderer still has
+the frame before.
+
 ## 0.9.8
 
 An app install queued for the next start (iDrive 8: MainApp takes the
