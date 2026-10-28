@@ -581,17 +581,19 @@ function recmgrWith(text, addNames, removeNames) {
  * component.json has no crashNames gets the names CRASH_NAMES_BUILTIN
  * gives its id. Only names this tool added (CRASH_OWNED) are ever removed,
  * and other lines and sections round-trip unchanged. A unit without the
- * list has nothing written. A name is at most 15 characters, so it is
- * also the process's comm. */
+ * list has nothing written. A name is a file name of letters, digits and
+ * ._+-; a manifest's other entries are passed over. */
 
 var CRASH_NAMES_BUILTIN = {
     'mgu-uplink': ['mgu-uplink'],
     'mgu-render': ['mgu-render'],
     'mgu-python': ['python3']
 };
-var CRASH_NAME = /^[A-Za-z0-9._+-]{1,15}$/;
+var CRASH_NAME = /^[A-Za-z0-9._+-]{1,255}$/;
 function crashNamesOf(c) {
-    return Array.isArray(c.crashNames) ? c.crashNames : CRASH_NAMES_BUILTIN[c.id] || [];
+    return (Array.isArray(c.crashNames) ? c.crashNames : CRASH_NAMES_BUILTIN[c.id] || []).filter(function (n) {
+        return typeof n === 'string' && CRASH_NAME.test(n);
+    });
 }
 function crashOwned() {
     var o = readJsonOrNull(CRASH_OWNED);
@@ -663,6 +665,8 @@ function crashListSyncQuiet() {
     var plan = crashListPlan(installedTools());
     if (!plan || (!plan.op && JSON.stringify(plan.owned) === JSON.stringify(crashOwned().slice().sort()))) return;
     var mine = LOCK_FILE + '.' + process.pid, out = process.stdout.write;
+    var held = lockState();
+    if (!held.free && !held.live) breakStaleLock();
     try { fs.writeFileSync(mine, process.pid + ' ' + bootId() + '\n', { mode: 0o600 }); fs.linkSync(mine, LOCK_FILE); }
     catch (e) { rmrf(mine); return; }
     rmrf(mine);
@@ -1084,7 +1088,7 @@ function validateTool(file, dir, c) {
     if (c.crashNames !== undefined && (!Array.isArray(c.crashNames) || !c.crashNames.every(function (n) {
         return typeof n === 'string' && CRASH_NAME.test(n);
     }))) {
-        throw refuse(file + ': crashNames is a list of process names, each up to 15 letters, digits or ._+-');
+        throw refuse(file + ': crashNames is a list of process names, each a file name of letters, digits or ._+-');
     }
     if (c.mguProvides !== undefined && !PROVIDES.test(c.mguProvides)) {
         throw refuse(file + ': mguProvides is one lower-case name, e.g. "renderer"');

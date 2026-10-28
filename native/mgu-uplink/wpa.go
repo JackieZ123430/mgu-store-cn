@@ -2,9 +2,9 @@ package main
 
 // The Wi-Fi provider's wpa_supplicant (wifi.go): upstream 2.10 with
 // wpa/wpa-mgu-sme-connect.patch, built by `make target` and installed next
-// to mgu-uplink as wpaBin, a name of our own: the crash handler's restart
-// whitelist lists it, and a crash of it never reboots the unit. It runs on the Wi-Fi interface only, with the saved
-// networks in wpa.conf (update_config: SAVE_CONFIG writes them), and all
+// to mgu-uplink as wpaBin, a name of our own that the crash handler's
+// restart whitelist can list (crashNames). It runs on the Wi-Fi interface
+// only, with the saved networks in wpa.conf (update_config: SAVE_CONFIG writes them), and all
 // talk goes over its control socket. Any other wpa_supplicant on the unit
 // (the stock one CarPlay uses) is never touched.
 

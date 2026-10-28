@@ -2938,8 +2938,20 @@ function testCrashList() {
         r.out.includes('crash handler whitelist: removed mgu-uplink, mgu-wpa'), r.out);
     r = root.run(['uninstall', 'mgu-render', '--yes']);
     check('crash list: with none of ours left the file is as it was', r.status === 0 && fs.readFileSync(list, 'utf8') === CRASH_LIST, r.out);
-    r = root.run(['install', '--artifact', namedTool('mgu-uplink', '0.8.1', (c) => { c.crashNames = ['mgu-uplink-and-more']; }), '--yes']);
-    check('crash list: a name over 15 characters is refused', r.status === 2 && r.out.includes('crashNames'), r.out);
+    r = root.run(['install', '--artifact', namedTool('mgu-uplink', '0.8.1', (c) => { c.crashNames = ['mgu uplink']; }), '--yes']);
+    check('crash list: a name that is not a plain file name is refused', r.status === 2 && r.out.includes('crashNames'), r.out);
+    // a manifest an older deploy tool installed as it came: its bad names are passed over
+    r = root.run(['install', '--artifact', namedTool('long-names', '0.1.0', (c) => { c.crashNames = ['robertn-logger-enet']; }), '--yes']);
+    const manifestFile = root.p('var/opt/long-names/current/component.json');
+    const m = readJson(manifestFile);
+    m.crashNames.push(' x', '[Other]');
+    fs.writeFileSync(manifestFile, JSON.stringify(m));
+    const r1 = root.run(['status', '--json']), text1 = fs.readFileSync(list, 'utf8');
+    const r2 = root.run(['status', '--json']);
+    check('crash list: a long file name is listed; bad names in an installed manifest are skipped, status settles',
+        r.status === 0 && r1.status === 0 && r2.status === 0 && text1 === CRASH_LIST.replace('socat\n', 'socat\nrobertn-logger-enet\n') &&
+        fs.readFileSync(list, 'utf8') === text1, r.out + r1.out + r2.out + text1);
+    root.run(['uninstall', 'long-names', '--yes']);
 
     // a tool installed while the list was absent: nothing written; status catches up once it is there
     const bare = fakeRoot();
@@ -2952,7 +2964,8 @@ function testCrashList() {
     r = bare.run(['status', '--json']);
     check('crash list: status leaves it while another run holds the lock',
         r.status === 0 && fs.readFileSync(bareList, 'utf8') === '[Whitelist]\r\nnode\r\n', r.out);
-    fs.unlinkSync(bare.p('var/opt/mgu-deploy/lock'));
+    // a lock from an earlier boot is stale
+    write(bare.p('var/opt/mgu-deploy/lock'), '1 boot-0\n');
     const before = fs.readdirSync(bare.p('var/opt/mgu-deploy/backups')).length;
     r = bare.run(['status', '--json']);
     let json = null;

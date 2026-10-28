@@ -1050,7 +1050,7 @@ there). A tool lists the file names of the programs it runs in
 "crashNames": ["mgu-uplink", "mgu-wpa"]
 ```
 
-each up to 15 letters, digits or `._+-` (a longer one is refused). A name the
+each a file name of letters, digits or `._+-` (other names are refused). A name the
 car's own programs use (`sh`, `wpa_supplicant`, `dbus-send`) does not belong
 there: give the program a name of its own instead. A tool without
 `crashNames` gets the names this tool knows for it: `mgu-uplink`,
