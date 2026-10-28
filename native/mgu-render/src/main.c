@@ -138,7 +138,8 @@ typedef struct client {
     FILE *rec;
     int started;            /* a message has come: a DBR1 session is told by its first four bytes */
     /* a display-bridge app (DIALECT_DBR): shown in img (logical px); in the HMI's box its picture px (and lut for
-       INDEX8) is written straight into the compositor's buffer, on a layer it is pixmap 1. Of its frames one waits to
+       INDEX8) is made on the CPU into the compositor's buffer (with GPU buffers: drawn into one by GL), on a layer it is
+       pixmap 1. Of its frames one waits to
        be drawn (pending), one drawn waits to be committed (embed: prepared), one committed waits for the
        compositor (committed); each is answered PRESENTED or DROPPED */
     struct {
@@ -541,7 +542,7 @@ static void render_embed(void) {
     if (b >= 0) {
         c->last_draw = t0;
         int w = cfg.embed_area[2], h = cfg.embed_area[3];
-        if (dbr) {                                         /* pixels only: no GPU work beside the HMI's */
+        if (dbr) {                                         /* made on the CPU (shared memory: written straight in) */
             static uint8_t *scratch;
             int img[4] = { (int)c->dbr.img[0], (int)c->dbr.img[1], (int)c->dbr.img[2], (int)c->dbr.img[3] };
             int gpu = embed_gpu_index(b);

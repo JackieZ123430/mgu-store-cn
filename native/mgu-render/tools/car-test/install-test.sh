@@ -240,7 +240,7 @@ cmd_restore() {
 		local have want now
 		want=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).restore.filter((r) => r.id === "robertn_store")[0].version)' "$TEST/plan.json")
 		now=$(mktemp /tmp/mgu-car-test-now.XXXXXX)
-		on_unit "sh $DEPLOY status --json" >"$now" || die "could not read the unit's status; run restore again"
+		on_unit "sh $DEPLOY status --json" >"$now" || { rm -f "$now"; die "could not read the unit's status; run restore again"; }
 		have=$(node "$KIT/kit.js" versions "$now" | sed -n 's/^robertn_store //p')
 		rm -f "$now"
 		if [ -n "$have" ] && [ "$have" != - ] && [ "$have" != "$want" ]; then

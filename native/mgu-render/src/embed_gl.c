@@ -267,6 +267,7 @@ int embed_gl_write(int gpu, const uint8_t *px, int w, int h)
     }
     current();
     setup();
+    while (glGetError() != GL_NO_ERROR) {}             /* only this write's errors count below */
     pc.upstream_ops = 1;
     if (gfx_image_upstream(&pc, 1, w, h, rgba) < 0) { log_warn("embed: %s", gfx_error()); return -1; }
     float f[4] = { 0, 0, (float)w, (float)h };
@@ -276,7 +277,9 @@ int embed_gl_write(int gpu, const uint8_t *px, int w, int h)
     gfx_xf xf = { 1, 0, 0 };
     gfx_draw(&pc, &xf, w, h, ops, 7, GFX_CLEAR | GFX_TOP_DOWN);
     embed_gl_end(gpu, NULL, w, h);
-    return glGetError() == GL_NO_ERROR ? 0 : -1;
+    GLenum e = glGetError();
+    if (e != GL_NO_ERROR) log_warn("embed: drawing pixels into a GPU buffer: GL error 0x%x", e);
+    return e == GL_NO_ERROR ? 0 : -1;
 }
 
 void embed_gl_resolve(void)
