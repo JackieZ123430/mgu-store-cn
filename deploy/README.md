@@ -1447,7 +1447,14 @@ whole iDrive 8 path:
   from an iDrive 8 donor;
 - the renderer and tether units as written here (a renderer the App
   Manager installed is refused here; remove it there first);
-- MainApp-21's process command line holding `oap-mainapp21/src/main.js`
+- MainApp-21 running as node with `oap-mainapp21/src/main.js` as its script
   (`apply-pending` refuses while it runs, by that);
+- live changes: the car's MainApp-21 build carrying the copy's three
+  anchors once each (else every change queues), `mgu-app-fallback.service`
+  binding the copy before oapcontroller, MainApp-21 announcing the hook,
+  and a live install, update and uninstall showing and removing the tile
+  with a working keychain, ACLs and appletId; the das lines making the app
+  MainApp-21's again at the next start; and no corruption handling in
+  oapcontroller's log around a live change;
 - MainApp-21 supplying `oap-sdk` to an npm package that names it in
   `dependencies` without shipping it (IterioDev's packages do so).
