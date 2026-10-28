@@ -182,6 +182,21 @@ static int run(const struct scenario *sc, const char *mock)
         drawn++;
         pump(0);
     }
+    /* zero-copy: a frame written on the CPU (a display-bridge app's pixels) goes into a GPU buffer too */
+    uint32_t pix_crc = 0;
+    if (embed_zero_copy()) {
+        uint8_t *px = malloc((size_t)W * H * 4);
+        for (size_t i = 0; i < (size_t)W * H; i++) { px[i * 4] = (uint8_t)i; px[i * 4 + 1] = (uint8_t)(i >> 8); px[i * 4 + 2] = (uint8_t)(i / W); px[i * 4 + 3] = 255; }
+        pix_crc = crc32_rgb(px, W, H);
+        int b = -1;
+        for (int t = 0; t < 100 && (b = embed_buffer(1)) < 0; t++) pump(20);
+        CHECK(b >= 0 && embed_gl_write(embed_gpu_index(b), px, W, H) == 0, "%s: pixels written into a GPU buffer", sc->name);
+        embed_filled();
+        for (int t = 0; t < 100 && !embed_can_commit(); t++) pump(20);
+        embed_commit();
+        drawn++;
+        free(px);
+    }
     for (int t = 0; t < 100 && frames_done < drawn; t++) pump(20);
     CHECK(frames_done == drawn, "%s: %d frame callbacks for %d commits", sc->name, frames_done, drawn);
     embed_disconnect();
@@ -194,13 +209,14 @@ static int run(const struct scenario *sc, const char *mock)
         char what[8]; int w, h; unsigned crc;
         if (!strncmp(line, "VIOLATION", 9)) { printf("     %s", line); viol++; continue; }
         if (sscanf(line, "commit %7s %d %d %x", what, &w, &h, &crc) != 4) continue;
-        if (k >= FRAMES || strcmp(what, kind) || w != W || h != H || crc != ref[k]) {
-            printf("     frame %d: %s %dx%d %08x, expected %s %08x\n", k, what, w, h, crc, kind, k < FRAMES ? ref[k] : 0);
+        uint32_t want = k < FRAMES ? ref[k] : pix_crc;
+        if (k > FRAMES || (k == FRAMES && !pix_crc) || strcmp(what, kind) || w != W || h != H || crc != want) {
+            printf("     frame %d: %s %dx%d %08x, expected %s %08x\n", k, what, w, h, crc, kind, want);
             bad++;
         }
         k++;
     }
-    CHECK(k == FRAMES && !bad, "%s: %d %s frames, each as GL drew it", sc->name, k, kind);
+    CHECK(k == FRAMES + (pix_crc != 0) && !bad, "%s: %d %s frames, each as drawn", sc->name, k, kind);
     CHECK(!viol, "%s: buffers attached only when free, dmabufs fit", sc->name);
     fclose(mo);
     rmdir(dir);

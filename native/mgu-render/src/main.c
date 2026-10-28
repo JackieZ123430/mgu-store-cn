@@ -521,7 +521,10 @@ static void render_layer(client *c) {
 
 /* ---------------- embed: drawn into the HMI compositor's buffer (embed.h, embed_gl.h) ---------------- */
 
-/* A frame is drawn as soon as the buffers allow and committed at the compositor's next frame callback. A display-bridge
+/* With GPU buffers every frame goes into them, a display-bridge app's pixels too (written on the CPU into the mapped
+   dmabuf): the HMI's compositor shows a GPU buffer with red and blue swapped once the same surface id has shown a
+   shared-memory one in that HMI run (emulator; the HMI's own compositing), so the two are not mixed.
+   A frame is drawn as soon as the buffers allow and committed at the compositor's next frame callback. A display-bridge
    app's frame is drawn over the one drawn but not committed yet, if there is one. Another app's frame (a GL draw)
    waits for the compositor's frame callback; with tick_early it is drawn while the compositor still has the one
    before, when no drawn frame waits, and the app is asked for its next frame (TICK) once its last one is drawn and
@@ -533,14 +536,19 @@ static void render_embed(void) {
     int dbr = c->dialect == DIALECT_DBR;
     int draw = c->dirty && !cap_wait(c, t0) &&
                (dbr || !embed_waiting() || (cfg.tick_early && embed_ready() < 0));
-    int b = draw ? embed_buffer(!dbr && embed_zero_copy()) : -1;
+    static int pixels_shm;                                 /* mapping a GPU buffer failed: pixels go to shared memory */
+    int b = draw ? embed_buffer(embed_zero_copy() && !(dbr && pixels_shm)) : -1;
     if (b >= 0) {
         c->last_draw = t0;
         int w = cfg.embed_area[2], h = cfg.embed_area[3];
         if (dbr) {                                         /* pixels only: no GPU work beside the HMI's */
+            static uint8_t *scratch;
             int img[4] = { (int)c->dbr.img[0], (int)c->dbr.img[1], (int)c->dbr.img[2], (int)c->dbr.img[3] };
+            int gpu = embed_gpu_index(b);
             embed_gl_cancel();
-            dbr_blit(embed_pixels(b), w, h, img, c->dbr.px, (int)c->dbr.w, (int)c->dbr.h, c->dbr.format, c->dbr.lut);
+            if (gpu >= 0 && !scratch && !(scratch = malloc((size_t)w * h * 4))) return;
+            dbr_blit(gpu >= 0 ? scratch : embed_pixels(b), w, h, img, c->dbr.px, (int)c->dbr.w, (int)c->dbr.h, c->dbr.format, c->dbr.lut);
+            if (gpu >= 0 && embed_gl_write(gpu, scratch, w, h) < 0) { pixels_shm = 1; return; }
         } else {
             int gpu = embed_gpu_index(b), flags = embed_gl_begin(gpu, w, h);
             if (flags < 0) return;

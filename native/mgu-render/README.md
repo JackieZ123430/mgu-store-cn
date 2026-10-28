@@ -121,8 +121,10 @@ An embed app's frames reach the HMI's compositor one of two ways, decided when m
   once the compositor refused the GPU buffers (a protocol error on `wl_drm`) or they could not be made: from then on
   until mgu-render restarts, reconnecting at once after a refusal.
 
-Both draw top-down and give the same bytes (`test/test_embed.c`). display-bridge's apps write their pixels into the
-shared memory either way. The journal names the path (`embed: zero-copy` or `embed: readback fallback (<why>)`);
+Both draw top-down and give the same bytes (`test/test_embed.c`). display-bridge's apps' pixels are written on the
+CPU into whichever kind is in use (a GPU buffer mapped while zero-copy): the HMI's compositor shows a GPU buffer with
+red and blue swapped once the same surface id has shown a shared-memory buffer in that HMI run (seen in the
+emulator), so one renderer never mixes the two; switching mgu-render between them needs an HMI restart in between. The journal names the path (`embed: zero-copy` or `embed: readback fallback (<why>)`);
 apps see it in X_READY's caps (32) and STATS' fourth word.
 
 ## display-bridge's apps
