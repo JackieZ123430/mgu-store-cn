@@ -1791,7 +1791,7 @@ function installTool(a, state, tx) {
     tx.versionExisted = fs.existsSync(dest); tx.socketsActive = {};
     /* A current that is no link (a folder an earlier installer left, e.g.
      * app-privacy 1.5.0's) cannot be replaced by rename: it goes aside, and
-     * a rollback puts it back. It goes once the new version is up. */
+     * a rollback puts it back. It goes once the install is through. */
     var curStat = lstatOrNull(path.join(root, 'current'));
     tx.legacy = null;
     if (curStat && !curStat.isSymbolicLink()) {
@@ -1906,7 +1906,6 @@ function installTool(a, state, tx) {
     fs.readdirSync(versions).forEach(function (v) {
         if (v !== c.version && v !== before) rmrf(path.join(versions, v));
     });
-    if (tx.legacy) rmrf(tx.legacy);
     say(c.id + ' ' + c.version + ' installed');
 }
 /* A tool's postInstall: its script (one of its files) with the arguments
@@ -1957,6 +1956,9 @@ function rollbackTool(a, tx, backup, e, state) {
         if (currentTarget(tx.root) !== null) rmrf(path.join(tx.root, 'current'));
         rmrf(path.join(tx.root, 'current.new'));
         if (!tx.versionExisted) rmrf(path.join(tx.root, 'versions', c.version));
+        if (tx.legacy) {
+            try { fs.rmdirSync(path.join(tx.root, 'versions')); } catch (e2) { /* holds other versions */ }
+        }
         if (tx.legacy && fs.existsSync(tx.legacy)) {
             fs.renameSync(tx.legacy, path.join(tx.root, 'current'));
             say(c.id + ': the earlier install\'s current folder is back');
@@ -3643,6 +3645,7 @@ function amRenderer(state, stage) {
         productName: 'GPU renderer', mguService: 'renderer' }, null, 2) + '\n');
     var a = validateService(r.bin, dir, pkgDir, readJson(path.join(pkgDir, 'package.json'))), tx = {};
     installTool(a, state, tx);
+    if (tx.legacy) rmrf(tx.legacy);
     return r.version;
 }
 /* Takes over: see the section's comment. Run under the lock, inside the
@@ -4663,6 +4666,8 @@ function cmdInstall(args) {
                 else if (id8) installAppId8(a, state, decisions[a.id], backup);
                 else installApp(a, state, decisions[a.id]);
                 syncDropIns();
+                /* a tool's earlier current folder stays until here, for a rollback */
+                if (tx.legacy) rmrf(tx.legacy);
                 endAppRecord(state, a.id);
                 done.push(a.id + ' ' + a.version);
             } catch (e) {

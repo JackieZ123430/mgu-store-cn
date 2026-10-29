@@ -2186,7 +2186,7 @@ function testLegacyCurrent() {
     cur = legacy(root);
     r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
     check('legacy current: a failed install puts the folder back as current, with no current.new or version left',
-        r.status === 1 && isBack(root, cur) && !fs.existsSync(path.join(root.tool('fixture-tool'), 'versions/0.2.0')) &&
+        r.status === 1 && isBack(root, cur) && fs.readdirSync(root.tool('fixture-tool')).join(' ') === 'current' &&
         r.out.includes('current folder is back'), r.out);
 
     root = fakeRoot({ recmgr: ['fixture-tool'] });

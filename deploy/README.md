@@ -1161,7 +1161,9 @@ gone, or from an earlier boot, is taken over. `status`, `check`, `backups`
 `fallback status` and `sdk-donor` take no lock. Holding the lock, a changing command
 first removes what a killed run left: files named after a process that is
 gone (staging, rootfs-window and temp files, a tool's unfinished version
-folder) and `/var/opt/mgu-deploy-kit-<n>` folders a day old.
+folder) and `/var/opt/mgu-deploy-kit-<n>` folders a day old. A tool's earlier
+`current` folder such a run set aside comes back as `current` when there is
+none, else it is removed.
 
 `restore [name]` (default `stock`) first snapshots the current state, then
 puts every recorded file back, removes what the snapshot shows as absent
