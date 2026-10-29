@@ -963,6 +963,19 @@ function testQueueFirst() {
     check('queue first: MainApp\'s log says what moved',
         (r.log || []).join('|') === 'mgu-deploy: install our_app queued ahead of 5 other install(s)|' +
             'mgu-deploy: install their_app queued ahead of 5 other install(s)', JSON.stringify(r.log));
+    /* ten of ours at once, one of them failing with a network error */
+    const ten = Array.from({ length: 10 }, (x, i) => `app_${i}`);
+    write(list, JSON.stringify(ten.reduce((o, id) => Object.assign(o, { [id]: {} }), {})));
+    const r10 = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, 'built.js'), ten.join(','), 'app_4'],
+        { encoding: 'utf8' });
+    let t = {};
+    try { t = JSON.parse(r10.stdout); } catch (e) { t = { error: r10.stdout + r10.stderr }; }
+    const ran10 = t.ran || [];
+    check('queue first: ten of ours at once run right behind the one running, in their order',
+        JSON.stringify(ran10.slice(2, 12)) === JSON.stringify(ten), JSON.stringify(t));
+    check('queue first: one of ours that fails is queued again at the end, not first again',
+        (ran10.indexOf('app_4', 7) < 0 || ran10.indexOf('app_4', 7) > 16) && ran10.slice(12, 17).every((a) => /^bmw_/.test(a)) &&
+        ten.filter((a) => a !== 'app_4').every((a) => t.done && t.done[a] < 400), JSON.stringify(t));
     write(list, '{}');
     const s = run('built.js');
     check('queue first: an app custom_apps.json no longer lists waits its turn', late(s, 'our_app') && !(s.log || []).length,

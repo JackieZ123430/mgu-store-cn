@@ -63,8 +63,10 @@ var HOOK_ANCHOR = 'isMainapp&&section===mainAppSection&&(newProvisioning.';
 var INPLACE_MARK = '/* mgu-deploy in-place install */';
 var INPLACE_ANCHOR = 'mainApp.init()}).then(()=>{';
 var FIRST_MARK = '/* mgu-deploy apps first */';
-/* the end of makeMethodQueued's exports, where its queues are in scope */
-var QUEUE_ANCHOR = 'exports.getCurrentOperationPromise=getCurrentOperationPromise';
+/* the end of MainApp's own makeMethodQueued module (utils/makeMethodQueued, the one the
+ * controller requires; oap-sdk's copy of it is another module), where its queues are in scope */
+var QUEUE_ANCHOR = 'module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,' +
+    'getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};';
 /* AppManagementController's constructor, which queues its installs and updates */
 var CONTROLLER_ANCHOR = 'this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)';
 
@@ -221,8 +223,8 @@ function inplaceSource(requestPath, statusPath, v) {
         '})' + v.args + '}catch(e){}' + INPLACE_MARK + ';';
 }
 
-/* Our apps first in AppManagementController's queue (iDrive 7). The queue
- * module gets global.__mguDeployFirst(controller, queued): it wraps the
+/* Our apps first in AppManagementController's queue (iDrive 7). MainApp's
+ * own queue module gets global.__mguDeployFirst(controller, queued): it wraps the
  * controller's queued queuedRecursiveRetry, which every install and update
  * goes through (start-up, provisioning, the in-place hook, a failed try
  * queued again). A call for an app custom_apps.json lists (read at each
@@ -231,20 +233,22 @@ function inplaceSource(requestPath, statusPath, v) {
  * the entry running is never touched. When it runs, the controller's
  * network-retry count is 0, so it does not wait out the delay another
  * app's failures left (install() and update() clear only a delay already
- * under way). Nothing in it throws into the manager: on any error the
+ * under way). Only a call's first entry moves: one of ours that fails and
+ * is queued again (the same options) goes to the end with MainApp's own
+ * delay, so it cannot keep the others waiting. Nothing in it throws into the manager: on any error the
  * call stays where MainApp put it. */
 function firstSources(listPath) {
-    return { queue: ',global.__mguDeployFirst=(ctl,queued)=>function(resolve,reject,options){' +
+    return { queue: 'try{global.__mguDeployFirst=(ctl,queued)=>function(resolve,reject,options){' +
         'const p=queued.apply(this,arguments);' +
-        'try{const app=options&&options.appId;if("string"!=typeof app)return p;' +
+        'try{const app=options&&options.appId;if("string"!=typeof app||options.__mguDeployFirst)return p;' +
         'let ours;try{ours=JSON.parse(require("fs").readFileSync(' + JSON.stringify(listPath) + ',"utf8"))}catch(e){return p}' +
         'if(!ours||"object"!=typeof ours||!Object.prototype.hasOwnProperty.call(ours,app))return p;' +
         'const q=getQueueDataForContext(ctl).queue,i=q.findIndex(x=>x.promise===p);if(i<1)return p;' +
         'const it=q[i],fn=it.fn;let at=1;for(;at<i&&q[at].__mguDeployFirst;)at++;' +
-        'it.__mguDeployFirst=!0,it.fn=()=>(ctl.retries=0,fn()),' +
+        'options.__mguDeployFirst=!0,it.__mguDeployFirst=!0,it.fn=()=>(ctl.retries=0,fn()),' +
         'at<i&&(q.splice(i,1),q.splice(at,0,it),' +
         'logger.info(`mgu-deploy: ${options.method} ${app} queued ahead of ${i-at} other install(s)`))' +
-        '}catch(e){}return p}' + FIRST_MARK,
+        '}catch(e){}return p}}catch(e){}' + FIRST_MARK + ';',
         controller: ',global.__mguDeployFirst&&(this.queuedRecursiveRetry=' +
             'global.__mguDeployFirst(this,this.queuedRecursiveRetry))' + FIRST_MARK };
 }

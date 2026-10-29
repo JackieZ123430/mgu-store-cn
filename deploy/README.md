@@ -1233,11 +1233,13 @@ each call) moves from the end of the queue to right behind the call
 running and the ones of ours before it, and runs with the retry count at
 0. The call running is never touched, so ours waits for one BMW try at
 most. MainApp logs `mgu-deploy: install <app> queued ahead of <n> other
-install(s)`. It needs two anchors exactly once, the end of the queue
-module's exports and the controller's queued method:
+install(s)`. It needs two anchors exactly once, the end of MainApp's own
+queue module (`utils/makeMethodQueued`, which the controller requires;
+oap-sdk's copy in the same bundle is another module with other queues) and
+the controller's queued method:
 
 ```
-exports.getCurrentOperationPromise=getCurrentOperationPromise
+module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};
 this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)
 ```
 
