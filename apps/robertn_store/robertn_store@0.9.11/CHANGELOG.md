@@ -13,8 +13,8 @@ Store is hidden. Another page ends a drag, and its first frame waits up to
 whole pixels, where a press then finds them. A new state from the updater
 or a picture decoded during a drag waits for its release (pictures redraw
 the cached rows); a state the page shows already builds nothing. The Store
-asks the renderer for up to 60 frames a second (`fps.robertn_store` in
-mgu-render.conf sets another). While mgu-render's
+asks the renderer for up to 60 frames a second (mgu-render 0.6.2's
+`fps.robertn_store` setting gives it another). While mgu-render's
 stats-log is on, the Store's line also splits its builds into model and
 layout and counts the drag frames, and each step of its frames and touches
 goes to `/dev/shm/robertn_store-trace.log` beside mgu-render's trace.
