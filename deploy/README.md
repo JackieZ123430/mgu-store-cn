@@ -663,7 +663,10 @@ folders 0755) and `current` switches to it by rename. Once it is up, only the
 new version and the one `current` pointed to before stay; others are
 removed. Units, enablement links and the recmgr list change only when their
 bytes differ, then `systemctl daemon-reload`. Reinstalling the same artifact
-changes nothing but adding a snapshot.
+changes nothing but adding a snapshot. A `current` that is a folder (an
+earlier installer's) goes aside for the install and is removed once the new
+version is up; a failed install puts it back as `current`, the way it returns
+to a previous version.
 
 **Drop-ins.** `dropins[{unit, name}]` adds a drop-in to a unit the tool does
 not own, such as `hmi.service`: `/etc/systemd/system/<unit>.d/<name>` (the
@@ -723,7 +726,7 @@ makes its HMI page template this way.
 failed one does not. When the check fails, `current` returns to the previous
 version, the snapshot puts units and the recmgr list back, the unit restarts
 on the previous version and is checked again (the result is printed), and
-the install exits 1. With no previous version, the new one stays current,
+the install exits 1. With no previous version or folder, the new one stays current,
 reported as not healthy, exit 1.
 
 `uninstall <id>` stops the tool's running units (when recmgr has loaded
@@ -1158,7 +1161,9 @@ gone, or from an earlier boot, is taken over. `status`, `check`, `backups`
 `fallback status` and `sdk-donor` take no lock. Holding the lock, a changing command
 first removes what a killed run left: files named after a process that is
 gone (staging, rootfs-window and temp files, a tool's unfinished version
-folder) and `/var/opt/mgu-deploy-kit-<n>` folders a day old.
+folder) and `/var/opt/mgu-deploy-kit-<n>` folders a day old. A tool's earlier
+`current` folder such a run set aside comes back as `current` when there is
+none, else it is removed.
 
 `restore [name]` (default `stock`) first snapshots the current state, then
 puts every recorded file back, removes what the snapshot shows as absent
