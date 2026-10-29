@@ -152,9 +152,9 @@ through:
 - an Android phone with USB tethering;
 - an iPhone with Personal Hotspot on, kept unlocked (tap **Trust** when
   asked); its USB music playback stops while it tethers;
-- Wi-Fi, such as a phone's hotspot: Settings → **Wi-Fi**. On iDrive 7 the
-  car's own hotspot and wireless CarPlay keep working beside it, and
-  WPA3-only networks can't be joined.
+- Wi-Fi, such as a phone's hotspot: Settings → **Wi-Fi**. The car's own
+  hotspot and wireless CarPlay keep working beside it. On iDrive 7 units
+  with a Broadcom radio, WPA3-only networks can't be joined.
 
 The Store shows `Online` once connected.
 
