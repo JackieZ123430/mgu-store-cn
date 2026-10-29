@@ -203,8 +203,8 @@ func TestWiFiProvider(t *testing.T) {
 	p.setEnabled(false)
 	waitWiFi(t, p, "off again", func(st wifiStatus) bool { return st.Link == "off" })
 	// off: not used, the radio left on for the stock system
-	if v, _ := readSysctl(soft); v != "0" || p.wpa.isRunning() || p.guarding() || exists(p.record) {
-		t.Fatalf("after off: radio soft block %q, supplicant running %v, guarding %v", v, p.wpa.isRunning(), p.guarding())
+	if v, _ := readSysctl(soft); v != "0" || p.mgu.isRunning() || p.guarding() || exists(p.record) {
+		t.Fatalf("after off: radio soft block %q, supplicant running %v, guarding %v", v, p.mgu.isRunning(), p.guarding())
 	}
 	p.stop()
 	stopped = true
@@ -297,7 +297,7 @@ func TestWiFiEscapes(t *testing.T) {
 		t.Fatalf("wpa.conf:\n%s", b)
 	}
 	p.reqMu.Lock()
-	p.wpa.stop()
+	p.mgu.stop()
 	p.reqMu.Unlock()
 	waitWiFi(t, p, "joined after a restart", func(st wifiStatus) bool {
 		return st.Link == "connected" && st.SSID == quoted && len(st.Saved) == 2
@@ -412,7 +412,7 @@ func TestWiFiKeptOnCheckError(t *testing.T) {
 	dbusErr, iftypeErr = nil, errors.New("nl80211: busy")
 	mu.Unlock()
 	time.Sleep(4 * wifiOwnRecheck)
-	if st := p.status(); st.Link != "idle" || !p.guarding() || !p.wpa.isRunning() {
+	if st := p.status(); st.Link != "idle" || !p.guarding() || !p.mgu.isRunning() {
 		t.Fatalf("given back on a failed check: %+v", st)
 	}
 }
@@ -445,7 +445,7 @@ func TestWiFiTakenBack(t *testing.T) {
 	p.start()
 	defer p.stop()
 	waitWiFi(t, p, "taken", func(st wifiStatus) bool { return st.Link == "idle" })
-	if !p.guarding() || !p.wpa.isRunning() {
+	if !p.guarding() || !p.mgu.isRunning() {
 		t.Fatal("not taken")
 	}
 	other := filepath.Join(p.proc, "88", "cmdline")
@@ -454,7 +454,7 @@ func TestWiFiTakenBack(t *testing.T) {
 		return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, "hostapd runs on wlant0")
 	})
 	gaveBack := time.Now()
-	if p.guarding() || p.wpa.isRunning() || len(supplicants(p.proc, "", c.wpaConf())) != 0 {
+	if p.guarding() || p.mgu.isRunning() || len(supplicants(p.proc, "", c.wpaConf())) != 0 {
 		t.Fatalf("still held: %+v", st)
 	}
 	if r := record(); !r.GivenBack || r.Link.WasUp {
@@ -550,7 +550,7 @@ func TestWiFiUnavailable(t *testing.T) {
 		waitWiFi(t, p, step.why, func(st wifiStatus) bool {
 			return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, step.why)
 		})
-		if v, _ := readSysctl(soft); v != "1" || p.guarding() || p.wpa.isRunning() {
+		if v, _ := readSysctl(soft); v != "1" || p.guarding() || p.mgu.isRunning() {
 			t.Fatalf("%s: took the interface", step.why)
 		}
 		if err := p.scan(); err == nil || !strings.Contains(err.Error(), step.why) {
@@ -575,7 +575,7 @@ func TestWiFiNoRadio(t *testing.T) {
 	waitWiFi(t, p, "no radio", func(st wifiStatus) bool {
 		return st.Link == "unavailable" && st.Error != nil && *st.Error == "no Wi-Fi radio (wlant0)"
 	})
-	if exists(soft) || p.guarding() || p.wpa.isRunning() {
+	if exists(soft) || p.guarding() || p.mgu.isRunning() {
 		t.Fatal("took something without a radio")
 	}
 }
@@ -604,7 +604,7 @@ func TestWiFiBackoff(t *testing.T) {
 		}
 		return st.Link == "failed" && st.Error != nil && !strings.Contains(*st.Error, "trying again")
 	})
-	if !strings.Contains(*st.Error, "wpa_supplicant ended") || p.guarding() || p.wpa.isRunning() {
+	if !strings.Contains(*st.Error, "wpa_supplicant ended") || p.guarding() || p.mgu.isRunning() {
 		t.Fatalf("failed: %s, guarding %v", *st.Error, p.guarding())
 	}
 	// the waits double; the interface was taken once for the run

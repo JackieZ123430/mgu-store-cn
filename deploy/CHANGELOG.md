@@ -1,9 +1,13 @@
 # Deploy tool changelog
 
-## 0.6.4
+## 0.6.5
 
 - A tool whose `current` is a folder, not a link (app-privacy 1.5.0 as an earlier installer left it), installs: the folder goes aside as `current.legacy-<pid>`, and a rollback of that install puts it back as `current`, with no `current.new` left.
 - An app update lists the app enabled and allowed in `custom_apps.json` even when its registry entry caches `-enabled` and `-allowed` false (an app provisioning once dropped), so the app manager installs it.
+
+## 0.6.4
+
+- iDrive 7: our apps go first in MainApp's install queue. The fallback copy of `main.js` runs an install or update of an app `custom_apps.json` lists right behind the one running, ahead of BMW's online apps that MainApp retries at every start without ConnectedDrive, and without the doubling retry wait they leave. The app manager runs it from its next start; a `main.js` without its anchors gets a copy without it.
 
 ## 0.6.3
 

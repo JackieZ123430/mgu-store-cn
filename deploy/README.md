@@ -1216,6 +1216,27 @@ mainApp.init()}).then(()=>{
 When that anchor does not occur exactly once, the copy is built without
 the hook and the build says so; app installs then go through a bounce.
 
+On iDrive 7 the copy also puts our apps first in MainApp's install queue.
+MainApp runs every install and update through one queue in
+`AppManagementController`, one at a time. Without ConnectedDrive it retries
+BMW's online apps there at every start, and each failure doubles the wait
+(from 40 s) before the next call, whichever app it is for. In the copy, a
+call for an app `custom_apps.json` lists moves to right behind the call
+running (ours keep their order) and runs without the leftover wait; a
+retry of one of ours after a network error goes to the end, as MainApp
+queues it. MainApp logs `mgu-deploy: install <app> queued ahead of <n>
+other install(s)`. It needs these two anchors exactly once, the end of
+MainApp's own `utils/makeMethodQueued` and the controller's queued method:
+
+```
+module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};
+this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)
+```
+
+Without them the copy is built without it and the build says so. The
+manager runs it from its next start: the boot unit's build, or the build
+this tool writes before it restarts the manager.
+
 The copy, with the app-privacy patch applied to it, is `/var/opt/mgu-deploy/main.js`,
 bind-mounted over the stock file; a rebuild unmounts the old copy, builds
 from the stock file and binds the copy again, rewritten only when its bytes
