@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -129,6 +130,7 @@ type wifiProvider struct {
 	mu        sync.Mutex
 	enabled   bool
 	owned     bool // the radio and the interface are ours
+	ownedIdx  int  // the interface's index when taken
 	st        wifiStatus
 	joining   string
 	joinNew   bool // joining a network that was not saved
@@ -274,6 +276,18 @@ func (p *wifiProvider) up(st *wifiStatus) {
 		p.mu.Unlock()
 	}
 	ws := p.wpa.status()
+	if why := p.lost(ws); why != "" {
+		// the car blocked the radio (connman blocks every WLAN rfkill when
+		// its Wi-Fi is switched off) or reloaded the driver (suspend): the
+		// supplicant can't scan until the interface is taken again
+		logf("wifi: taking %s again: %s", p.iface, why)
+		stable := p.wpa.upFor() >= wifiStable
+		p.release(errors.New(why), false)
+		if !stable {
+			p.failed(st, errors.New(why))
+		}
+		return
+	}
 	st.Networks, st.Saved = p.wpa.networks()
 	switch ws["wpa_state"] {
 	case "COMPLETED":
@@ -331,6 +345,22 @@ func (p *wifiProvider) up(st *wifiStatus) {
 			st.Signal = &sig
 		}
 	}
+}
+
+// lost says why the interface the provider took is no longer as it took it
+// ("" when it is): the supplicant finds it disabled (rfkill blocked, or set
+// down), or it is another interface of the same name (the driver reloaded).
+func (p *wifiProvider) lost(ws map[string]string) string {
+	if ws["wpa_state"] == "INTERFACE_DISABLED" {
+		return fmt.Sprintf("%s is down or its radio is blocked", p.iface)
+	}
+	p.mu.Lock()
+	idx := p.ownedIdx
+	p.mu.Unlock()
+	if v, err := readSysctl(filepath.Join(p.sys, p.iface, "ifindex")); err == nil && idx > 0 && v != strconv.Itoa(idx) {
+		return fmt.Sprintf("%s was created again", p.iface)
+	}
+	return ""
 }
 
 // failed counts a failure to take the interface or run the supplicant and
@@ -496,7 +526,7 @@ func (p *wifiProvider) own() error {
 		return err
 	}
 	p.mu.Lock()
-	p.owned, p.ownedAt = true, time.Now()
+	p.owned, p.ownedAt, p.ownedIdx = true, time.Now(), ls.Index
 	p.mu.Unlock()
 	logf("wifi: %s on", p.iface)
 	if p.notify != nil {
@@ -635,7 +665,8 @@ func (p *wifiProvider) ready() error {
 		return errors.New("Wi-Fi is off")
 	case (st.Link == "unavailable" || st.Link == "failed") && st.Error != nil:
 		return errors.New(*st.Error)
-	case !p.wpa.isRunning():
+	// running, but its control socket not there yet: a request would fail
+	case !p.wpa.isRunning() || !exists(filepath.Join(p.wpa.ctrl, p.wpa.iface)):
 		return errors.New("Wi-Fi is starting")
 	}
 	return nil
@@ -651,7 +682,14 @@ func (p *wifiProvider) scan() error {
 	p.scanUntil = time.Now().Add(scanShown)
 	p.mu.Unlock()
 	defer p.poke()
-	return p.wpa.scan()
+	err := p.wpa.scan()
+	if err == nil {
+		return nil
+	}
+	if why := p.lost(p.wpa.status()); why != "" {
+		return fmt.Errorf("%s; taking it again", why) // the next tick does
+	}
+	return err
 }
 
 // connect joins ssid, saving it once joined. psk empty: a saved network

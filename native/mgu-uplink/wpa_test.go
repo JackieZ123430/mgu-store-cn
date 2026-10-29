@@ -17,6 +17,9 @@ import (
 // <conf>", a fake wpa_supplicant (fakeWPA); its value is the scan file.
 const fakeWPAEnv = "MGU_UPLINK_FAKE_WPA"
 
+// fakeRfkillEnv: the rfkill soft file the fake wpa_supplicant reads.
+const fakeRfkillEnv = "MGU_UPLINK_FAKE_RFKILL"
+
 func TestMain(m *testing.M) {
 	if scan := os.Getenv(fakeWPAEnv); scan != "" && len(os.Args) > 1 && os.Args[1] == "-i" {
 		os.Exit(fakeWPA(scan, os.Args[1:]))
@@ -382,6 +385,18 @@ func fakeWPA(scanFile string, args []string) int {
 			}
 		}
 		reply := "OK\n"
+		// a radio blocked under it: wpa_supplicant 2.10 disables the
+		// interface and refuses SCAN with a plain FAIL
+		if b, _ := os.ReadFile(os.Getenv(fakeRfkillEnv)); strings.TrimSpace(string(b)) == "1" {
+			switch f[0] {
+			case "STATUS":
+				srv.WriteToUnix([]byte("wpa_state=INTERFACE_DISABLED\n"), from)
+				continue
+			case "SCAN":
+				srv.WriteToUnix([]byte("FAIL\n"), from)
+				continue
+			}
+		}
 		switch f[0] {
 		case "STATUS":
 			if cur >= 0 && nets[cur] != nil {
