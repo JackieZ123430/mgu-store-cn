@@ -2161,28 +2161,64 @@ function testDisabledCache() {
 }
 
 /* A current that is a folder (an earlier installer's) goes aside for the
- * install, and comes back when the install rolls back. */
+ * install and goes once the new version is up; a failed install, its
+ * health check or app-privacy apply included, puts it back; a killed
+ * install's folder comes back at the next run. */
 function testLegacyCurrent() {
-    const legacy = (root) => {
-        const cur = path.join(root.tool('fixture-tool'), 'current');
-        write(path.join(cur, 'old.js'), 'old\n');
+    const legacy = (root, id, files) => {
+        const cur = path.join(root.tool(id || 'fixture-tool'), 'current');
+        Object.entries(files || { 'old.js': 'old\n' }).forEach(([n, d]) => write(path.join(cur, n), d));
         return cur;
     };
+    const isLink = (p) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch (e) { return null; } };
+    const isBack = (root, cur, id) => isLink(cur) === false && fs.readFileSync(path.join(cur, 'old.js'), 'utf8') === 'old\n' &&
+        !fs.readdirSync(root.tool(id || 'fixture-tool')).some((n) => n === 'current.new' || n.startsWith('current.legacy-'));
+
     let root = fakeRoot();
     let cur = legacy(root);
     let r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
-    const aside = fs.readdirSync(root.tool('fixture-tool')).filter((n) => n.startsWith('current.legacy-'));
-    check('legacy current: a folder current goes aside and current links the new version',
-        r.status === 0 && fs.readlinkSync(cur) === 'versions/0.2.0' && aside.length === 1 &&
-        fs.readFileSync(path.join(root.tool('fixture-tool'), aside[0], 'old.js'), 'utf8') === 'old\n', r.out);
+    check('legacy current: a folder current is replaced by a link to the new version, and goes once it is up',
+        r.status === 0 && isLink(cur) && fs.readlinkSync(cur) === 'versions/0.2.0' &&
+        fs.readdirSync(root.tool('fixture-tool')).join(' ') === 'current versions', r.out);
 
-    root = fakeRoot({ fail: 'daemon-reload' });
+    // the restart fails; the rollback itself works
+    root = fakeRoot({ recmgr: ['fixture-tool'], active: 'fixture-tool.service', fail: 'restart fixture-tool.service' });
     cur = legacy(root);
     r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
     check('legacy current: a failed install puts the folder back as current, with no current.new or version left',
-        r.status === 1 && !fs.lstatSync(cur).isSymbolicLink() && fs.readFileSync(path.join(cur, 'old.js'), 'utf8') === 'old\n' &&
-        !fs.existsSync(path.join(root.tool('fixture-tool'), 'current.new')) &&
-        !fs.existsSync(path.join(root.tool('fixture-tool'), 'versions/0.2.0')), r.out);
+        r.status === 1 && isBack(root, cur) && !fs.existsSync(path.join(root.tool('fixture-tool'), 'versions/0.2.0')) &&
+        r.out.includes('current folder is back'), r.out);
+
+    root = fakeRoot({ recmgr: ['fixture-tool'] });
+    cur = legacy(root);
+    fs.writeFileSync(root.unitFile('fixture-tool.service.crash'), `${cur} versions/0.2.0\n`);
+    r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
+    check('legacy current: a failed health check puts the folder back and restarts the tool on it',
+        r.status === 1 && isBack(root, cur) && !r.out.includes('stays current') &&
+        r.out.includes("fixture-tool's earlier install is healthy"), r.out);
+
+    // app-privacy's own tool runs from current: the new version has none, the folder's applies
+    root = fakeRoot({ privacy: false });
+    cur = legacy(root, 'app-privacy', { 'old.js': 'old\n', 'patch_mainapp.js': 'console.log(JSON.stringify({ state: "patched" }));\n' });
+    r = root.run(['install', '--artifact', privacyArtifact(), '--yes']);
+    check('legacy current: a failed app-privacy apply puts the folder back and applies it again',
+        r.status === 1 && isBack(root, cur, 'app-privacy') && !r.out.includes('stays current') &&
+        r.out.includes("app-privacy's earlier install applied again"), r.out);
+
+    // a killed install: its folder comes back when current is gone, else goes
+    const gone = Number(cp.spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim());
+    root = fakeRoot();
+    cur = legacy(root);
+    fs.renameSync(cur, `${cur}.legacy-${gone}`);
+    r = root.run(['rollback', 'fixture-tool', '--yes']);
+    check('legacy current: a killed install\'s folder is current again at the next run', isBack(root, cur), r.out);
+    root = fakeRoot();
+    root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
+    cur = legacy(root, 'fixture-tool', {});
+    write(`${cur}.legacy-${gone}/old.js`, 'old\n');
+    r = root.run(['rollback', 'fixture-tool', '--yes']);
+    check('legacy current: a killed install\'s folder goes at the next run when current is in place',
+        fs.readlinkSync(cur) === 'versions/0.2.0' && fs.readdirSync(root.tool('fixture-tool')).join(' ') === 'current versions', r.out);
 }
 
 /* A killed run's files go at the next changing run. */

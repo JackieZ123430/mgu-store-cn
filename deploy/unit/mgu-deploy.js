@@ -1045,6 +1045,18 @@ function cleanStale() {
         var p = path.join(CFG.varOpt, n), st = /^mgu-deploy-kit-\d+$/.test(n) && p !== HERE && lstatOrNull(p);
         if (st && Date.now() - st.mtime.getTime() > 86400000) rmrf(p);
     });
+    /* A tool's earlier current folder a killed install moved aside: back as
+     * current when nothing replaced it, else gone. */
+    fs.readdirSync(CFG.varOpt).forEach(function (n) {
+        var root = path.join(CFG.varOpt, n), cur = path.join(root, 'current'), st = lstatOrNull(root);
+        if (n === 'public' || !st || !st.isDirectory()) return;
+        fs.readdirSync(root).forEach(function (m) {
+            var pid = /^current\.legacy-(\d+)$/.exec(m), p = path.join(root, m);
+            if (!pid || pidAlive(Number(pid[1]))) return;
+            if (lstatOrNull(cur)) rmrf(p);
+            else { fs.renameSync(p, cur); say(n + ': the earlier install\'s current folder is back'); }
+        });
+    });
 }
 function releaseLock() {
     try { if (fs.readFileSync(LOCK_FILE, 'utf8').split(' ')[0] === String(process.pid)) fs.unlinkSync(LOCK_FILE); }
@@ -1779,13 +1791,14 @@ function installTool(a, state, tx) {
     tx.versionExisted = fs.existsSync(dest); tx.socketsActive = {};
     /* A current that is no link (a folder an earlier installer left, e.g.
      * app-privacy 1.5.0's) cannot be replaced by rename: it goes aside, and
-     * a rollback puts it back. */
+     * a rollback puts it back. It goes once the new version is up. */
     var curStat = lstatOrNull(path.join(root, 'current'));
     tx.legacy = null;
     if (curStat && !curStat.isSymbolicLink()) {
-        tx.legacy = path.join(root, 'current.legacy-' + process.pid);
-        fs.renameSync(path.join(root, 'current'), tx.legacy);
-        say(c.id + ': the earlier install\'s current folder moved aside to ' + tx.legacy);
+        var legacy = path.join(root, 'current.legacy-' + process.pid);
+        fs.renameSync(path.join(root, 'current'), legacy);
+        tx.legacy = legacy;
+        say(c.id + ': the earlier install\'s current folder moved aside to ' + legacy);
     }
     (c.enable || []).forEach(function (en) {
         if (/\.socket$/.test(en.unit)) tx.socketsActive[en.unit] = unitState(en.unit, 'is-active') === 'active';
@@ -1893,6 +1906,7 @@ function installTool(a, state, tx) {
     fs.readdirSync(versions).forEach(function (v) {
         if (v !== c.version && v !== before) rmrf(path.join(versions, v));
     });
+    if (tx.legacy) rmrf(tx.legacy);
     say(c.id + ' ' + c.version + ' installed');
 }
 /* A tool's postInstall: its script (one of its files) with the arguments
@@ -1910,15 +1924,17 @@ function postInstall(c, root) {
         warn(c.id + ': ' + c.postInstall[0] + (r.error ? ': ' + r.error.message : ' exited ' + (r.status === null ? r.signal : r.status)));
     }
 }
-/* Undoes one failed tool install. With no version to return to, a tool
- * that failed its health check or its app-privacy apply stays current,
- * reported as such. Otherwise current returns to the previous version,
- * the snapshot puts units and the recmgr list back, a version folder this
+/* Undoes one failed tool install. With no version and no earlier current
+ * folder to return to, a tool that failed its health check or its
+ * app-privacy apply stays current, reported as such. Otherwise current
+ * returns to the previous version or the earlier install's folder, the
+ * snapshot puts units and the recmgr list back, a version folder this
  * install created goes, a socket it started whose unit is gone again is
- * stopped, and units it restarted restart on the previous version. */
+ * stopped, and units it restarted restart on what is current again. */
 function rollbackTool(a, tx, backup, e, state) {
     var c = a.component;
-    if ((e.health || e.privacy) && !tx.before) {
+    var was = tx.before ? c.id + ' ' + tx.before : tx.legacy ? c.id + '\'s earlier install' : null;
+    if ((e.health || e.privacy) && !was) {
         say(c.id + ' ' + c.version + ' stays current: there is no previous version to return to');
         if (e.privacy) {
             say('the app-privacy patch is NOT in effect; app installs are refused until ' +
@@ -1926,7 +1942,7 @@ function rollbackTool(a, tx, backup, e, state) {
         }
         return;
     }
-    say('rolling back ' + c.id + ' ' + c.version + (tx.before ? ' to ' + tx.before : '') + ' from ' + backup);
+    say('rolling back ' + c.id + ' ' + c.version + (tx.before ? ' to ' + tx.before : tx.legacy ? ' to its earlier install' : '') + ' from ' + backup);
     restoreSnapshot(backup);
     if (tx.before) {
         if (currentTarget(tx.root) !== tx.before) switchCurrent(tx.root, tx.before);
@@ -1937,7 +1953,8 @@ function rollbackTool(a, tx, backup, e, state) {
     } else if (!tx.rootExisted) {
         rmrf(tx.root);
     } else {
-        rmrf(path.join(tx.root, 'current'));
+        /* a current that is a folder is the earlier install's, never this one's */
+        if (currentTarget(tx.root) !== null) rmrf(path.join(tx.root, 'current'));
         rmrf(path.join(tx.root, 'current.new'));
         if (!tx.versionExisted) rmrf(path.join(tx.root, 'versions', c.version));
         if (tx.legacy && fs.existsSync(tx.legacy)) {
@@ -1952,10 +1969,10 @@ function rollbackTool(a, tx, backup, e, state) {
     });
     runOk(CFG.systemctl, ['daemon-reload']);
     pruneCreatedDirs(state);
-    if (e.health) restartAgain(e.health, c.id + ' ' + tx.before);
+    if (e.health) restartAgain(e.health, was);
     if (e.privacy) {
         var pr = privacyApplyAndBounce(state);
-        say(pr.ok ? 'app-privacy ' + tx.before + ' applied again' : 'app-privacy ' + tx.before + ' apply failed too: ' + pr.why);
+        say(pr.ok ? was + ' applied again' : was + ' apply failed too: ' + pr.why);
     }
 }
 /* The deploy tool is a tool like the others: /var/opt/mgu-deploy/
