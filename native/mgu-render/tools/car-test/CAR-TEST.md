@@ -42,7 +42,7 @@ screen starts a new mgu-render; no head-unit restart. About 15 minutes:
 
 Each `<name>.txt` has the probe's per-second table with the fastest core's
 clock (`cpu MHz`) and the clock policy; each `<name>.stats` has mgu-render's
-lines and the Store's. With mgu-render 0.5.2 and the Store 0.9.11 or later,
+lines and the Store's. With mgu-render 0.6.2 and the Store 0.9.11 or later,
 `<name>.trace.txt` has each step's median and p90 over the frames of the
 drag (`trace.js`, from `<name>.render-trace` and `<name>.store-trace`): what
 a frame waited for before its build, the build, the socket, the wait in
