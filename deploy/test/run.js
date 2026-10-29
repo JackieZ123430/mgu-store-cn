@@ -2058,6 +2058,45 @@ function testProvisioningSection() {
         a.tile_fallback === false, JSON.stringify(a));
 }
 
+/* An app whose registry entry caches -enabled and -allowed false (one
+ * provisioning dropped) updates listed enabled and allowed. */
+function testDisabledCache() {
+    const root = fakeRoot();
+    root.run(['install', '--artifact', appArtifact('fixture_app', '1.0.0', true), '--yes']);
+    const entry = readJson(root.entry('fixture_app'));
+    entry.provisioningCache = Object.assign({}, entry.provisioningCache, { '-enabled': 'false', '-allowed': 'false' });
+    write(root.entry('fixture_app'), JSON.stringify(entry), 0o660);
+    const r = root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes']);
+    const listed = (readJsonOrNull(root.p(`var/opt/public/oap/oap_${MGR}/data/custom_apps.json`)) || {}).fixture_app || {};
+    check('disabled cache: the update lists the app enabled and allowed', r.status === 0 &&
+        listed['-enabled'] === 'true' && listed['-allowed'] === 'true', `${JSON.stringify(listed)}\n${r.out}`);
+}
+
+/* A current that is a folder (an earlier installer's) goes aside for the
+ * install, and comes back when the install rolls back. */
+function testLegacyCurrent() {
+    const legacy = (root) => {
+        const cur = path.join(root.tool('fixture-tool'), 'current');
+        write(path.join(cur, 'old.js'), 'old\n');
+        return cur;
+    };
+    let root = fakeRoot();
+    let cur = legacy(root);
+    let r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
+    const aside = fs.readdirSync(root.tool('fixture-tool')).filter((n) => n.startsWith('current.legacy-'));
+    check('legacy current: a folder current goes aside and current links the new version',
+        r.status === 0 && fs.readlinkSync(cur) === 'versions/0.2.0' && aside.length === 1 &&
+        fs.readFileSync(path.join(root.tool('fixture-tool'), aside[0], 'old.js'), 'utf8') === 'old\n', r.out);
+
+    root = fakeRoot({ fail: 'daemon-reload' });
+    cur = legacy(root);
+    r = root.run(['install', '--artifact', plainArtifact('0.2.0'), '--yes']);
+    check('legacy current: a failed install puts the folder back as current, with no current.new or version left',
+        r.status === 1 && !fs.lstatSync(cur).isSymbolicLink() && fs.readFileSync(path.join(cur, 'old.js'), 'utf8') === 'old\n' &&
+        !fs.existsSync(path.join(root.tool('fixture-tool'), 'current.new')) &&
+        !fs.existsSync(path.join(root.tool('fixture-tool'), 'versions/0.2.0')), r.out);
+}
+
 /* A killed run's files go at the next changing run. */
 function testStaleFiles() {
     const root = fakeRoot();
@@ -4880,6 +4919,8 @@ const SUITES = [
     testRestoreRefusals,
     testStaleFiles,
     testProvisioningSection,
+    testDisabledCache,
+    testLegacyCurrent,
     testBackupRetention,
     testLock,
     testFallbackOffPrivacy,

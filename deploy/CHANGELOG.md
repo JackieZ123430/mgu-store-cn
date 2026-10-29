@@ -1,5 +1,10 @@
 # Deploy tool changelog
 
+## 0.6.4
+
+- A tool whose `current` is a folder, not a link (app-privacy 1.5.0 as an earlier installer left it), installs: the folder goes aside as `current.legacy-<pid>`, and a rollback of that install puts it back as `current`, with no `current.new` left.
+- An app update lists the app enabled and allowed in `custom_apps.json` even when its registry entry caches `-enabled` and `-allowed` false (an app provisioning once dropped), so the app manager installs it.
+
 ## 0.6.3
 
 - iDrive 7 with MainApp 8.1.1: app installs and updates work. MainApp 8.1.1 records no install source for an app, so an install counts as done once the app's registry entry, its files at the new version and its keychain are there. It does not update apps when it starts, so an update that cannot be made in place restarts the app manager once and then has it update the app in place.

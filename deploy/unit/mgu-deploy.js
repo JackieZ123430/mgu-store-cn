@@ -44,7 +44,7 @@ var cp = require('child_process');
 
 /* deploy/component.json's version; bumped when a file under deploy/unit/
  * changes. */
-var VERSION = '0.6.3';
+var VERSION = '0.6.4';
 var HERE = __dirname;
 var MGR_UID = Number(process.env.MGU_DEPLOY_MAINAPP_UID || 12201);
 
@@ -1777,6 +1777,16 @@ function installTool(a, state, tx) {
     var i7 = i7Takeover(a);
     tx.root = root; tx.before = before; tx.rootExisted = fs.existsSync(root);
     tx.versionExisted = fs.existsSync(dest); tx.socketsActive = {};
+    /* A current that is no link (a folder an earlier installer left, e.g.
+     * app-privacy 1.5.0's) cannot be replaced by rename: it goes aside, and
+     * a rollback puts it back. */
+    var curStat = lstatOrNull(path.join(root, 'current'));
+    tx.legacy = null;
+    if (curStat && !curStat.isSymbolicLink()) {
+        tx.legacy = path.join(root, 'current.legacy-' + process.pid);
+        fs.renameSync(path.join(root, 'current'), tx.legacy);
+        say(c.id + ': the earlier install\'s current folder moved aside to ' + tx.legacy);
+    }
     (c.enable || []).forEach(function (en) {
         if (/\.socket$/.test(en.unit)) tx.socketsActive[en.unit] = unitState(en.unit, 'is-active') === 'active';
     });
@@ -1928,7 +1938,12 @@ function rollbackTool(a, tx, backup, e, state) {
         rmrf(tx.root);
     } else {
         rmrf(path.join(tx.root, 'current'));
+        rmrf(path.join(tx.root, 'current.new'));
         if (!tx.versionExisted) rmrf(path.join(tx.root, 'versions', c.version));
+        if (tx.legacy && fs.existsSync(tx.legacy)) {
+            fs.renameSync(tx.legacy, path.join(tx.root, 'current'));
+            say(c.id + ': the earlier install\'s current folder is back');
+        }
     }
     Object.keys(tx.socketsActive || {}).forEach(function (u) {
         if (!tx.socketsActive[u] && !fs.existsSync(path.join(CFG.systemd, u))) {
@@ -2666,7 +2681,11 @@ function installApp(a, state, decision) {
     var kc = existing ? lstatOrNull(keychainFile(existing.uid)) : null;
     a.noKeychain = existing && !(kc && kc.size > 0) ? existing.uid : null;
     placePreinstalled(a);
-    customAppsPut(a.id, entry ? entry.provisioningCache : null, a.pkg.mguAppStartType || 'manually');
+    /* The app is listed enabled and allowed whatever its registry entry
+     * cached: an app provisioning once dropped caches both false, and the
+     * manager installs no app the listing disables. */
+    customAppsPut(a.id, Object.assign({}, entry ? entry.provisioningCache : null, { '-enabled': 'true', '-allowed': 'true' }),
+        a.pkg.mguAppStartType || 'manually');
     var r = installInPlace(a, existing), uid = r.uid;
     /* MainApp's installer rejected the app's install or update: a restarted
      * manager runs the same install, and restarting it stops every app. */
