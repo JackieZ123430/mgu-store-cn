@@ -2659,6 +2659,7 @@ function installApp(a, state, decision) {
         inplaceHookOf(fs.readFileSync(FALLBACK_COPY, 'utf8')) !== null) {
         say('the app manager runs older code than its main.js or AppManagement.js: restarting it before the update, ' +
             'which it then makes in place');
+        if (kept) rebuildFallback(false);
         bounceManager();
     }
     if (existing) waitStartedUp('placing ' + a.id + ' ' + a.version);

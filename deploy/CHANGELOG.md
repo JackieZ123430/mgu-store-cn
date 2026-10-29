@@ -2,7 +2,7 @@
 
 ## 0.6.4
 
-- iDrive 7: our apps go first in MainApp's install queue. On a car without ConnectedDrive, MainApp tries each of BMW's online apps again at every start of the app manager; each one fails only after its network retries and goes back to the end of the queue, and the wait between tries doubles from 40 s for all of them. An app install that restarted the app manager waited about half an hour behind them. The fallback copy of `main.js` now moves an install or update of an app `custom_apps.json` lists to right behind the one running, ahead of the others (ours keep their order), and runs it without the retry wait the others left. It waits for one BMW try at most. The copy is built with this from the next start of the app manager: the boot unit's build, or the build before the deploy tool restarts it. Without its anchors, the copy is built without it, as before.
+- iDrive 7: our apps go first in MainApp's install queue. The fallback copy of `main.js` runs an install or update of an app `custom_apps.json` lists right behind the one running, ahead of BMW's online apps that MainApp retries at every start without ConnectedDrive, and without the doubling retry wait they leave. The app manager runs it from its next start; a `main.js` without its anchors gets a copy without it.
 
 ## 0.6.3
 

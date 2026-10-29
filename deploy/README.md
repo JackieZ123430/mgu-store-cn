@@ -1216,41 +1216,26 @@ mainApp.init()}).then(()=>{
 When that anchor does not occur exactly once, the copy is built without
 the hook and the build says so; app installs then go through a bounce.
 
-On iDrive 7 the copy also puts our apps first in MainApp's install queue
-(0.6.4). Every install and update MainApp runs, at its start, from
-provisioning or from the in-place hook, goes through one queue in
-`AppManagementController`, one app at a time and in order. On a car
-without ConnectedDrive, MainApp tries each of BMW's online apps
-(`ts_rsu_report`, `message_handling`, `data-collection`, ...) again at
-every start of the app manager. Each fails only after its network retries
-(40 s to 5 min), goes back to the end of the queue, and raises the
-controller's one retry count, so the wait before the next try doubles from
-40 s (`networkErrorInstallationRetryTimeout`) for every app behind it. An app
-install that restarted the app manager waited about half an hour behind
-them (`the app manager is still working through its installs ... waits its
-turn`). In the copy, a call for an app `custom_apps.json` lists (read at
-each call) moves from the end of the queue to right behind the call
-running and the ones of ours before it, and runs with the retry count at
-0. The call running is never touched, so ours waits for one BMW try at
-most. MainApp logs `mgu-deploy: install <app> queued ahead of <n> other
-install(s)`. It needs two anchors exactly once, the end of MainApp's own
-queue module (`utils/makeMethodQueued`, which the controller requires;
-oap-sdk's copy in the same bundle is another module with other queues) and
-the controller's queued method:
+On iDrive 7 the copy also puts our apps first in MainApp's install queue.
+MainApp runs every install and update through one queue in
+`AppManagementController`, one at a time. Without ConnectedDrive it retries
+BMW's online apps there at every start, and each failure doubles the wait
+(from 40 s) before the next call, whichever app it is for. In the copy, a
+call for an app `custom_apps.json` lists moves to right behind the call
+running (ours keep their order) and runs without the leftover wait; a
+retry of one of ours after a network error goes to the end, as MainApp
+queues it. MainApp logs `mgu-deploy: install <app> queued ahead of <n>
+other install(s)`. It needs these two anchors exactly once, the end of
+MainApp's own `utils/makeMethodQueued` and the controller's queued method:
 
 ```
 module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};
 this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)
 ```
 
-Without them the copy is built without it, the build says so, and the
-queue stays as MainApp has it. A running manager has it from its next
-start: the boot unit's build at the next start of the head unit, or the
-build this tool writes before it restarts the app manager (the start
-where the wait was), so an update of the deploy tool, with the Store or
-alone, brings it to the next app install that restarts the manager. An
-install made in place on a manager that started on an older copy keeps
-that copy until then.
+Without them the copy is built without it and the build says so. The
+manager runs it from its next start: the boot unit's build, or the build
+this tool writes before it restarts the manager.
 
 The copy, with the app-privacy patch applied to it, is `/var/opt/mgu-deploy/main.js`,
 bind-mounted over the stock file; a rebuild unmounts the old copy, builds

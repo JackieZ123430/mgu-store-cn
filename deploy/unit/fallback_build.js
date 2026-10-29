@@ -49,8 +49,8 @@
  * starts without the network-retry delay others left. Without
  * ConnectedDrive, MainApp tries each of BMW's online apps again at every
  * start; each fails after its network retries and goes back to the end of
- * the queue, and the delay between tries doubles from 40 s for all of
- * them, so ours waited half an hour behind them. Its two anchors are
+ * the queue, and the delay between tries doubles from 40 s for every app
+ * behind them. Its two anchors are
  * optional, as the hook's: when either does not occur exactly once, the
  * copy is built without it, and says so on stdout.
  */
@@ -233,7 +233,9 @@ function inplaceSource(requestPath, statusPath, v) {
  * the entry running is never touched. When it runs, the controller's
  * network-retry count is 0, so it does not wait out the delay another
  * app's failures left (install() and update() clear only a delay already
- * under way). Only a call's first entry moves: one of ours that fails and
+ * under way). A call that lands first in an empty queue is already
+ * started, and reads the count on the next tick, so the count is reset at
+ * once. Only a call's first entry moves: one of ours that fails and
  * is queued again (the same options) goes to the end with MainApp's own
  * delay, so it cannot keep the others waiting. Nothing in it throws into the manager: on any error the
  * call stays where MainApp put it. */
@@ -243,9 +245,9 @@ function firstSources(listPath) {
         'try{const app=options&&options.appId;if("string"!=typeof app||options.__mguDeployFirst)return p;' +
         'let ours;try{ours=JSON.parse(require("fs").readFileSync(' + JSON.stringify(listPath) + ',"utf8"))}catch(e){return p}' +
         'if(!ours||"object"!=typeof ours||!Object.prototype.hasOwnProperty.call(ours,app))return p;' +
-        'const q=getQueueDataForContext(ctl).queue,i=q.findIndex(x=>x.promise===p);if(i<1)return p;' +
+        'const q=getQueueDataForContext(ctl).queue,i=q.findIndex(x=>x.promise===p);if(i<0)return p;' +
         'const it=q[i],fn=it.fn;let at=1;for(;at<i&&q[at].__mguDeployFirst;)at++;' +
-        'options.__mguDeployFirst=!0,it.__mguDeployFirst=!0,it.fn=()=>(ctl.retries=0,fn()),' +
+        'options.__mguDeployFirst=!0,it.__mguDeployFirst=!0,it.fn=()=>(ctl.retries=0,fn()),i||(ctl.retries=0),' +
         'at<i&&(q.splice(i,1),q.splice(at,0,it),' +
         'logger.info(`mgu-deploy: ${options.method} ${app} queued ahead of ${i-at} other install(s)`))' +
         '}catch(e){}return p}}catch(e){}' + FIRST_MARK + ';',

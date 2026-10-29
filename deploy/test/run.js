@@ -976,6 +976,20 @@ function testQueueFirst() {
     check('queue first: one of ours that fails is queued again at the end, not first again',
         (ran10.indexOf('app_4', 7) < 0 || ran10.indexOf('app_4', 7) > 16) && ran10.slice(12, 17).every((a) => /^bmw_/.test(a)) &&
         ten.filter((a) => a !== 'app_4').every((a) => t.done && t.done[a] < 400), JSON.stringify(t));
+    /* first into an empty queue, behind a retry wait the others left */
+    write(list, JSON.stringify({ our_app: {} }));
+    const alone = (failing) => {
+        const r = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, 'built.js'), 'our_app', failing, 'empty'],
+            { encoding: 'utf8' });
+        try { return JSON.parse(r.stdout); } catch (e) { return { error: r.stdout + r.stderr }; }
+    };
+    const e = alone('');
+    check('queue first: one of ours first in an empty queue does not wait out the retry delay left behind',
+        (e.ran || [])[0] === 'our_app' && e.done && e.done.our_app < 150, JSON.stringify(e));
+    const ef = alone('our_app'), efRan = ef.ran || [];
+    check('queue first: one of ours first in an empty queue that fails is queued again at the end, not first again',
+        efRan[0] === 'our_app' && efRan[1] === 'bmw_1' && (efRan.indexOf('our_app', 1) < 0 || efRan.indexOf('our_app', 1) > 6),
+        JSON.stringify(ef));
     write(list, '{}');
     const s = run('built.js');
     check('queue first: an app custom_apps.json no longer lists waits its turn', late(s, 'our_app') && !(s.log || []).length,
@@ -1559,6 +1573,27 @@ function testInplaceKeepCopy() {
         p.out.includes('updated in place') && plog.includes('start-up pass') &&
         !plog.some((l) => l.startsWith('update fixture_app') && l.endsWith(' at start')), `${p.out}\n${plog.join('\n')}`);
     stopHooked(pv.root);
+
+    // a kept copy, then app-privacy writes main.js: the bounce before the update restarts the manager on this version's copy
+    const queueMain = `${stockMain()}
+const makeMethodQueued_1=(function(){const module={};function makeMethodQueued(){}function unqueueMethodCall(){}
+function getCurrentOperationPromise(){}function onQueueIdle(){}function configureQueue(){}
+module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};
+return module.exports})();
+class AppManagementController{constructor(){this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)}}
+`;
+    const st = inplaceRoot(undefined, { minUp: 1, main: queueMain });
+    older(st.root, (t) => `/* an earlier build */\n${t.split('/* mgu-deploy apps first */').join('')}`);
+    sleep(50);
+    const ks = st.root.kills().length;
+    const s = st.root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes'],
+        { FAKE_MGR_HOOK: '1', FAKE_PRIVACY_WRITES_MAIN_AT: `${st.root.R}.privacy-applies:2` });
+    const copyNow = fs.readFileSync(copyOf(st.root), 'utf8');
+    check('keep copy: a stale manager with a kept copy restarts on this version\'s copy, with the queue edit, then updates in place',
+        s.status === 0 && st.root.kills().length === ks + 1 && s.out.includes('restarting it before the update') &&
+        !copyNow.startsWith('/* an earlier build */') && copyNow.includes('/* mgu-deploy apps first */') &&
+        s.out.includes('updated in place'), `${s.out}\n${st.root.managerLog().join('\n')}`);
+    stopHooked(st.root);
 }
 
 /* Uninstall through the running manager's own uninstall (its tile goes at
