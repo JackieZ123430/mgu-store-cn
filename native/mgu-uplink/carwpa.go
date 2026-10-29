@@ -81,7 +81,7 @@ func (s *carSupplicant) call(path objPath, iface, member, sig string, args ...an
 	if s.bus == nil {
 		b, err := dialBus(dbusTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("the car's wpa_supplicant: %v", err)
+			return nil, err
 		}
 		s.bus = b
 	}
@@ -143,6 +143,21 @@ func (s *carSupplicant) ifacePath() (objPath, error) {
 		return "", errors.New("GetInterface: not an object path")
 	}
 	return p, nil
+}
+
+// carNetwork: the interface holds a network of the car's (neither ours
+// nor tagged). With s.mu held.
+func (s *carSupplicant) carNetwork() (bool, error) {
+	m, err := s.getAll(s.path, wpaDBusIface)
+	if err != nil {
+		return false, fmt.Errorf("the car's wpa_supplicant: %v", err)
+	}
+	for _, n := range paths(m, "Networks") {
+		if _, ours := s.ours[n]; !ours && !s.tagged(n) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // tagged: the network's properties carry our id_str.
@@ -233,7 +248,8 @@ func (s *carSupplicant) addSaved() error {
 			return err
 		}
 	}
-	if len(nets) > 0 {
+	// Reassociate would put ours ahead of a network the car just added
+	if car, err := s.carNetwork(); len(nets) > 0 && !car && err == nil {
 		s.call(s.path, wpaDBusIface, "Reassociate", "")
 	}
 	return nil
@@ -260,10 +276,12 @@ func (s *carSupplicant) add(n savedNet, enabled bool) (objPath, error) {
 	}
 	r, err := s.call(s.path, wpaDBusIface, "AddNetwork", "a{sv}", props)
 	if err != nil {
-		// the message names the call only: a psk never reaches it
-		return "", fmt.Errorf("the car's wpa_supplicant: AddNetwork: %s", dbusErrorName(err))
+		return "", fmt.Errorf("the car's wpa_supplicant: AddNetwork: %v", err)
 	}
-	p, _ := r[0].(objPath)
+	var p objPath
+	if len(r) > 0 {
+		p, _ = r[0].(objPath)
+	}
 	if p == "" {
 		return "", errors.New("the car's wpa_supplicant: AddNetwork: no network")
 	}
@@ -293,7 +311,8 @@ func (s *carSupplicant) stop() {
 	}
 	_, onOurs := s.ours[cur]
 	s.dropOurs()
-	if onOurs {
+	// a network the car added stays free to join
+	if car, err := s.carNetwork(); onOurs && !car && err == nil {
 		s.call(s.path, wpaDBusIface, "Disconnect", "")
 	}
 	s.path, s.pending = "", nil
@@ -448,6 +467,13 @@ func (s *carSupplicant) join(ssid, psk string, open bool) error {
 	defer s.mu.Unlock()
 	if s.path == "" {
 		return errors.New("the car's wpa_supplicant: not in use")
+	}
+	// SelectNetwork would switch off a network the car just added
+	if car, err := s.carNetwork(); err != nil || car {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("the car has a network of its own on %s", s.iface)
 	}
 	saved, err := s.readSaved()
 	if err != nil {

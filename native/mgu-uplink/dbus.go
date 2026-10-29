@@ -174,28 +174,6 @@ func (b *dbusConn) call(dest string, path objPath, iface, member, sig string, ar
 	}
 }
 
-// getAll is org.freedesktop.DBus.Properties.GetAll.
-func (b *dbusConn) getAll(dest string, path objPath, iface string) (map[string]any, error) {
-	r, err := b.call(dest, path, "org.freedesktop.DBus.Properties", "GetAll", "s", iface)
-	if err != nil {
-		return nil, err
-	}
-	if len(r) == 0 {
-		return nil, errors.New("D-Bus: GetAll: no reply value")
-	}
-	m, ok := r[0].(map[string]any)
-	if !ok {
-		return nil, errors.New("D-Bus: GetAll: not a dictionary")
-	}
-	return m, nil
-}
-
-// set is org.freedesktop.DBus.Properties.Set.
-func (b *dbusConn) set(dest string, path objPath, iface, prop string, v dbusVariant) error {
-	_, err := b.call(dest, path, "org.freedesktop.DBus.Properties", "Set", "ssv", iface, prop, v)
-	return err
-}
-
 // dbusMessage is a little-endian method call with args encoded as sig.
 func dbusMessage(serial uint32, dest string, path objPath, iface, member, sig string, args []any) ([]byte, error) {
 	var body dbusEnc

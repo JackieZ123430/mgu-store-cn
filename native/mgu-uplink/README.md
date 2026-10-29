@@ -180,23 +180,14 @@ moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks;
 
 #### Without `wlan1`: the car's `wlan0`
 
-iDrive 7 units with the Broadcom chip (BCM4359, driver `bcmdhd`) have no
-`wlan1`, and the chip has no room for another interface: its station
-`wlan0` sits idle under the car's own D-Bus wpa_supplicant, which also runs
-the car's hotspot and wireless CarPlay on it (two P2P group owners). On
-these units the provider joins on `wlan0` through that supplicant
-(carwpa.go, `wifi.backend` `car-supplicant`), and the hotspot and CarPlay
-keep running. Everything else is as above: the same requests, saved
-networks in the same `wpa.conf`, DHCP, routing, firewall, and taking
-`wlan0` again after suspend.
-
-Our networks exist only in the car's supplicant's memory (it has no config
-file), tagged `id_str="mgu-uplink"`, and are removed when Wi-Fi is switched
-off, the service stops or the car starts using `wlan0`; a start removes
-the ones a killed run left. The car uses `wlan0` when its supplicant
-doesn't have it, holds a network of its own on it (connman joining one,
-for example), or has it down or its radio blocked (the car's Wi-Fi switched
-off); its radio is never unblocked. WPA2 personal and open networks.
+iDrive 7 units with the Broadcom chip (`bcmdhd`) have no `wlan1`. On them
+the unit joins on the car's own `wlan0` through the car's wpa_supplicant
+(`wifi.backend` `car-supplicant`), while the car's hotspot and wireless
+CarPlay keep running. Everything else is as above. Our networks are added
+to the car's supplicant only while Wi-Fi is on and are never written to
+its configuration; the car's own networks, hotspot and radio are left
+alone. Wi-Fi is `unavailable` while the car uses `wlan0` itself (a network
+of its own, or its Wi-Fi switched off). WPA2 personal and open networks.
 
 ### status.json
 

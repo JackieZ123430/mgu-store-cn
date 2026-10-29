@@ -436,7 +436,7 @@ func TestCarWiFi(t *testing.T) {
 		t.Fatalf("joined: %+v", st)
 	}
 	b, _ := os.ReadFile(c.wpaConf())
-	if !strings.Contains(string(b), "ssid=e2809952") && !strings.Contains(string(b), `psk="rightpass1"`) {
+	if !strings.Contains(string(b), "ssid="+hex.EncodeToString([]byte("Robert’s iPhone"))) || !strings.Contains(string(b), `psk="rightpass1"`) {
 		t.Fatalf("wpa.conf:\n%s", b)
 	}
 	if fi, err := os.Stat(filepath.Dir(c.wpaConf())); err != nil || fi.Mode().Perm() != 0700 {
@@ -529,6 +529,26 @@ func TestCarWiFiTakenBack(t *testing.T) {
 	waitWiFi(t, p, "joined again", func(st wifiStatus) bool { return st.Link == "connected" && st.SSID == "Robert’s iPhone" })
 }
 
+// The car switches its Wi-Fi off under us: unavailable, given back (not a
+// failure), and joined again once it is back on.
+func TestCarWiFiSwitchedOff(t *testing.T) {
+	p, _, f := carProvider(t)
+	p.car.writeSaved([]savedNet{{ssid: "Robert’s iPhone", psk: "rightpass1", priority: 5}})
+	p.setEnabled(true)
+	p.start()
+	defer p.stop()
+	waitWiFi(t, p, "joined", func(st wifiStatus) bool { return st.Link == "connected" })
+	f.do(func() { f.disabled = true })
+	waitWiFi(t, p, "unavailable", func(st wifiStatus) bool {
+		return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, "radio is blocked")
+	})
+	if ours, _ := f.count(); ours != 0 || p.guarding() {
+		t.Fatalf("after the car's Wi-Fi went off: %d ours, guarding %v", ours, p.guarding())
+	}
+	f.do(func() { f.disabled = false })
+	waitWiFi(t, p, "joined again", func(st wifiStatus) bool { return st.Link == "connected" })
+}
+
 // The driver reloads (suspend): wlan0 comes back with a new index and the
 // car's supplicant has it under a new object; the provider takes it again
 // and joins the saved network.
@@ -544,6 +564,8 @@ func TestCarWiFiResume(t *testing.T) {
 	})
 	writeFile(t, filepath.Join(p.sys, "wlanc0", "ifindex"), "27\n")
 	waitWiFi(t, p, "joined after the reload", func(st wifiStatus) bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		return st.Link == "connected" && st.SSID == "Robert’s iPhone" && p.ownedIdx == 27
 	})
 }

@@ -342,6 +342,12 @@ func (p *wifiProvider) up(st *wifiStatus) {
 	}
 	ws := p.wpa.status()
 	if why := p.lost(ws); why != "" {
+		// the car's Wi-Fi switched off is the car's use of wlan0
+		if use, sure := p.carUseNow(); use != "" && sure {
+			p.giveBack(use)
+			p.unavailable(st, use)
+			return
+		}
 		// the car blocked the radio (connman blocks every WLAN rfkill when
 		// its Wi-Fi is switched off) or reloaded the driver (suspend): the
 		// supplicant can't scan until the interface is taken again
@@ -507,6 +513,18 @@ func (p *wifiProvider) findStockUse() (string, bool) {
 		}
 	}
 	return "", true
+}
+
+// carUseNow asks the car's supplicant, with the car-supplicant backend in
+// use, whether the car uses the interface, and keeps the answer as
+// stockUse's.
+func (p *wifiProvider) carUseNow() (string, bool) {
+	if p.wpa != wifiBackend(p.car) {
+		return "", false
+	}
+	p.used, p.usedSure = p.car.carUse()
+	p.usedAt = time.Now()
+	return p.used, p.usedSure
 }
 
 // giveBack hands the interface to the car (release) and keeps it from
