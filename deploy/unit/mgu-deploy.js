@@ -44,7 +44,7 @@ var cp = require('child_process');
 
 /* deploy/component.json's version; bumped when a file under deploy/unit/
  * changes. */
-var VERSION = '0.6.3';
+var VERSION = '0.6.4';
 var HERE = __dirname;
 var MGR_UID = Number(process.env.MGU_DEPLOY_MAINAPP_UID || 12201);
 
@@ -2659,6 +2659,7 @@ function installApp(a, state, decision) {
         inplaceHookOf(fs.readFileSync(FALLBACK_COPY, 'utf8')) !== null) {
         say('the app manager runs older code than its main.js or AppManagement.js: restarting it before the update, ' +
             'which it then makes in place');
+        if (kept) rebuildFallback(false);
         bounceManager();
     }
     if (existing) waitStartedUp('placing ' + a.id + ' ' + a.version);

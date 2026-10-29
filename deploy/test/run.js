@@ -839,6 +839,7 @@ function testFallback() {
         !fs.existsSync(path.join(sys, 'multi-user.target.wants/mgu-app-fallback.service')) && !fs.existsSync(copy), off.out);
 
     testFallbackHook();
+    testQueueFirst();
 
     const main = stockMain();
     [['a duplicated class anchor', main.replace(CLASS_ANCHOR, `${CLASS_ANCHOR}}${CLASS_ANCHOR}`)],
@@ -934,6 +935,72 @@ function testFallbackHook() {
         JSON.stringify(handle('our_app', { '-enabled': 'false' })) === '{"-enabled":"false"}');
     check('fallback hook: an app custom_apps.json does not list is unchanged',
         handle('other_app', undefined) === undefined);
+}
+
+/* The copy built from fixtures/main_queue.js: our apps' installs go first in
+ * the controller's queue, behind the one running; an app not listed waits its
+ * turn. The stock fixture main.js lacks the anchors: built without, said. */
+function testQueueFirst() {
+    const dir = fs.mkdtempSync(path.join(T, 'queue-'));
+    const list = path.join(dir, 'custom_apps.json');
+    write(list, JSON.stringify({ our_app: {}, their_app: { '-appStartType': 'manually' } }));
+    const build = (fixture, out) => cp.spawnSync(UNIT_NODE, [path.join(DEPLOY, 'unit', 'fallback_build.js'),
+        path.join(HERE, 'fixtures', fixture), path.join(dir, out), list], { encoding: 'utf8' });
+    const run = (built) => {
+        const r = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, built)], { encoding: 'utf8' });
+        try { return JSON.parse(r.stdout); } catch (e) { return { error: r.stdout + r.stderr }; }
+    };
+    const b = build('main_queue.js', 'built.js');
+    check('queue first: builds from the queue fixture, with no note', b.status === 0 && !b.stdout.includes('install queue'), b.stdout + b.stderr);
+    if (b.status !== 0) return;
+    /* not before every one of BMW's apps had its next try (or not yet at all) */
+    const late = (o, a) => { const i = (o.ran || []).indexOf(a); return i < 0 || i > 7; };
+    const r = run('built.js'), ran = r.ran || [];
+    check('queue first: ours run right behind the one running, in their order, ahead of the others waiting',
+        ran.indexOf('our_app') === 2 && ran.indexOf('their_app') === 3 && late(r, 'other_app'), JSON.stringify(r));
+    check('queue first: ours are done before the retry waits of the others', r.done && r.done.our_app < 300 && r.done.their_app < 300,
+        JSON.stringify(r));
+    check('queue first: MainApp\'s log says what moved',
+        (r.log || []).join('|') === 'mgu-deploy: install our_app queued ahead of 5 other install(s)|' +
+            'mgu-deploy: install their_app queued ahead of 5 other install(s)', JSON.stringify(r.log));
+    /* ten of ours at once, one of them failing with a network error */
+    const ten = Array.from({ length: 10 }, (x, i) => `app_${i}`);
+    write(list, JSON.stringify(ten.reduce((o, id) => Object.assign(o, { [id]: {} }), {})));
+    const r10 = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, 'built.js'), ten.join(','), 'app_4'],
+        { encoding: 'utf8' });
+    let t = {};
+    try { t = JSON.parse(r10.stdout); } catch (e) { t = { error: r10.stdout + r10.stderr }; }
+    const ran10 = t.ran || [];
+    check('queue first: ten of ours at once run right behind the one running, in their order',
+        JSON.stringify(ran10.slice(2, 12)) === JSON.stringify(ten), JSON.stringify(t));
+    check('queue first: one of ours that fails is queued again at the end, not first again',
+        (ran10.indexOf('app_4', 7) < 0 || ran10.indexOf('app_4', 7) > 16) && ran10.slice(12, 17).every((a) => /^bmw_/.test(a)) &&
+        ten.filter((a) => a !== 'app_4').every((a) => t.done && t.done[a] < 400), JSON.stringify(t));
+    /* first into an empty queue, behind a retry wait the others left */
+    write(list, JSON.stringify({ our_app: {} }));
+    const alone = (failing) => {
+        const r = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, 'built.js'), 'our_app', failing, 'empty'],
+            { encoding: 'utf8' });
+        try { return JSON.parse(r.stdout); } catch (e) { return { error: r.stdout + r.stderr }; }
+    };
+    const e = alone('');
+    check('queue first: one of ours first in an empty queue does not wait out the retry delay left behind',
+        (e.ran || [])[0] === 'our_app' && e.done && e.done.our_app < 150, JSON.stringify(e));
+    const ef = alone('our_app'), efRan = ef.ran || [];
+    check('queue first: one of ours first in an empty queue that fails is queued again at the end, not first again',
+        efRan[0] === 'our_app' && efRan[1] === 'bmw_1' && (efRan.indexOf('our_app', 1) < 0 || efRan.indexOf('our_app', 1) > 6),
+        JSON.stringify(ef));
+    write(list, '{}');
+    const s = run('built.js');
+    check('queue first: an app custom_apps.json no longer lists waits its turn', late(s, 'our_app') && !(s.log || []).length,
+        JSON.stringify(s));
+    write(list, 'not json');
+    const u = run('built.js');
+    check('queue first: an unreadable custom_apps.json leaves the queue as it is', late(u, 'our_app') && !(u.log || []).length, JSON.stringify(u));
+    const p = build('main.js', 'plain.js');
+    check('queue first: a main.js without its anchors is built without it, said',
+        p.status === 0 && p.stdout.includes('anchors for our apps first in the install queue not found exactly once') &&
+        !fs.readFileSync(path.join(dir, 'plain.js'), 'utf8').includes('mgu-deploy apps first'), p.stdout + p.stderr);
 }
 
 /* ---- in-place install --------------------------------------------------------------------- */
@@ -1506,6 +1573,27 @@ function testInplaceKeepCopy() {
         p.out.includes('updated in place') && plog.includes('start-up pass') &&
         !plog.some((l) => l.startsWith('update fixture_app') && l.endsWith(' at start')), `${p.out}\n${plog.join('\n')}`);
     stopHooked(pv.root);
+
+    // a kept copy, then app-privacy writes main.js: the bounce before the update restarts the manager on this version's copy
+    const queueMain = `${stockMain()}
+const makeMethodQueued_1=(function(){const module={};function makeMethodQueued(){}function unqueueMethodCall(){}
+function getCurrentOperationPromise(){}function onQueueIdle(){}function configureQueue(){}
+module.exports={makeMethodQueued:makeMethodQueued,unqueueMethodCall:unqueueMethodCall,getCurrentOperationPromise:getCurrentOperationPromise,onQueueIdle:onQueueIdle,configureQueue:configureQueue};
+return module.exports})();
+class AppManagementController{constructor(){this.queuedRecursiveRetry=makeMethodQueued_1.makeMethodQueued(this,this.queuedRecursiveRetry,!0)}}
+`;
+    const st = inplaceRoot(undefined, { minUp: 1, main: queueMain });
+    older(st.root, (t) => `/* an earlier build */\n${t.split('/* mgu-deploy apps first */').join('')}`);
+    sleep(50);
+    const ks = st.root.kills().length;
+    const s = st.root.run(['install', '--artifact', appArtifact('fixture_app', '1.1.0', true), '--yes'],
+        { FAKE_MGR_HOOK: '1', FAKE_PRIVACY_WRITES_MAIN_AT: `${st.root.R}.privacy-applies:2` });
+    const copyNow = fs.readFileSync(copyOf(st.root), 'utf8');
+    check('keep copy: a stale manager with a kept copy restarts on this version\'s copy, with the queue edit, then updates in place',
+        s.status === 0 && st.root.kills().length === ks + 1 && s.out.includes('restarting it before the update') &&
+        !copyNow.startsWith('/* an earlier build */') && copyNow.includes('/* mgu-deploy apps first */') &&
+        s.out.includes('updated in place'), `${s.out}\n${st.root.managerLog().join('\n')}`);
+    stopHooked(st.root);
 }
 
 /* Uninstall through the running manager's own uninstall (its tile goes at

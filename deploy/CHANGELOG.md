@@ -1,5 +1,9 @@
 # Deploy tool changelog
 
+## 0.6.4
+
+- iDrive 7: our apps go first in MainApp's install queue. The fallback copy of `main.js` runs an install or update of an app `custom_apps.json` lists right behind the one running, ahead of BMW's online apps that MainApp retries at every start without ConnectedDrive, and without the doubling retry wait they leave. The app manager runs it from its next start; a `main.js` without its anchors gets a copy without it.
+
 ## 0.6.3
 
 - iDrive 7 with MainApp 8.1.1: app installs and updates work. MainApp 8.1.1 records no install source for an app, so an install counts as done once the app's registry entry, its files at the new version and its keychain are there. It does not update apps when it starts, so an update that cannot be made in place restarts the app manager once and then has it update the app in place.
