@@ -32,16 +32,18 @@ const fs = require('fs');
 const kit = require('./kit_record.js');
 const png = require('./kit_png.js');
 const { setPicture } = require('./am_widgets.js');
-const { frame, dragOf, dragFrame, hit, placement } = require('./store_frame.js');
+const { frame, layoutOf, dragOf, dragFrame, hit, placement } = require('./store_frame.js');
 
 const DEPTHS = 3;
 const ICON_BYTES = 128 * 1024;          // a package picture: at most this big
 const ICONS_KEPT = 48;                  // decoded pictures kept, the most recently shown
-const FPS = 30;                         // frames a second at most: the screens move little
+const FPS = 60;                         // frames a second at most (mgu-render's fps setting can give another)
 const KEEPALIVE_MS = 1000;              // the renderer hides an app silent for 3 s
 const CLOSED_RESHOW_MS = 700;           // a touch outside that left the page where it was
 const DRAG_PX = 14;
 const DRAG_ROWS_PX = 2048;                // a drag's cached rows: at most this high on the device (mgu-render takes 4096)
+const PREBUILD_MS = 300;                  // a drag's layers made ahead once the page has stayed this long
+const PICTURES_MS = 100;                  // a new page's first frame waits at most this long for its pictures
 const STATS_LOG = '/run/mgu-render/stats-log';  // mgu-render's per-second stats switch: the Store's own then too
 const STATS_OUT = '/dev/shm/robertn_store-stats.log';   // where they go (an OAP app's own log goes to DLT)
 const STATS_OUT_MAX = 1024 * 1024;              // bytes kept; past it the file starts again
@@ -152,7 +154,15 @@ class Drawn extends EventEmitter {
         this.sentAt = 0;
         this.keepalive = null;
         this.touch = null;
-        this.drag = null;                   // a drag's cached layers (_dragFrame)
+        this.drag = null;                   // a drag's cached layers (_dragFrame), for the page as at gen
+        this.gen = 0;                       // counts changes to what the page draws besides a grid's or list's scroll
+        this.drawn = null;                  // the model the page was last built from (JSON), and its focus
+        this.drawnFocus = 0;
+        this.settleKey = null;              // a released drag's region whose last position is still to be drawn
+        this.prebuild = null;
+        this.pageAt = 0;                    // when the page last changed (_page)
+        this.held = null;                   // a new page's frame held for its pictures
+        this.showing = false;               // _updateShow's frame: sent at once
         this.retired = [];                  // layers to drop once the next frame is sent
         this.ccu = null;
         this.fccu = null;
@@ -168,7 +178,9 @@ class Drawn extends EventEmitter {
             this.timing.trace('tick', n);
             if (this.dirty) {
                 if (this.touch && this.touch.drag) {
-                    this._dragFrame();
+                    this._dragFrame(this.touch.region.key, this.touch.gen);
+                } else if (this.settleKey && this.drag && this.drag.gen === this.gen) {
+                    this._dragFrame(this.settleKey, this.gen);
                 } else {
                     this.render();
                 }
@@ -178,6 +190,7 @@ class Drawn extends EventEmitter {
         this.gpu.on('closed', () => {
             this.closedHide = true;
             this.on_ = false;
+            this._dropKept();
             setTimeout(() => {
                 this.closedHide = false;
                 this._updateShow();
@@ -193,6 +206,8 @@ class Drawn extends EventEmitter {
     /* At shutdown: the connection ends without switching to the widget screens. */
     close() {
         clearInterval(this.keepalive);
+        clearTimeout(this.prebuild);
+        clearTimeout(this.held);
         this.timing.close();
         this.gpu.removeAllListeners('close');
         this.gpu.close();
@@ -241,6 +256,15 @@ class Drawn extends EventEmitter {
     reset() {
         this.stack = [{ name: 'main' }];
         this.focus = 0;
+        this._page();
+    }
+
+    /* Another page: a gesture on the one before ends, and the new page's
+     * first frame shows it whole (render: its pictures too). */
+    _page() {
+        this.pageAt = msNow();
+        this.touch = null;
+        this.settleKey = null;
     }
 
     top() {
@@ -268,6 +292,7 @@ class Drawn extends EventEmitter {
             this.host.openState(this.hostOf(this.stack.length));
         }
         this.focus = 0;
+        this._page();
         this.render();
         return replaced;
     }
@@ -276,6 +301,7 @@ class Drawn extends EventEmitter {
     restore(page) {
         this.stack[this.stack.length - 1] = page;
         this._backTo();
+        this._page();
         this.render();
     }
 
@@ -285,6 +311,7 @@ class Drawn extends EventEmitter {
             this.stack.pop();
             this._backTo();
             this.host.closeState(this.hostOf(depth));
+            this._page();
             this.render();
         }
     }
@@ -306,11 +333,13 @@ class Drawn extends EventEmitter {
             this.pop();
         }
         this.tab = tab;
+        this._page();
         this.render();
     }
 
     setFilter(filter) {
         this.filter = filter;
+        this._page();
         this.render();
     }
 
@@ -326,6 +355,7 @@ class Drawn extends EventEmitter {
             if (depth < this.stack.length) {
                 this.stack.length = depth;
                 this._backTo();
+                this._page();
             }
             this.focusLost = false;
             this.render();
@@ -342,6 +372,7 @@ class Drawn extends EventEmitter {
         if (focus && depth < this.stack.length) {
             this.stack.length = depth;
             this._backTo();
+            this._page();
             this.render();
         }
         if (depth === this.stack.length) {
@@ -387,29 +418,44 @@ class Drawn extends EventEmitter {
             return;
         }
         this.on_ = on;
+        if (!on) {
+            this._dropKept();
+        }
         this.gpu.claim(on ? [this.viewport] : []);
         this.gpu.grab(on && !!this.controller);
         if (on) {
+            // the frame before it shows: at once (a frame the renderer had may draw layers dropped while hidden)
+            this.showing = true;
             this.render();
+            this.showing = false;
         }
         this.gpu.show(on);
         clearInterval(this.keepalive);
         this.keepalive = on ? setInterval(() => {
             if (Date.now() - this.sentAt >= KEEPALIVE_MS) {
-                this.render();
+                this.render(true);
             }
         }, KEEPALIVE_MS) : null;
     }
 
     /* Draws the frame (sent while the renderer is ready and the page is
-     * shown, one at a time) and writes the top host state's proxies. */
-    render() {
+     * shown, one at a time) and writes the top host state's proxies. same:
+     * nothing but a scroll changed since the last build (the keepalive). */
+    render(same) {
         if (!this.mode || !this.w) {
             return;
         }
+        this.settleKey = null;
         const b0 = this.timing.on ? usNow() : 0;
         const t0 = this.timing.on ? msNow() : 0;
         const m = this._model();
+        const json = JSON.stringify(m);
+        if (!same || json !== this.drawn) {
+            this.gen++;
+            same = false;
+        }
+        this.drawn = json;
+        this.drawnFocus = this.focus;
         const tm = t0 ? msNow() : 0;
         const r = frame(m, { textScale: this.scale, focus: this.focus, scroll: this.scroll, layout: this.layout });
         if (t0) { this.timing.model += tm - t0; this.timing.layout += msNow() - tm; }
@@ -418,7 +464,12 @@ class Drawn extends EventEmitter {
         this.regions = r.regions;
         this._proxies();
         this._pictures(r.icons);
-        this._dragEnd();                    // built whole: a drag goes on from this page
+        if (this.drag && this.drag.gen !== this.gen) {
+            this._dragEnd();                // a drag goes on from this page
+        }
+        if (!same) {
+            this._prebuildSoon();
+        }
         if (t0) {
             const ms = msNow() - t0;
             this.timing.builds++; this.timing.build += ms; this.timing.buildMax = Math.max(this.timing.buildMax, ms);
@@ -428,7 +479,18 @@ class Drawn extends EventEmitter {
             return;
         }
         const now = Date.now();
-        if (this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
+        clearTimeout(this.held);
+        this.held = null;
+        const since = msNow() - this.pageAt;
+        if (!this.showing && since < PICTURES_MS && r.icons.some((f) => this.decoding.has(f))) {
+            // a new page: shown once its pictures are decoded (refresh), or as it is at PICTURES_MS
+            this.held = setTimeout(() => {
+                this.held = null;
+                this.render(true);
+            }, PICTURES_MS - since);
+            return;
+        }
+        if (!this.showing && this.gpu.waiting && now - this.sentAt < KEEPALIVE_MS) {
             this.dirty = true;
             return;
         }
@@ -437,16 +499,56 @@ class Drawn extends EventEmitter {
         this._send(rec, b0, b1, 'whole');
     }
 
-    /* The model changed (the updater's state, pictures decoded): built again now, or, while a drag moves
-     * cached rows, once the drag ends (its release builds the page); decoded pictures redraw the rows. */
+    /* The model may have changed (the updater's state, pictures decoded): built again now, or, while a drag
+     * moves cached rows, once the drag ends (its release builds the page); decoded pictures redraw the rows. A
+     * state the page was built from already draws nothing; its proxies are written again where they differ. */
     refresh(pictures) {
+        const same = !pictures && !!this.mode && JSON.stringify(this._model()) === this.drawn;
         if (this.touch && this.touch.drag) {
-            if (pictures && this.drag) {
-                this.drag.rowsStale = true;
+            if (!same) {
+                this.gen++;
+                if (pictures && this.drag) {
+                    this.drag.rowsStale = true;
+                }
             }
             return;
         }
+        if (same && this.focus === this.drawnFocus) {
+            this._proxies();                // cells the host asked to be written again
+            return;
+        }
         this.render();
+    }
+
+    /* A drag's layers made ahead for the page's largest scrolling grid or
+     * list, once it has stayed PREBUILD_MS, so a drag's first frame is as
+     * quick as the rest. */
+    _prebuildSoon() {
+        clearTimeout(this.prebuild);
+        this.prebuild = setTimeout(() => {
+            this.prebuild = null;
+            if (this.touch) {
+                this._prebuildSoon();
+                return;
+            }
+            if (!this.on_ || (this.drag && this.drag.gen === this.gen)) {
+                return;
+            }
+            const g = this.regions.filter((x) => x.max > 0).sort((a, b) => b.w * b.h - a.w * a.h)[0];
+            if (!g) {
+                return;
+            }
+            this._dragEnd();
+            this.timing.trace('prebuild-start', this.timing.sent);
+            this.drag = this._dragStart(g.key, this.gen);
+            if (this.drag) {
+                this._dragRows(this.drag, this.scroll[g.key] || 0);
+            }
+            this.timing.trace('prebuild-end', this.timing.sent);
+        }, PREBUILD_MS);
+        if (this.prebuild.unref) {
+            this.prebuild.unref();
+        }
     }
 
     _model() {
@@ -482,9 +584,9 @@ class Drawn extends EventEmitter {
      * the drag started, without the dragged grid's or list's rows, and those
      * rows are cached layers, so a frame is the two, the rows moved, and the
      * grid's scroll bar. The rows are drawn again when the ones shown leave
-     * them; both when the page was built whole since (render()). */
-    _dragFrame() {
-        const key = this.touch.region.key;
+     * them; both when the page changed (gen) since. key: the grid or list;
+     * gen: the page's as the touch started. */
+    _dragFrame(key, gen) {
         if (!this.on_) {
             this.render();
             return;
@@ -496,10 +598,10 @@ class Drawn extends EventEmitter {
         }
         const b0 = this.timing.on ? usNow() : 0;
         const t0 = this.timing.on ? msNow() : 0;
-        if (this.drag && this.drag.key !== key) {
+        if (this.drag && (this.drag.key !== key || this.drag.gen !== gen)) {
             this._dragEnd();
         }
-        const d = this.drag || (this.drag = this._dragStart(key));
+        const d = this.drag || (this.drag = this._dragStart(key, gen));
         if (!d) {
             this.render();
             return;
@@ -512,16 +614,17 @@ class Drawn extends EventEmitter {
         if (t0) { this.timing.drags++; this.timing.dragMs += msNow() - t0; }
         const b1 = b0 ? usNow() : 0;
         this.dirty = false;
+        this.settleKey = null;
         this.sentAt = now;
         this._send(r, b0, b1, 'drag');
     }
 
-    _dragStart(key) {
+    _dragStart(key, gen) {
         const view = dragOf(this._model(), { textScale: this.scale, scroll: this.scroll, layout: this.layout }, key);
         if (!view) {
             return null;
         }
-        return { key, view, baseLayer: kit.makeLayer(view.rec.w, view.rec.h, (r) => r.append(view.rec), this.scale), rowsLayer: null,
+        return { key, gen, view, baseLayer: kit.makeLayer(view.rec.w, view.rec.h, (r) => r.append(view.rec), this.scale), rowsLayer: null,
             from: 0, n: 0 };
     }
 
@@ -542,6 +645,16 @@ class Drawn extends EventEmitter {
         d.n = n;
     }
 
+    /* Hidden: the drag's layers and those retired dropped now (the next frame, once shown, is built whole). */
+    _dropKept() {
+        this._dragEnd();
+        this.retired.forEach((L) => {
+            kit.dropLayer(L);
+            this.gpu.dropLayer(L.layerId);
+        });
+        this.retired = [];
+    }
+
     /* The drag's layers retired: dropped after the next frame sent. */
     _dragEnd() {
         const d = this.drag;
@@ -550,6 +663,28 @@ class Drawn extends EventEmitter {
             this.retired.push(d.baseLayer);
             if (d.rowsLayer) {
                 this.retired.push(d.rowsLayer);
+            }
+        }
+    }
+
+    /* A drag ended. The page unchanged since it started: what a press finds where the rows came to rest, and
+     * the last position drawn from the drag's layers when it is still to go; else the page built again. */
+    _settle(t) {
+        if (!this.drag || this.drag.gen !== this.gen || this.drag.key !== t.region.key) {
+            this.render();
+            return;
+        }
+        this.timing.trace('settle-start', this.timing.sent);
+        const l = layoutOf(this._model(), { focus: this.focus, scroll: this.scroll, layout: this.layout });
+        this.drawnFocus = this.focus;
+        this.items = l.items;
+        this.regions = l.regions;
+        this._proxies();
+        this.timing.trace('settle-end', this.timing.sent);
+        if (this.dirty) {
+            this.settleKey = t.region.key;
+            if (!this.gpu.waiting) {
+                this._dragFrame(this.settleKey, this.gen);
             }
         }
     }
@@ -578,6 +713,7 @@ class Drawn extends EventEmitter {
         if (phase === 'down') {
             this.touch = { x, y, item: hit(this.items, x, y), drag: false, region: this.regions.find((g) =>
                 x >= g.x && x < g.x + g.w && y >= g.y && y < g.y + g.h) || null };
+            this.touch.gen = this.gen;
             if (this.touch.region) {
                 this.touch.from = this.scroll[this.touch.region.key] || 0;
             }
@@ -597,14 +733,14 @@ class Drawn extends EventEmitter {
                 if (this.on_ && this.gpu.waiting) {
                     this.dirty = true;          // drawn on the renderer's TICK
                 } else {
-                    this._dragFrame();
+                    this._dragFrame(t.region.key, t.gen);
                 }
             }
         } else if (this.touch && phase === 'up') {
             const t = this.touch;
             this.touch = null;
             if (t.drag) {
-                this.render();                  // where the rows came to rest: what a press finds there
+                this._settle(t);
             } else if (t.item >= 0 && hit(this.items, x, y) === t.item) {
                 this.host.act(this.items[t.item].act);
             }
@@ -636,6 +772,9 @@ class Drawn extends EventEmitter {
                 if (err || buf.length > ICON_BYTES) {
                     this.decoding.delete(f);
                     this.pics.set(f, { img: null, used: Date.now() });
+                    if (this.held) {
+                        this.render(true);          // a page held for its pictures: none of this one to wait for
+                    }
                     return;
                 }
                 png.decodeAsync(buf, (e, img) => {
