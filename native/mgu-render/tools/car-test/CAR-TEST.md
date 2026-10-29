@@ -35,15 +35,14 @@ restarts with nothing on screen, no head-unit restart. About 25 minutes.
    Owner: close the Store.
 3. `k install`, `k restart --off-screen`. Owner: open the Store and wait a
    second (the drag's layers are made ahead).
-4. `k drag swipes30`: the owner swipes the list in short quick strokes,
-   lifting the finger between them. `k drag drag30`: one slow drag up and
-   down without lifting. `k drag pages30`: the owner opens apps from the
+4. `k drag swipes60`: the owner swipes the list in short quick strokes,
+   lifting the finger between them. `k drag drag60`: one slow drag up and
+   down without lifting. `k drag pages60`: the owner opens apps from the
    list and goes back, and switches tabs, several times. The owner says
    what flickers, if anything. Owner: close the Store.
-5. `k ab fps.robertn_store=60`, `k restart --off-screen`. Owner: open the
-   Store. `k drag swipes60`, `k drag drag60`, `k drag pages60`, as in 4;
-   the owner says what flickers, during the drags and when the page
-   changes. Owner: close the Store.
+5. `k ab fps.robertn_store=30`, `k restart --off-screen`. Owner: open the
+   Store. `k drag swipes30`, `k drag drag30`, `k drag pages30`, as in 4;
+   the owner says what differs. Owner: close the Store.
 6. `k restore`, `k restart --off-screen`, `k status`.
 
 `<name>.trace.txt`: each step's median and p90, and the Store's work per
