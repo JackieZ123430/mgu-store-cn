@@ -12,7 +12,7 @@ It installs:
 - **app privacy**, which keeps installed apps out of the head unit's reports to BMW;
 - the **renderer**, which draws the Store and other apps' graphics;
 - **Python**, for apps the head unit builds from source;
-- the **internet uplink**, for internet through a USB adapter, an LTE stick or a tethered phone.
+- the **internet uplink**, for internet through a USB adapter, an LTE stick, a tethered phone or Wi-Fi.
 
 iDrive 8 is tested in an emulator only, not yet on a real car. On iDrive 8,
 installs and removals take effect at the next head-unit restart.
@@ -31,9 +31,9 @@ Installed: the apps and tools on the head unit.
 
 ![The Installed page, listing the installed apps and head-unit tools with their versions](docs/screenshots/installed.png)
 
-Settings: sources, accounts and phone access.
+Settings: sources, Wi-Fi, accounts and phone access.
 
-![Settings, with the two default sources, Accounts, Phone access and Check now](docs/screenshots/settings.png)
+![Settings, with the two default sources, Wi-Fi, Accounts, Phone access and Check now](docs/screenshots/settings.png)
 
 Adding a GitHub repository: pick its releases, tags or a branch.
 
@@ -151,10 +151,12 @@ through:
 - an LTE stick (e.g. Huawei E3372h);
 - an Android phone with USB tethering;
 - an iPhone with Personal Hotspot on, kept unlocked (tap **Trust** when
-  asked); its USB music playback stops while it tethers.
+  asked); its USB music playback stops while it tethers;
+- Wi-Fi, such as a phone's hotspot: Settings → **Wi-Fi**. On iDrive 7 the
+  car's own hotspot and wireless CarPlay keep working beside it, and
+  WPA3-only networks can't be joined.
 
-Phone tethering is not yet tested on a real car. The Store shows `Online`
-once connected.
+The Store shows `Online` once connected.
 
 ## Offline: USB stick
 
