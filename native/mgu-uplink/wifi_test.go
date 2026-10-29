@@ -230,6 +230,38 @@ func waitDone(t *testing.T, l *wifiLink, why string) {
 // Names wpa_supplicant escapes (a curly apostrophe, quotes, a backslash)
 // are recognised once joined; a password with '"' and '#' that wpa.conf
 // keeps joins again after the supplicant restarts.
+// The car blocks the radio under a running supplicant (connman switching its
+// Wi-Fi off blocks every WLAN rfkill): SCAN fails, and the provider takes
+// the interface again on its own, unblocking the radio, without Wi-Fi being
+// switched off and on.
+func TestWiFiRadioBlockedUnder(t *testing.T) {
+	fastWiFi(t)
+	scan := filepath.Join(t.TempDir(), "scan")
+	writeScan(t, scan, "0a:3c:ff:5b:bc:a7\t2437\t-40\t[WPA2-PSK-CCMP][ESS]\tHome\trightpass1")
+	p, _, soft := testProvider(t, scan)
+	t.Setenv(fakeRfkillEnv, soft)
+	p.start()
+	defer p.stop()
+	p.setEnabled(true)
+	waitWiFi(t, p, "idle", func(st wifiStatus) bool { return st.Link == "idle" && len(st.Networks) == 1 })
+	if err := p.scan(); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, soft, "1\n") // the car
+	// from the supplicant's FAIL, or the provider's tick came first
+	if err := p.scan(); err == nil || !strings.Contains(err.Error(), "radio is blocked") {
+		t.Fatalf("scan on a blocked radio: %v", err)
+	}
+	waitWiFi(t, p, "given up", func(st wifiStatus) bool { return st.Link == "failed" })
+	waitWiFi(t, p, "taken again", func(st wifiStatus) bool { return st.Link == "idle" && len(st.Networks) == 1 })
+	if v, _ := readSysctl(soft); v != "0" {
+		t.Fatalf("radio %q", v)
+	}
+	if err := p.scan(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWiFiEscapes(t *testing.T) {
 	fastWiFi(t)
 	scan := filepath.Join(t.TempDir(), "scan")

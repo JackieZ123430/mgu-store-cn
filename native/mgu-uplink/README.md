@@ -151,7 +151,12 @@ A check that fails (no answer from D-Bus, nl80211) is no reason to give
 Once it has `wlan1`, the provider unblocks its radio when rfkill
 soft-blocks it (and leaves it unblocked), turns IPv6 off on `wlan1` and
 brings it up; it puts IPv6 and the link state back when Wi-Fi is switched
-off or the service stops. When taking `wlan1` or running wpa_supplicant
+off or the service stops. When the car blocks the radio or sets `wlan1`
+down under it (connman switching its Wi-Fi off blocks every WLAN rfkill;
+wpa_supplicant then reports `INTERFACE_DISABLED` and refuses to scan), or
+`wlan1` is created again (the driver is reloaded around suspend; another
+`ifindex`), the provider lets go of `wlan1` and takes it again: at once
+after a supplicant that ran 2 min, else as a failure below. When taking `wlan1` or running wpa_supplicant
 fails, it is tried again after 30 s, waiting twice as long each time (and
 nothing is looked at meanwhile); after
 5 failures in a row Wi-Fi is `failed` until it is switched on again or the
