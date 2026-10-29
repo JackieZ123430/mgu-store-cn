@@ -13,7 +13,7 @@ busybox `udhcpc`), and routes only the configured uids through it:
 | Address | on `vethuplink`, without a prefix route in the main table |
 | Routes | table 110: the lease's subnet and a default via its router; `unreachable default` while offline |
 | Rules | pref 1100 `uidrange U lookup main suppress_prefixlength 0` (car networks), 1101 `uidrange U lookup 110`, 1102 `from <lease address> lookup 110` |
-| Firewall | `table inet mgu_uplink`: only the allowed uids leave through `vethuplink` (and `wlan1` while Wi-Fi is on), nothing connects in, nothing is forwarded; plus one `oifname "<interface>" accept comment "mgu-uplink"` per interface at the top of the unit's `ip filter output` chain |
+| Firewall | `table inet mgu_uplink`: only the allowed uids leave through `vethuplink` (and the Wi-Fi interface while Wi-Fi is on), nothing connects in, nothing is forwarded; plus one `oifname "<interface>" accept comment "mgu-uplink"` per interface at the top of the unit's `ip filter output` chain |
 | Lease for apps | `/var/opt/public/oap/oap_<uid>/data/uplink.json` per allowed app, `/run/mgu-uplink/lease.json` for everyone: `{interface, ip, prefix, router, dns[], leaseSeconds, updated}`, present only while online |
 | Device state | `/run/mgu-uplink/status.json`, below |
 
@@ -34,7 +34,7 @@ every 2 s:
 
 | Kind | Devices | How |
 |---|---|---|
-| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, joined by our wpa_supplicant (wifi.go, below) |
+| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, joined by our wpa_supplicant, or without `wlan1` the car's `wlan0` through the car's wpa_supplicant (wifi.go, below) |
 | `usb` | a USB Ethernet adapter the kernel drives (`asix`, `ax88179_178a`, `smsc95xx` on the unit), for example an AX88179 cabled to an LTE router | the kernel's interface, renamed to `vethuplink` and given its name back on stop |
 | `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`) or any other ECM device | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode with the usb_modeswitch Huawei message |
 | `rndis` | an Android phone in USB tethering: most phones (AOSP's default); control interface `e0/01/03`, `02/02/ff` or `ef/04/01` | usbfs, RNDIS (rndis.go) |
@@ -178,6 +178,26 @@ refused: wpa.conf can't keep it. A wpa.conf wpa_supplicant can't read is
 moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks;
 `error` says so until the next join or until Wi-Fi is switched.
 
+#### Without `wlan1`: the car's `wlan0`
+
+iDrive 7 units with the Broadcom chip (BCM4359, driver `bcmdhd`) have no
+`wlan1`, and the chip has no room for another interface: its station
+`wlan0` sits idle under the car's own D-Bus wpa_supplicant, which also runs
+the car's hotspot and wireless CarPlay on it (two P2P group owners). On
+these units the provider joins on `wlan0` through that supplicant
+(carwpa.go, `wifi.backend` `car-supplicant`), and the hotspot and CarPlay
+keep running. Everything else is as above: the same requests, saved
+networks in the same `wpa.conf`, DHCP, routing, firewall, and taking
+`wlan0` again after suspend.
+
+Our networks exist only in the car's supplicant's memory (it has no config
+file), tagged `id_str="mgu-uplink"`, and are removed when Wi-Fi is switched
+off, the service stops or the car starts using `wlan0`; a start removes
+the ones a killed run left. The car uses `wlan0` when its supplicant
+doesn't have it, holds a network of its own on it (connman joining one,
+for example), or has it down or its radio blocked (the car's Wi-Fi switched
+off); its radio is never unblocked. WPA2 personal and open networks.
+
 ### status.json
 
 `/run/mgu-uplink/status.json` (0644, present while the service runs), for
@@ -201,7 +221,7 @@ with `uplink = auto`, also `wifi`, and `preferred` while a group is preferred:
 | `wifi.link` | |
 |---|---|
 | `off` | Wi-Fi is switched off |
-| `unavailable` | no `wlan1`, or the car uses it (`error` says which); left alone |
+| `unavailable` | no Wi-Fi interface, or the car uses it (`error` says which); left alone |
 | `failed` | `wlan1` or wpa_supplicant did not start (`error`); tried again later (`error` says when), after 5 failures in a row not until switched on again |
 | `idle`, `scanning`, `connecting` | not joined; `ssid` is the network being joined |
 | `connected` | joined `ssid`; the uplink uses another device, or waits for DHCP |
@@ -209,7 +229,8 @@ with `uplink = auto`, also `wifi`, and `preferred` while a group is preferred:
 
 `networks` is the latest scan (the strongest per name, at most 20,
 strongest first), `saved` the saved names, `scanning` true for 8 s after a
-scan request, `signal` dBm. `error` keeps a failed join ("could not join
+scan request, `signal` dBm, `backend` what joins (`mgu-wpa` or
+`car-supplicant`) while Wi-Fi is on and there is a radio. `error` keeps a failed join ("could not join
 … (wrong password, or out of range)", after 40 s) until the next request.
 
 | `state` | |

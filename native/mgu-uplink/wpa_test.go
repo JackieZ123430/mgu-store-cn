@@ -136,8 +136,8 @@ func TestStockUsers(t *testing.T) {
 		{[][]string{{"/usr/sbin/wpa_supplicant_nxp", "-iwlan1", "-c/etc/wpa.conf"}}, "another wpa_supplicant", false},
 		{[][]string{{"/usr/sbin/wpa_supplicant_nxp", "-iwfd0", "-Dnl80211"}}, "", false},
 		{[][]string{dbusWPA, nxpConnman}, "", true},
-		{[][]string{dbusWPA, connman}, "connman manages", false},
-		{[][]string{dbusWPA, append([]string{"/usr/sbin/connmand_nxp"}, connman[1:]...)}, "connman manages", false},
+		{[][]string{dbusWPA, connman}, "connman manages", true},
+		{[][]string{dbusWPA, append([]string{"/usr/sbin/connmand_nxp"}, connman[1:]...)}, "connman manages", true},
 		{[][]string{{"/usr/sbin/connmand_nxp", "-n", "-iwfd0,wlan*"}}, "connman manages", false},
 		{[][]string{{"/usr/sbin/connmand-wait-online_nxp", "-i", "wlan1"}}, "", false},
 		{[][]string{{"/usr/sbin/wpa_supplicant", "-dsu"}}, "", true},
@@ -156,7 +156,8 @@ func TestStockUsers(t *testing.T) {
 			writeFile(t, filepath.Join(proc, strconv.Itoa(100+i), "cmdline"), strings.Join(a, "\x00")+"\x00")
 		}
 		u := stockUsers(proc, "wlan1", conf, main)
-		if tc.why == "" && u.why != "" || !strings.Contains(u.why, tc.why) || u.dbus != tc.dbus {
+		why := u.why + u.connman
+		if tc.why == "" && why != "" || !strings.Contains(why, tc.why) || u.dbus != tc.dbus {
 			t.Errorf("%v: %+v, want %q dbus %v", tc.args, u, tc.why, tc.dbus)
 		}
 	}

@@ -18,6 +18,9 @@ package main
 // interface keeps its name. An iPhone's hotspot is seen with Maximise
 // Compatibility on (2.4 GHz).
 //
+// Without wlan1, an idle Broadcom wlan0 joins through the car's own
+// wpa_supplicant instead (carwpa.go); everything else is the same.
+//
 // Wi-Fi is off until switched on (wifi = on, or a wifi-enable request);
 // off means only that the uplink does not use Wi-Fi: the radio and the
 // interface are left as they are. An interface the stock system uses
@@ -85,6 +88,7 @@ type wifiStatus struct {
 	Saved    []string      `json:"saved"`
 	Scanning bool          `json:"scanning"`
 	Error    *string       `json:"error"`
+	Backend  string        `json:"backend,omitempty"` // mgu-wpa, car-supplicant: what joins
 }
 
 // wifiRecord is what the provider changed on the interface, kept in the
@@ -94,12 +98,37 @@ type wifiRecord struct {
 	GivenBack bool      `json:"givenBack"` // the car has the interface; its IPv6 setting is back
 }
 
+// wifiBackend joins networks on the interface: our wpa_supplicant
+// (supplicant, wpa.go) or the car's (carSupplicant, carwpa.go).
+type wifiBackend interface {
+	name() string
+	ensure(proc string) error
+	stop()
+	isRunning() bool
+	ready() bool // requests can be served
+	upFor() time.Duration
+	takeSetAside() bool
+	status() map[string]string // wpa_state; ssid when joining or joined
+	signal() (int, bool)
+	scan() error
+	saved() map[string]int
+	networks() ([]wifiNetwork, []string)
+	join(ssid, psk string, open bool) error
+	joined() error
+	reload() error
+	forget(ssid string) error
+}
+
 type wifiProvider struct {
-	iface  string
+	ownIf  string // our radio's interface (wlan1)
+	carIf  string // the car's station interface (wlan0)
+	bcmdhd string // the Broadcom driver's module folder: carIf is its station
 	sys    string // /sys/class/net
 	proc   string // /proc
 	record string
-	wpa    *supplicant
+	mgu    *supplicant
+	car    *carSupplicant
+	wpa    wifiBackend // the one in use, with reqMu held
 	// linkUp turns IPv6 off on the interface and brings it up, and returns
 	// how it was.
 	linkUp func(iface string) (linkState, error)
@@ -128,6 +157,7 @@ type wifiProvider struct {
 	ownedAt   time.Time
 
 	mu        sync.Mutex
+	iface     string // the interface in use
 	enabled   bool
 	owned     bool // the radio and the interface are ours
 	ownedIdx  int  // the interface's index when taken
@@ -146,14 +176,46 @@ type wifiProvider struct {
 }
 
 func newWiFiProvider(c config, bin string) *wifiProvider {
+	mgu := &supplicant{bin: bin, iface: c.WiFiIf, conf: c.wpaConf(), ctrl: c.wpaCtrl(), local: c.wpaLocal()}
 	return &wifiProvider{
+		ownIf: c.WiFiIf, carIf: carIfname, bcmdhd: "/sys/module/bcmdhd",
 		iface: c.WiFiIf, sys: sysClassNet, proc: "/proc", record: c.wifiFile(), linkUp: wifiLinkUp,
 		iftype: nl80211Iftype, dbusHas: dbusSupplicantHas, connmanConf: "/etc/connman/main.conf",
-		wpa:  &supplicant{bin: bin, iface: c.WiFiIf, conf: c.wpaConf(), ctrl: c.wpaCtrl(), local: c.wpaLocal()},
+		mgu: mgu, car: newCarSupplicant(carIfname, c.wpaConf(), c.wpaCtrl()), wpa: mgu,
 		wake: make(chan struct{}, 1), stopc: make(chan struct{}), done: make(chan struct{}),
 		enabled: c.WiFi,
 		st:      wifiStatus{Enabled: c.WiFi, Link: "off", Networks: []wifiNetwork{}, Saved: []string{}},
 	}
+}
+
+// ifname is the interface in use.
+func (p *wifiProvider) ifname() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.iface
+}
+
+// pick chooses the interface and backend while the provider does not hold
+// one: our radio when the unit has it, else the car's idle Broadcom
+// station through the car's supplicant. false: no radio. With reqMu held.
+func (p *wifiProvider) pick() bool {
+	iface, b := p.ownIf, wifiBackend(p.mgu)
+	if !exists(filepath.Join(p.sys, p.ownIf)) {
+		if !exists(filepath.Join(p.sys, p.carIf)) || !exists(p.bcmdhd) {
+			return false
+		}
+		iface, b = p.carIf, p.car
+	}
+	p.mu.Lock()
+	changed := p.iface != iface
+	p.iface = iface
+	p.mu.Unlock()
+	if changed {
+		p.used, p.usedAt, p.kept = "", time.Time{}, ""
+		logf("wifi: %s through %s", iface, b.name())
+	}
+	p.wpa = b
+	return true
 }
 
 func (p *wifiProvider) start() {
@@ -209,10 +271,13 @@ func (p *wifiProvider) tick() {
 	case !st.Enabled:
 		p.release(errors.New("Wi-Fi switched off"), false)
 		st.Link = "off"
+	case !p.guarding() && !p.pick():
+		p.unavailable(&st, fmt.Sprintf("no Wi-Fi radio (%s)", p.ownIf))
 	case !exists(filepath.Join(p.sys, p.iface)):
 		p.release(fmt.Errorf("%s is gone", p.iface), false)
 		p.unavailable(&st, fmt.Sprintf("no Wi-Fi radio (%s)", p.iface))
 	default:
+		st.Backend = p.wpa.name()
 		p.up(&st)
 	}
 	p.publish(st)
@@ -420,9 +485,17 @@ func (p *wifiProvider) findStockUse() (string, bool) {
 	} else if t != nl80211Station {
 		return fmt.Sprintf("%s is in %s mode", p.iface, iftypeName(t)), true
 	}
-	u := stockUsers(p.proc, p.iface, p.wpa.conf, p.connmanConf)
+	u := stockUsers(p.proc, p.iface, p.mgu.conf, p.connmanConf)
 	if u.why != "" {
 		return u.why, true
+	}
+	if p.wpa == wifiBackend(p.car) {
+		// the car's supplicant has the interface and connman manages it:
+		// they are what the provider joins through
+		return p.car.carUse()
+	}
+	if u.connman != "" {
+		return u.connman, true
 	}
 	if u.dbus {
 		has, err := p.dbusHas(p.iface)
@@ -500,7 +573,11 @@ func (p *wifiProvider) own() error {
 	if owned {
 		return nil
 	}
+	// the car's radio stays as the car has it (a blocked one is carUse's)
 	rfkill, _ := filepath.Glob(filepath.Join(p.sys, p.iface, "phy80211", "rfkill*"))
+	if p.wpa != wifiBackend(p.mgu) {
+		rfkill = nil
+	}
 	for _, r := range rfkill {
 		if v, _ := readSysctl(filepath.Join(r, "hard")); v == "1" {
 			return errors.New("the radio is switched off (rfkill hard block)")
@@ -666,7 +743,7 @@ func (p *wifiProvider) ready() error {
 	case (st.Link == "unavailable" || st.Link == "failed") && st.Error != nil:
 		return errors.New(*st.Error)
 	// running, but its control socket not there yet: a request would fail
-	case !p.wpa.isRunning() || !exists(filepath.Join(p.wpa.ctrl, p.wpa.iface)):
+	case !p.wpa.ready():
 		return errors.New("Wi-Fi is starting")
 	}
 	return nil
@@ -836,6 +913,7 @@ func without(list []string, s string) []string {
 // fallback.
 type wifiLink struct {
 	p       *wifiProvider
+	iface   string
 	ssid    string
 	done    chan struct{}
 	stop    chan struct{}
@@ -845,8 +923,8 @@ type wifiLink struct {
 }
 
 func (p *wifiProvider) openLink(ssid string) *wifiLink {
-	l := &wifiLink{p: p, ssid: ssid, done: make(chan struct{}), stop: make(chan struct{})}
 	p.mu.Lock()
+	l := &wifiLink{p: p, iface: p.iface, ssid: ssid, done: make(chan struct{}), stop: make(chan struct{})}
 	p.link = l
 	p.mu.Unlock()
 	go l.watch()
@@ -888,9 +966,9 @@ func (l *wifiLink) watch() {
 	}
 }
 
-func (l *wifiLink) Ifname() string        { return l.p.iface }
+func (l *wifiLink) Ifname() string        { return l.iface }
 func (l *wifiLink) Done() <-chan struct{} { return l.done }
 func (l *wifiLink) Err() error            { return l.err }
 func (l *wifiLink) Close()                { l.once.Do(func() { close(l.stop) }) }
-func (l *wifiLink) String() string        { return fmt.Sprintf("Wi-Fi %s on %q", l.p.iface, l.ssid) }
+func (l *wifiLink) String() string        { return fmt.Sprintf("Wi-Fi %s on %q", l.iface, l.ssid) }
 func (l *wifiLink) device() statusDevice  { return statusDevice{Kind: kindWiFi, Name: l.ssid} }
