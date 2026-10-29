@@ -146,6 +146,7 @@ const WIFI = { enabled: true, link: 'idle', saved: [], scanning: false, error: n
 const gpuLog = [];
 let fpsAsked = null;
 const frames = [];
+const dropped = [];                     // layers the Store dropped
 class RenderClient extends EventEmitter {
     constructor() {
         super();
@@ -164,6 +165,7 @@ class RenderClient extends EventEmitter {
     fps(n) { fpsAsked = n; }
     grab(on) { this.grabbing = on; }
     frame(rec) { frames.push(rec); return true; }
+    dropLayer(id) { dropped.push(id); }
 }
 // FrontCCU: the sample callback the app subscribes with
 let frontCcu = null;
@@ -941,6 +943,60 @@ function runDrawn() {
         eq([lastText(proxy(1, 0)), lastText(proxy(1, 3)), lastText(proxy(1, 4)), lastText(proxy(1, 7))],
             ['Store', 'Settings', 'All', 'DOOM'], 'proxies in focus order: side menu, filters, tiles');
         eq(last(new RegExp(`^${proxy(1, 12)}\\.Visible`)), `${proxy(1, 12)}.Visible=0`, 'unused proxies hidden');
+        // a drag moves the grid's rows: each move one frame of two cached layers (the frame as the drag started, the
+        // rows); at rest the frame built again and the layers dropped
+        const many = Object.assign({}, st, { components: st.components.concat(Array.from({ length: 30 }, (_, i) =>
+            comp({ id: `x${i}`, title: `Extra ${i}`, version: '1.0.0', installed: null, status: 'available' }))) });
+        app._client.emit('state', many);
+        const g = drawn.regions.find((r) => r.max > 0);
+        eq(!!g, true, 'a grid that scrolls');
+        const n0 = frames.length, x0 = g.x + 40, y0 = g.y + g.h - 20;
+        gpu.emit('touch', 'down', x0, y0);
+        [30, 80, 160, 400].forEach((dy) => gpu.emit('touch', 'move', x0, y0 - dy));
+        const moves = frames.slice(n0);
+        eq([moves.length, moves.every((f) => !!f.layersUsed && f.layersUsed.size === 2)], [4, true], 'a frame of two layers each move');
+        eq(drawn.scroll[g.key] > 1, true, 'the rows scrolled');
+        const d0 = dropped.length;
+        gpu.emit('touch', 'up', x0, y0 - 400);
+        const rest = frames[frames.length - 1];
+        eq([frames.length - n0, !rest.layersUsed || !rest.layersUsed.size, dropped.length - d0], [5, true, 2],
+            'at rest: the frame built again, the drag\'s two layers dropped');
+        const top = drawn.scroll[g.key], first = drawn.items.find((i) => i.label === 'DOOM');
+        eq(Math.round(first.y), Math.round(g.y - top * g.step), 'items where the rows came to rest');
+        // the page built whole during a drag (a state change): the next drag frame draws from it, the old layers dropped
+        // (a frame pending at the renderer: the whole build waits for its TICK, the drag frame after it draws from it)
+        gpu.emit('touch', 'down', x0, y0);
+        gpu.emit('touch', 'move', x0, y0 - 40);
+        const before = [...frames[frames.length - 1].layersUsed];
+        gpu.waiting = true;
+        const n2 = frames.length, d1 = dropped.length;
+        app._client.emit('state', Object.assign({}, many, { busy: { id: 'x3', op: 'install', phase: 'download', progress: 10 } }));
+        gpu.emit('touch', 'move', x0, y0 - 80);
+        eq(frames.length, n2, 'nothing sent while a frame is pending');
+        gpu.waiting = false;
+        gpu.emit('tick');
+        const after = [...frames[frames.length - 1].layersUsed];
+        eq([frames.length - n2, after.length, after.some((id) => before.indexOf(id) >= 0), dropped.slice(d1).sort()],
+            [1, 2, false, before.sort()], 'at the TICK: a drag frame of new layers from the new state, the old ones dropped');
+        gpu.emit('touch', 'up', x0, y0 - 80);
+        // a drag the rows cannot follow (past the top) draws nothing
+        drawn.scroll = {};
+        drawn.render();
+        const n1 = frames.length;
+        gpu.emit('touch', 'down', x0, g.y + 20);
+        [40, 80, 120].forEach((dy) => gpu.emit('touch', 'move', x0, g.y + 20 + dy));
+        eq(frames.length - n1, 0, 'no drag frames where the rows cannot move');
+        gpu.emit('touch', 'up', x0, g.y + 140);
+        // the renderer's connection lost mid-drag: the gesture ends with it
+        gpu.emit('touch', 'down', x0, y0);
+        gpu.emit('touch', 'move', x0, y0 - 40);
+        gpu.emit('close');
+        eq([drawn.touch, drawn.drag], [null, null], 'a lost connection ends the drag');
+        gpu.emit('ready', { w: 1920, h: 720 }, { version: 1, modes: ['layer', 'embed'], embedBox: { x: 104, y: 88, w: 1796, h: 632 },
+            appArea: { x: 108, y: 82, w: 1790, h: 638 }, controller: false, touch: true, pixmap: true });
+        app._states[host(1)].emit('visible', { visible: true });
+        drawn.scroll = {};
+        app._client.emit('state', st);
         // focus moves with the HMI's
         app._components[proxy(1, 9)].emit('focus', { value: true });
         eq(drawn.focus, 9);
@@ -1440,7 +1496,7 @@ function runTiming() {
     const t = new Timing(file, out);
     const read = () => { lines.length = 0; try { lines.push(...fs.readFileSync(out, 'utf8').split('\n').filter(Boolean)); } catch (e) { /* none yet */ } };
     const second = () => new Promise((r) => { t._second(); setTimeout(() => { read(); r(); }, 50); });
-    const busy = () => { t.builds = 2; t.build = 3; t.buildMax = 2; t.frames = 2; t.send = 0.4; t.touches = 5; t.touchMs = 4; };
+    const busy = () => { Object.assign(t, { builds: 2, build: 3, buildMax: 2, model: 1, layout: 1.6, drags: 4, dragMs: 0.8, frames: 6, send: 1.2, touches: 5, touchMs: 4 }); };
     busy();
     return second().then(() => {
         eq([t.on, lines.length], [false, 0], 'no stats-log: off, nothing logged');
@@ -1453,7 +1509,7 @@ function runTiming() {
         return second();
     }).then(() => {
         eq(lines.length, 1);
-        eq(/^\d{4}-\d\d-\d\dT[\d:.]+Z stats store: 2 builds avg 1\.5 ms max 2\.0 ms, 2 frames sent avg 0\.2 ms, 5 touch events 4 ms, cpu \d+ %$/.test(lines[0]), true, lines[0]);
+        eq(/^\d{4}-\d\d-\d\dT[\d:.]+Z stats store: 2 builds avg 1\.5 ms max 2\.0 ms \(model 0\.5, layout 0\.8\), 4 drag frames avg 0\.2 ms, 6 frames sent avg 0\.2 ms, 5 touch events 4 ms, cpu \d+ %$/.test(lines[0]), true, lines[0]);
         fs.unlinkSync(file);
         busy();
         return second();
