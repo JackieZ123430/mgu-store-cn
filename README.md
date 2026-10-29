@@ -87,7 +87,7 @@ The side menu has four pages:
   update available, restart pending, …).
 - **Installed**: what is installed, with **Update** and **Update all**.
 - **USB**: what a plugged-in USB stick offers.
-- **Settings**: sources, accounts, phone access, **Check now** and
+- **Settings**: sources, Wi-Fi, accounts, phone access, **Check now** and
   **Restart head unit**.
 
 Open an app or tool to install, update or remove it. Updates never install
