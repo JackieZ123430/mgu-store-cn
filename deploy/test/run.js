@@ -839,6 +839,7 @@ function testFallback() {
         !fs.existsSync(path.join(sys, 'multi-user.target.wants/mgu-app-fallback.service')) && !fs.existsSync(copy), off.out);
 
     testFallbackHook();
+    testQueueFirst();
 
     const main = stockMain();
     [['a duplicated class anchor', main.replace(CLASS_ANCHOR, `${CLASS_ANCHOR}}${CLASS_ANCHOR}`)],
@@ -934,6 +935,45 @@ function testFallbackHook() {
         JSON.stringify(handle('our_app', { '-enabled': 'false' })) === '{"-enabled":"false"}');
     check('fallback hook: an app custom_apps.json does not list is unchanged',
         handle('other_app', undefined) === undefined);
+}
+
+/* The copy built from fixtures/main_queue.js: our apps' installs go first in
+ * the controller's queue, behind the one running; an app not listed waits its
+ * turn. The stock fixture main.js lacks the anchors: built without, said. */
+function testQueueFirst() {
+    const dir = fs.mkdtempSync(path.join(T, 'queue-'));
+    const list = path.join(dir, 'custom_apps.json');
+    write(list, JSON.stringify({ our_app: {}, their_app: { '-appStartType': 'manually' } }));
+    const build = (fixture, out) => cp.spawnSync(UNIT_NODE, [path.join(DEPLOY, 'unit', 'fallback_build.js'),
+        path.join(HERE, 'fixtures', fixture), path.join(dir, out), list], { encoding: 'utf8' });
+    const run = (built) => {
+        const r = cp.spawnSync(UNIT_NODE, [path.join(HERE, 'queue_first.js'), path.join(dir, built)], { encoding: 'utf8' });
+        try { return JSON.parse(r.stdout); } catch (e) { return { error: r.stdout + r.stderr }; }
+    };
+    const b = build('main_queue.js', 'built.js');
+    check('queue first: builds from the queue fixture, with no note', b.status === 0 && !b.stdout.includes('install queue'), b.stdout + b.stderr);
+    if (b.status !== 0) return;
+    /* not before every one of BMW's apps had its next try (or not yet at all) */
+    const late = (o, a) => { const i = (o.ran || []).indexOf(a); return i < 0 || i > 7; };
+    const r = run('built.js'), ran = r.ran || [];
+    check('queue first: ours run right behind the one running, in their order, ahead of the others waiting',
+        ran.indexOf('our_app') === 2 && ran.indexOf('their_app') === 3 && late(r, 'other_app'), JSON.stringify(r));
+    check('queue first: ours are done before the retry waits of the others', r.done && r.done.our_app < 300 && r.done.their_app < 300,
+        JSON.stringify(r));
+    check('queue first: MainApp\'s log says what moved',
+        (r.log || []).join('|') === 'mgu-deploy: install our_app queued ahead of 5 other install(s)|' +
+            'mgu-deploy: install their_app queued ahead of 5 other install(s)', JSON.stringify(r.log));
+    write(list, '{}');
+    const s = run('built.js');
+    check('queue first: an app custom_apps.json no longer lists waits its turn', late(s, 'our_app') && !(s.log || []).length,
+        JSON.stringify(s));
+    write(list, 'not json');
+    const u = run('built.js');
+    check('queue first: an unreadable custom_apps.json leaves the queue as it is', late(u, 'our_app') && !(u.log || []).length, JSON.stringify(u));
+    const p = build('main.js', 'plain.js');
+    check('queue first: a main.js without its anchors is built without it, said',
+        p.status === 0 && p.stdout.includes('anchors for our apps first in the install queue not found exactly once') &&
+        !fs.readFileSync(path.join(dir, 'plain.js'), 'utf8').includes('mgu-deploy apps first'), p.stdout + p.stderr);
 }
 
 /* ---- in-place install --------------------------------------------------------------------- */

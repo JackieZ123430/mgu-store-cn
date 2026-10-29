@@ -1,5 +1,9 @@
 # Deploy tool changelog
 
+## 0.6.4
+
+- iDrive 7: our apps go first in MainApp's install queue. On a car without ConnectedDrive, MainApp tries each of BMW's online apps again at every start of the app manager; each one fails only after its network retries and goes back to the end of the queue, and the wait between tries doubles from 40 s for all of them. An app install that restarted the app manager waited about half an hour behind them. The fallback copy of `main.js` now moves an install or update of an app `custom_apps.json` lists to right behind the one running, ahead of the others (ours keep their order), and runs it without the retry wait the others left. It waits for one BMW try at most. The copy is built with this from the next start of the app manager: the boot unit's build, or the build before the deploy tool restarts it. Without its anchors, the copy is built without it, as before.
+
 ## 0.6.3
 
 - iDrive 7 with MainApp 8.1.1: app installs and updates work. MainApp 8.1.1 records no install source for an app, so an install counts as done once the app's registry entry, its files at the new version and its keychain are there. It does not update apps when it starts, so an update that cannot be made in place restarts the app manager once and then has it update the app in place.

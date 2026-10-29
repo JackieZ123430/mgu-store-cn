@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.11
+
+Needs mgu-deploy 0.6.4, so updating the Store from the Store brings it
+first: our apps go first in the app manager's install queue, and an app
+install no longer waits behind BMW's online apps when the car has no
+ConnectedDrive.
+
 ## 0.9.10
 
 While mgu-render's stats-log (`/run/mgu-render/stats-log`) exists, the
