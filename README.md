@@ -202,6 +202,19 @@ Each component's README covers its build and tests.
 installs components from a checkout; [`release/README.md`](release/README.md)
 covers releases.
 
+## Simplified Chinese translation
+
+English is the default documentation and build language. The complete
+[Simplified Chinese README](README.zh-CN.md) and opt-in Chinese Store build
+are maintained alongside it; build instructions are in the
+[Store README](apps/robertn_store/README.md#simplified-chinese).
+
+Chinese translation and in-app localization credits: **Douyin 小白科技杂物社 ·
+BiliBili 小白151 · GitHub [JackieZ123430](https://github.com/JackieZ123430)**.
+The Chinese build includes the translation credit in the corner, Settings
+and native widget screens. Original project and third-party attribution
+remains in place.
+
 ## License
 
 Copyright (C) 2026 Robert Nisipeanu and IterioDev. GPL-3.0-or-later
