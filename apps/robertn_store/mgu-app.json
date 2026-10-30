@@ -28,7 +28,12 @@
     "src/kit_themes.js",
     "src/font_regular.js",
     "src/font_semibold.js",
-    "lib/mgu_render_client.js"
+    "lib/mgu_render_client.js",
+    "src/language.js",
+    "src/locale_zh.js",
+    "src/i18n.js",
+    "src/hmi_text.js",
+    "src/font_chinese.js"
   ],
   "sdk": [
     "oap-sdk/src/core/OnlineApp.js",

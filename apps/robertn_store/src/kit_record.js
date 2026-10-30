@@ -49,7 +49,7 @@ function atlasId(f, family) {
     if (id === undefined) {
         // stable across runs and apps (the daemon shares atlases by id): family + size
         id = 0;
-        const k = family + '@' + f.size;
+        const k = family + '@' + f.size + (f.cacheKey ? '@' + f.cacheKey : '');
         for (let i = 0; i < k.length; i++) id = (Math.imul(id, 31) + k.charCodeAt(i)) >>> 0;
         id = (id | 1) >>> 0;
         atlasIds.set(f, id); atlasList.push({ id, f });
@@ -219,7 +219,7 @@ class Recorder {
     text(str, x, y, size, c, opts) {
         opts = opts || {};
         const family = opts.font || 'label';
-        const f = fonts.get(family, size * this.textScale);
+        const f = fonts.get(family, size * this.textScale, String(str));
         if (!f) return 0;
         const s = String(str), sc = size / f.size, sp = opts.spacing || 0;
         const w = fonts.measure(f, s) * sc + sp * Math.max(0, s.length - 1);
@@ -248,7 +248,7 @@ class Recorder {
         return w;
     }
     textWidth(str, size, opts) {
-        const f = fonts.get((opts && opts.font) || 'label', size * this.textScale);
+        const f = fonts.get((opts && opts.font) || 'label', size * this.textScale, String(str));
         const s = String(str);
         return f ? fonts.measure(f, s) * (size / f.size) + ((opts && opts.spacing) || 0) * Math.max(0, s.length - 1) : 0;
     }

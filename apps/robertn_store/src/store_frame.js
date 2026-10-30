@@ -22,6 +22,7 @@
  * scroll ({ key: rows scrolled, fractional }) is kept by the caller and
  * follows the focus.
  */
+const { staticOptions, chinese, credit } = require('./i18n.js');
 const SCREENS = require('./am_screens.js');
 const { record } = require('./am_gpu.js');
 const { Recorder } = require('./kit_record.js');
@@ -142,7 +143,7 @@ function screenOf(v, scroll, layout) {
     const def = (layout || SCREENS).screens.find((s) => s.name === v.screen);
     return { kind: 'gpu', name: def.name, theme: def.theme, bg: 'theme',
         components: def.components.map((c) => {
-            const opts = Object.assign({}, c.opts, v.values[c.name] || {});
+            const opts = Object.assign({}, staticOptions(c.opts), v.values[c.name] || {});
             if (layout) {
                 SIZES.filter((k) => c.opts[k] !== undefined).forEach((k) => { opts[k] = c.opts[k]; });
             }
@@ -230,6 +231,10 @@ function frame(m, opts) {
     const o = opts || {};
     const l = layoutOf(m, o);
     const rec = record(l.st, recordOpts(o.layout || null, o.textScale));
+    if (chinese) {
+        const vp = o.layout ? { x: 0, y: 0, w: o.layout.design.w } : VIEWPORT;
+        rec.text(credit, vp.x + vp.w - 12, vp.y + 14, 12, '#ffffff40', { align: 'right' });
+    }
     const f = l.items[o.focus];
     if (f && !f.reveal) {
         rec.strokeRoundRect(f.x - 8, f.y - 8, f.w + 16, f.h + 16, f.r + 8, 5, FOCUS);

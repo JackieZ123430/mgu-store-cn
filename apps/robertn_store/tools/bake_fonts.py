@@ -27,8 +27,10 @@ FACES = {'regular': ('Inter-Regular.ttf', [17, 23, 31, 41, 50]),
 PAD = 1
 
 
-def bake(path, size):
+def bake(path, size, weight=None):
     f = ImageFont.truetype(path, size)
+    if weight is not None:
+        f.set_variation_by_axes([weight])
     ascent, descent = f.getmetrics()
     glyphs, boxes = {}, []
     for ch in TEXT:

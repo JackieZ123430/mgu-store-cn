@@ -24,7 +24,15 @@ function family(name) {
 }
 
 /** Smallest baked size >= requested (downscaling looks better), else largest. */
-function get(name, size) {
+function get(name, size, text) {
+    if (text && /[\u3000-\u9fff\uff00-\uffef]/.test(text)) {
+        const face = require('./font_chinese.js');
+        const atlas = face.sizes[0];
+        if (!atlas._decoded) {
+            atlas._decoded = Object.assign({}, atlas, { alpha: zlib.inflateSync(Buffer.from(atlas.alpha, 'base64')), cacheKey: face.cacheKey });
+        }
+        return atlas._decoded;
+    }
     const fam = family(name);
     let best = null;
     for (const f of fam) {

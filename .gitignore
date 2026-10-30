@@ -9,4 +9,6 @@ native/*/build/
 # Release builds and local publish target (release/README.md)
 release/out/
 release/published/
+apps/robertn_store/build-zh-*/
+__pycache__/
 

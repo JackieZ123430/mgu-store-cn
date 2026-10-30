@@ -59,6 +59,8 @@
  * when opened again.
  */
 'use strict';
+const { t: tr, chinese } = require('./i18n.js');
+const { HmiText } = require('./hmi_text.js');
 
 const fs = require('fs');
 const os = require('os');
@@ -487,7 +489,7 @@ class Store extends OnlineApp {
         // Presses also arrive as the application's raw 'userEvent'; both paths
         // land in _press, which keeps a press delivered twice to one.
         rhmi.on('userEvent', (ev) => {
-            const entry = ev && ev.eventType === 'ACTION' && this._actionById[Number(ev.sourceId)];
+            const entry = ev && ev.eventType === tr("ACTION") && this._actionById[Number(ev.sourceId)];
             if (entry) {
                 this._press(entry.name, entry.handler, Number((ev.parameterMap || {})[ROW_KEY]) || 0);
             }
@@ -694,12 +696,12 @@ class Store extends OnlineApp {
     _wifiPassword(ssid) {
         this._uplinkNote = null;
         this._spell(ssid, (m) => { this._uplinkNote = sourcesMessage(m); this._render(); },
-            { label: 'Password', layout: 'text', symbols: true, go: 'Connect', min: 8, max: 63, secret: 'password' }).then((psk) => {
+            { label: tr("Password"), layout: 'text', symbols: true, go: tr("Connect"), min: 8, max: 63, secret: 'password' }).then((psk) => {
             if (!psk) {
                 return;
             }
             if (!/^[\x20-\x7e]{8,63}$/.test(psk)) {
-                this._uplinkNote = 'A Wi-Fi password is 8 to 63 letters, digits and symbols';
+                this._uplinkNote = tr("A Wi-Fi password is 8 to 63 letters, digits and symbols");
                 this._render();
                 return;
             }
@@ -788,7 +790,7 @@ class Store extends OnlineApp {
         try {
             handler(row);
         } catch (err) {
-            logger.warn(`${name} failed: ${err && err.message}`);
+            logger.warn(tr("{0} failed: {1}", name, err && err.message));
         }
     }
 
@@ -850,7 +852,7 @@ class Store extends OnlineApp {
     _signIn() {
         this._login = { waiting: true, refusal: null };
         if (this._privileged({ op: 'login-start' })) {
-            logger.info('GitHub sign-in');
+            logger.info(tr("GitHub sign-in"));
             this._openPage('login', { name: 'login' });
         } else {
             this._login.waiting = false;
@@ -1017,7 +1019,7 @@ class Store extends OnlineApp {
 
     _addSource() {
         this._note(null);
-        this._spell('Add source').then((text) => {
+        this._spell(tr("Add source")).then((text) => {
             const typed = (text || '').trim();
             if (!typed) {
                 return;
@@ -1037,7 +1039,7 @@ class Store extends OnlineApp {
      * whose it is before it stores it; the status line says what came of it. */
     _addToken() {
         this._endTokenAdd(null);
-        this._spell('GitHub token', (m) => this._accountNote(m), { secret: true }).then((text) => {
+        this._spell(tr("GitHub token"), (m) => this._accountNote(m), { secret: true }).then((text) => {
             const token = (text || '').trim();
             if (!token) {
                 return;
@@ -1314,7 +1316,9 @@ class Store extends OnlineApp {
             return;
         }
         this._written[key] = value;
-        Promise.resolve(comp.setValue(row, cell, value, type))
+        Promise.resolve(chinese && type === 'Text' && typeof value === 'string'
+            ? (this._unicode || (this._unicode = new HmiText())).set(comp, name, row, cell, value)
+            : comp.setValue(row, cell, value, type))
             .catch((err) => logger.warn(`render ${key} failed: ${err && err.message}`));
     }
 
@@ -1348,13 +1352,13 @@ class Store extends OnlineApp {
         const st = this._st;
         const connected = this._connected && !!st;
         this._set(C.status, 'Text', connected ? statusLine(st, true) : statusLine(null, false, !!readSecret()), 'Text');
-        this._set(C.check, 'Text', connected && st.catalog.checking ? 'Checking' : 'Check for updates', 'Text');
+        this._set(C.check, 'Text', connected && st.catalog.checking ? tr("Checking") : tr("Check for updates"), 'Text');
 
         const busy = connected ? st.busy : null;
         const busyRow = busy && st.components.find((c) => c.id === busy.id);
         if (busyRow) {
             const done = busy.phase === 'download' ? percent(busy) / 100 : 1;
-            this._set(C.progress, 'TextLeft', `${PHASE[busy.phase] || 'Installing'} ${busyRow.title}`, 'Text');
+            this._set(C.progress, 'TextLeft', `${PHASE[busy.phase] || tr("Installing")} ${busyRow.title}`, 'Text');
             this._set(C.progress, 'TextRight', busy.phase === 'download' ? `${percent(busy)}%` : '', 'Text');
             this._set(C.progress, 'Progress', done, 'Float');
         }

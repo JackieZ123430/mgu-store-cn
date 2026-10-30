@@ -1,4 +1,5 @@
 'use strict';
+const { t: tr, chinese } = require('./i18n.js');
 /**
  * The Store's screens laid out for a box under 700 px high (iDrive 7: the
  * page template's 1796 x 632, or the app area's 1790 x 638), at scale 1:
@@ -53,9 +54,9 @@ function compact(W, H) {
     const ONLINE_W = 190;
     const filterX = R - ONLINE_W - 20 - FILTER_W;
     const store = screen('store', 0, [
-        title('Store'),
-        status('subtitle', X + 160, filterX - X - 180),
-        el('filter', 'tabs', filterX, M + 2, FILTER_W, 60, { items: 'All,Apps,Tools', sel: 0, style: 'joined', size: 24 }),
+        title(tr("Store")),
+        status('subtitle', X + (chinese ? 250 : 160), filterX - X - (chinese ? 270 : 180)),
+        el('filter', 'tabs', filterX, M + 2, FILTER_W, 60, { items: tr("All,Apps,Tools"), sel: 0, style: 'joined', size: 24 }),
         el('online', 'chips', R - ONLINE_W, M + 8, ONLINE_W, 48, { items: '', align: 'right' }),
         grid()
     ]);
@@ -64,12 +65,12 @@ function compact(W, H) {
     const colW = (CW - 24) / 2;
     const LIST_Y = HEAD + 38;
     const installed = screen('installed', 1, [
-        title('Installed'),
+        title(tr("Installed")),
         status('subtitle', X + 240, CW - 240 - 380),
         button('updateAll', R - 360, M, 360, 66, '', 'primary', 25, { vicon: 'arrowDown', color: BLUE }),
-        label('appsLabel', X, HEAD + 8, 'APPS'),
-        list('apps', X, LIST_Y, colW, B - LIST_Y, { empty: 'No apps installed' }),
-        label('svcLabel', X + colW + 24, HEAD + 8, 'HEAD-UNIT TOOLS'),
+        label('appsLabel', X, HEAD + 8, tr("APPS")),
+        list('apps', X, LIST_Y, colW, B - LIST_Y, { empty: tr("No apps installed") }),
+        label('svcLabel', X + colW + 24, HEAD + 8, tr("HEAD-UNIT TOOLS")),
         list('services', X + colW + 24, LIST_Y, colW, B - LIST_Y)
     ]);
 
@@ -78,18 +79,18 @@ function compact(W, H) {
     const rw = R - rx;
     const SET_H = 72;
     const settings = screen('settings', 3, [
-        title('Settings'),
+        title(tr("Settings")),
         status('note', X + 230, CW - 230, AMBER),
-        label('reposLabel', X, HEAD + 8, 'SOURCES'),
+        label('reposLabel', X, HEAD + 8, tr("SOURCES")),
         list('repos', X, LIST_Y, leftW, B - SET_H - 12 - LIST_Y),
-        button('addRepo', X, B - SET_H, leftW, SET_H, 'Add source', 'tinted', 25, { vicon: 'plus', color: BLUE }),
+        button('addRepo', X, B - SET_H, leftW, SET_H, tr("Add source"), 'tinted', 25, { vicon: 'plus', color: BLUE }),
         el('connPanel', 'rect', rx, HEAD + 4, rw, B - HEAD - 4, { color: 'panelTop', radius: 20 }),
-        label('connLabel', rx + 18, HEAD + 18, 'ACCESS'),
+        label('connLabel', rx + 18, HEAD + 18, tr("ACCESS")),
         list('access', rx + 12, HEAD + 52, rw - 24, 2 * LIST.rowH),
         text('unit', rx + 18, HEAD + 60 + 2 * LIST.rowH, rw - 36, 34, '', 26, 'bold'),
         text('versions', rx + 18, HEAD + 100 + 2 * LIST.rowH, rw - 36, 60, '', 22, 'label', DIM, { wrap: true }),
-        button('checkNow', rx + 16, B - SET_H - 14, (rw - 44) / 2, SET_H, 'Check now', 'outline', 25, { vicon: 'refresh' }),
-        button('restart', rx + 28 + (rw - 44) / 2, B - SET_H - 14, (rw - 44) / 2, SET_H, 'Restart head unit', 'outline', 25,
+        button('checkNow', rx + 16, B - SET_H - 14, (rw - 44) / 2, SET_H, tr("Check now"), 'outline', 25, { vicon: 'refresh' }),
+        button('restart', rx + 28 + (rw - 44) / 2, B - SET_H - 14, (rw - 44) / 2, SET_H, tr("Restart head unit"), 'outline', 25,
             { vicon: 'refresh' })
     ]);
 
@@ -134,7 +135,7 @@ function compact(W, H) {
         text('title', sx + 176, sy + 44, SW - 216, 50, '', 41, 'bold'),
         text('text', sx + 176, sy + 104, SW - 216, 32, '', 26, 'label', DIM),
         button('now', sx + 40, sy + SH - 126, BW, 90, '', 'primary', 31, { color: BLUE }),
-        button('later', sx + 60 + BW, sy + SH - 126, BW, 90, 'Cancel', 'outline', 31),
+        button('later', sx + 60 + BW, sy + SH - 126, BW, 90, tr("Cancel"), 'outline', 31),
         text('note', sx + 40, sy + SH - 30, SW - 80, 24, '', 21, 'label', DIM, { align: 'center' })
     ]);
 
@@ -148,7 +149,7 @@ function compact(W, H) {
         text('state', ix, M + 66, sw, 32, '', 27, 'label', DIM),
         el('facts', 'chips', ix, M + 104, sw, 44, { items: [] }),
         text('desc', X, M + 166, qx - X - 24, B - BTN_H - 24 - M - 166, '', 26, 'label', AMBER, { wrap: true }),
-        button('remove', X, B - BTN_H, 420, BTN_H, 'Remove', 'outline', 29, { vicon: 'trash' }),
+        button('remove', X, B - BTN_H, 420, BTN_H, tr("Remove"), 'outline', 29, { vicon: 'trash' }),
         el('panel', 'rect', qx, M, QR_PW, H - 2 * M, { color: 'panelTop', radius: 20 }),
         text('appLabel', qx + 20, M + 14, QR_PW - 40, 34, '', 26, 'bold'),
         el('appQr', 'qr', qx + 30, M + 58, QR_PW - 60, QR_PW - 60, { text: '' }),
@@ -158,11 +159,11 @@ function compact(W, H) {
     const titleX = X + 84;
     const accounts = screen('accounts', 3, [
         back(),
-        title('Accounts', titleX),
+        title(tr("Accounts"), titleX),
         status('status', titleX + 260, CW - 360),
-        list('list', X, HEAD + 14, Math.min(1100, CW), B - BTN_H - 16 - HEAD - 14, { empty: 'None' }),
-        button('signIn', X, B - BTN_H, 520, BTN_H, 'Sign in with GitHub', 'primary', 29, { vicon: 'plus', color: BLUE }),
-        button('addToken', X + 544, B - BTN_H, 360, BTN_H, 'Add token', 'outline', 29, { vicon: 'plus' })
+        list('list', X, HEAD + 14, Math.min(1100, CW), B - BTN_H - 16 - HEAD - 14, { empty: tr("None") }),
+        button('signIn', X, B - BTN_H, 520, BTN_H, tr("Sign in with GitHub"), 'primary', 29, { vicon: 'plus', color: BLUE }),
+        button('addToken', X + 544, B - BTN_H, 360, BTN_H, tr("Add token"), 'outline', 29, { vicon: 'plus' })
     ]);
     const pick = screen('pick', 3, [
         back(),
@@ -170,25 +171,25 @@ function compact(W, H) {
         text('title', titleX, M + 2, CW - 84 - 440, 60, '', 50, 'bold'),
         status('status', R - 420, 420),
         list('list', X, HEAD + 14, Math.min(1100, CW), B - BTN_H - 16 - HEAD - 14, { empty: '' }),
-        button('signIn', X, B - BTN_H, 520, BTN_H, 'Sign in with GitHub', 'primary', 29, { vicon: 'plus', color: BLUE }),
-        button('addToken', X + 544, B - BTN_H, 360, BTN_H, 'Add token', 'outline', 29, { vicon: 'plus' }),
-        button('retry', X, B - BTN_H, 360, BTN_H, 'Try again', 'outline', 29, { vicon: 'refresh' })
+        button('signIn', X, B - BTN_H, 520, BTN_H, tr("Sign in with GitHub"), 'primary', 29, { vicon: 'plus', color: BLUE }),
+        button('addToken', X + 544, B - BTN_H, 360, BTN_H, tr("Add token"), 'outline', 29, { vicon: 'plus' }),
+        button('retry', X, B - BTN_H, 360, BTN_H, tr("Try again"), 'outline', 29, { vicon: 'refresh' })
     ]);
     const QR = Math.min(B - HEAD - 10, 520);
     const login = screen('login', 3, [
         back(),
-        title('Sign in with GitHub', titleX),
+        title(tr("Sign in with GitHub"), titleX),
         el('qr', 'qr', X, HEAD + 10, QR, QR, { text: '' }),
         text('code', X + QR + 40, HEAD + 36, CW - QR - 40, 94, '', 80, 'bold'),
         text('url', X + QR + 40, HEAD + 150, CW - QR - 40, 34, '', 27, 'label', DIM),
         text('status', X + QR + 40, HEAD + 200, CW - QR - 40, 34, '', 27, 'label', DIM),
-        button('cancel', X + QR + 40, HEAD + 270, 360, BTN_H, 'Cancel', 'outline', 29)
+        button('cancel', X + QR + 40, HEAD + 270, 360, BTN_H, tr("Cancel"), 'outline', 29)
     ]);
     const PQR = Math.min(B - M, 560);
     const phoneW = CW - PQR - 40;
     const phone = screen('phone', 3, [
         back(),
-        title('Phone access', titleX),
+        title(tr("Phone access"), titleX),
         list('toggleRow', X, HEAD + 14, phoneW, LIST.rowH),
         text('url', X, HEAD + 124, phoneW, 130, '', 26, 'label', DIM, { wrap: true }),
         text('error', X, HEAD + 264, phoneW, 130, '', 26, 'label', AMBER, { wrap: true }),
@@ -216,12 +217,12 @@ function compact(W, H) {
         text('info', px + 132, M + 72, PW - 152, 30, '', 23, 'label', DIM),
         text('note', px + 20, M + 132, PW - 40, wbY(0) - 12 - M - 132, '', 23, 'label', AMBER, { wrap: true }),
         button('power', px + 20, wbY(0), PW - 40, BTN_H, '', 'outline', 28, { vicon: 'wifi' }),
-        button('scan', px + 20, wbY(1), PW - 40, BTN_H, 'Scan', 'outline', 28, { vicon: 'refresh' }),
+        button('scan', px + 20, wbY(1), PW - 40, BTN_H, tr("Scan"), 'outline', 28, { vicon: 'refresh' }),
         button('prefer', px + 20, wbY(2), PW - 40, BTN_H, '', 'outline', 28, { vicon: 'route' })
     ]);
     const prefer = screen('prefer', 3, [
         back(),
-        title('Preferred connection', titleX),
+        title(tr("Preferred connection"), titleX),
         status('status', R - 420, 420),
         list('list', X, HEAD + 14, Math.min(1100, CW), B - HEAD - 14, { empty: '' })
     ]);

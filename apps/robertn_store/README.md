@@ -320,6 +320,43 @@ robertn_store@0.9.11/       staged package tree (no javascript/: the build write
 
 ## Build
 
+### Simplified Chinese
+
+`node tools/build.js --language zh-CN` builds
+`robertn_store@0.9.11.zh-CN.src.tgz` in a separate staging directory. With
+`--sdk <donor>` it also builds `robertn_store@0.9.11.zh-CN.tgz` for private
+testing. The default build remains English. Both packages use the same app
+ID and version; installing one replaces the other. A normal Store update
+from an English source restores English. The default branch catalog and
+release publishing remain English; a translated distribution needs to
+publish the Chinese artifact deliberately.
+
+The language is fixed in the source package. Drawn pages, the compact ID7
+layout and ID7/ID8 fallback widgets use the same catalog, `src/locale_zh.js`.
+Interpolation preserves repository names, versions, URLs, IDs, account
+names, SSIDs, secrets and raw error details. Catalog application names and
+descriptions remain their publisher's text. The phone page, installer and
+updater logs retain their original language; the Store app's translation
+does not require updating those components.
+
+Chinese builds show a small, low-contrast corner credit, a settings credit
+and a fallback-widget credit: 抖音 小白科技杂物社 / BiliBili 小白151 /
+GitHub [JackieZ123430](https://github.com/JackieZ123430). Original author and
+third-party attribution remains in place. English builds show no Chinese
+credit. Chinese glyphs use a separate, lazy-loaded Noto Sans SC subset
+(OFL-1.1, `src/LICENSE-NotoSansSC.txt`); Inter atlases are unchanged.
+
+`node tools/test_chinese.js` checks 96 frames, unchanged actions/data,
+Unicode StringIds, placeholders, glyph coverage and software/GPU metrics.
+`python tools/bake_chinese.py /path/to/NotoSansSC.ttf` regenerates the atlas
+with Pillow and the hash-checked font; normal builds need neither.
+
+The Windows host used for this contribution has no working Linux/WSL,
+Docker or MGU emulator. Offline tests and software previews are available;
+the required ID7/ID8 emulator checks (Unicode StringBundle writes, glyph
+uploads and the native credit row) and physical head-unit review are still
+pending. Do not treat offline previews as emulator or vehicle validation.
+
 ```sh
 cd apps/robertn_store
 node tools/build.js                                # robertn_store@0.9.11.src.tgz
