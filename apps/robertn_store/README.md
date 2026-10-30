@@ -351,11 +351,13 @@ Unicode StringIds, placeholders, glyph coverage and software/GPU metrics.
 `python tools/bake_chinese.py /path/to/NotoSansSC.ttf` regenerates the atlas
 with Pillow and the hash-checked font; normal builds need neither.
 
-The Windows host used for this contribution has no working Linux/WSL,
-Docker or MGU emulator. Offline tests and software previews are available;
-the required ID7/ID8 emulator checks (Unicode StringBundle writes, glyph
-uploads and the native credit row) and physical head-unit review are still
-pending. Do not treat offline previews as emulator or vehicle validation.
+The Chinese build is installed on the owner's ID7 head unit using the
+published deploy tool and the unit's own SDK. After a normal NSM restart,
+the owner confirmed that the Chinese interface displays and can be
+operated. The eleven existing apps retain their installed versions.
+The Windows development host has no working Linux/WSL, Docker or MGU
+emulator: the required emulator checks, ID8 hardware and native fallback
+review are still pending. Software previews use public fixture data.
 
 ```sh
 cd apps/robertn_store
