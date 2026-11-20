@@ -3,10 +3,9 @@
 Internet for chosen apps through a USB network adapter, an LTE stick, a
 USB-tethered phone or Wi-Fi, and for nothing else on the head unit.
 
-The service brings up the device's interface as `vethuplink` (a name on
-connman's interface blacklist, so connman leaves it alone; Wi-Fi keeps
-`wlan1`, below), gets an address from the device by DHCP (the unit's
-busybox `udhcpc`), and routes only the configured uids through it:
+The service brings up the device's interface as `vethuplink` (Wi-Fi keeps
+`wlan1`, below), gets an address from the device by DHCP, and routes only
+the configured uids through it:
 
 | What | Where |
 |---|---|
@@ -14,16 +13,14 @@ busybox `udhcpc`), and routes only the configured uids through it:
 | Routes | table 110: the lease's subnet and a default via its router; `unreachable default` while offline |
 | Rules | pref 1100 `uidrange U lookup main suppress_prefixlength 0` (car networks), 1101 `uidrange U lookup 110`, 1102 `from <lease address> lookup 110` |
 | Firewall | `table inet mgu_uplink`: only the allowed uids leave through `vethuplink` (and the Wi-Fi interface while Wi-Fi is on), nothing connects in, nothing is forwarded; plus one `oifname "<interface>" accept comment "mgu-uplink"` per interface at the top of the unit's `ip filter output` chain |
-| Lease for apps | `/var/opt/public/oap/oap_<uid>/data/uplink.json` per allowed app, `/run/mgu-uplink/lease.json` for everyone: `{interface, ip, prefix, router, dns[], leaseSeconds, updated}`, present only while online |
+| Lease for apps | `/var/opt/public/oap/oap_<uid>/data/uplink.json` per allowed app, `/run/mgu-uplink/lease.json` for everyone: `{interface, ip, prefix, router, dns[], leaseSeconds, updated}`, present only while online; an app's file is rewritten when the lease changes, so its `updated` is when it last changed |
 | Device state | `/run/mgu-uplink/status.json`, below |
 
 The unit's default route, main table and resolver are not touched. The unit's
 resolver does not reach the internet: allowed processes resolve names through
 the lease's `dns` servers. While the uplink is down they get `EHOSTUNREACH`.
 
-A stop (SIGTERM) removes everything above, gives a kernel adapter its own
-name back and leaves the unit as before the start. A start first removes whatever
-a killed run left, so stop, start and restart can be repeated freely.
+A stop removes everything above and leaves the unit as before the start.
 `mgu-uplink clean` does the same removal by hand while the service is stopped;
 `mgu-uplink status` shows what is in place.
 
@@ -34,15 +31,15 @@ every 2 s:
 
 | Kind | Devices | How |
 |---|---|---|
-| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, joined by our wpa_supplicant, or without `wlan1` the car's `wlan0` through the car's wpa_supplicant (wifi.go, below) |
-| `usb` | a USB Ethernet adapter the kernel drives (`asix`, `ax88179_178a`, `smsc95xx` on the unit), for example an AX88179 cabled to an LTE router | the kernel's interface, renamed to `vethuplink` and given its name back on stop |
-| `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`) or any other ECM device | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode with the usb_modeswitch Huawei message |
-| `rndis` | an Android phone in USB tethering: most phones (AOSP's default); control interface `e0/01/03`, `02/02/ff` or `ef/04/01` | usbfs, RNDIS (rndis.go) |
-| `ncm` | an Android phone in USB tethering presenting CDC-NCM: Pixel 6 and later | usbfs, NCM transfer blocks (ncm.go) |
-| `iphone` | an iPhone with Personal Hotspot on | usbfs: taken from the media daemon with the sysfs `authorized` toggle, configuration 4, paired over its usbmux interface (pairing.go), the hotspot interface as Linux's `ipheth` drives it (iphone.go) |
+| `wifi` | a saved Wi-Fi network in range (a phone's hotspot, an access point), while Wi-Fi is on | the unit's radio, `wlan1`, or without `wlan1` the car's `wlan0` (below) |
+| `usb` | a USB Ethernet adapter the kernel drives (`asix`, `ax88179_178a`, `smsc95xx` on the unit), for example an AX88179 cabled to an LTE router | the kernel's interface |
+| `usbecm` | a CDC-ECM stick: a Huawei HiLink stick (E3372h, `12d1:14db`/`14dc`) or any other ECM device | usbfs; a stick still presenting its install CD-ROM (`12d1:1f01`) is switched into network mode |
+| `rndis` | an Android phone in USB tethering: most phones | usbfs, RNDIS |
+| `ncm` | an Android phone in USB tethering presenting CDC-NCM: Pixel 6 and later | usbfs, NCM |
+| `iphone` | an iPhone with Personal Hotspot on | usbfs: taken from the car's media daemon and paired (below) |
 
 `uplink = netdev:<ifname>` in the config uses that existing interface
-instead, under its own name (the emulator's second NIC).
+instead, under its own name.
 
 A device earlier in the order is preferred: while the uplink runs on a
 phone, a stick plugged in (or Wi-Fi joining) takes over within 5 s, and the
@@ -56,19 +53,6 @@ process holds is left alone, except an iPhone, which the uplink takes from
 the media daemon: so an iPhone is taken only while nothing ranked higher,
 Wi-Fi to its hotspot included, is there.
 
-The usbfs kinds share one relay: the device's bulk endpoints feed one end
-of a veth pair, `vethuplinkp`; the other end is `vethuplink` with the MAC
-the device assigns to the host and its checksum and segmentation offloads
-off, so every frame reaches the device complete. Nothing loads or changes
-kernel code (the unit's kernel has none of `cdc_ether`, `cdc_ncm`,
-`rndis_host`, `ipheth`). The RNDIS driver follows the sequence of a
-user-space RNDIS host proven with Android phones on the car: the RNDIS
-control classes beyond `e0/01/03`, the data interface from the CDC Union, a
-pad byte after a message that fills whole USB packets, the device's maximum
-transfer size, its KEEPALIVE and status messages, and HALT on stop.
-
-All of them run the same DHCP, routing, firewall and lease files.
-
 ### Phones
 
 Android: plug the phone in and turn on Settings → Network → Hotspot &
@@ -81,113 +65,93 @@ enter the passcode. Until then `status.json` says `trust-needed` with
 iPhone"`). After that the phone is paired with the unit and does not ask
 again.
 
-An iPhone serves its hotspot only to a host it trusts: the uplink pairs
-with it the way a computer does (usbmuxd, libimobiledevice), over the
-phone's usbmux interface (`ff/fe/02`). On every connection it opens a
-lockdown session as the paired host. A phone that does not know the unit,
-or has forgotten it (Settings → General → Transfer or Reset iPhone → Reset
-Location & Privacy), is paired again. The unit's host identity (keys and
-certificates, HostID, SystemBUID) is made once and kept in
-`/var/opt/mgu-uplink/pairing/host.json` (root only), which updates keep;
-deleting it makes the unit a new computer for every phone. When the owner
-answers "Don't Trust", the phone goes back to media and is left alone
-until it is plugged in again. A phone that trusts the unit but sends
-nothing for 20 s is taken again, waiting twice as long each time in a row
-(up to 5 minutes); a link whose usbmux session ended waits as long before
-the phone is taken again. Data from the phone, or plugging it in again,
-starts the wait over at 20 s.
+A phone that has forgotten the unit (Settings → General → Transfer or
+Reset iPhone → Reset Location & Privacy) is paired again. The unit's
+pairing identity is kept in `/var/opt/mgu-uplink/pairing/host.json` (root
+only), which updates keep; deleting it makes the unit a new computer for
+every phone. When the owner answers "Don't Trust", the phone goes back to
+media and is left alone until it is plugged in again.
 
-On the head unit a stock media daemon grabs a
-connected iPhone and holds it on configuration 2 (iAP/iPod media); the uplink
-takes the device by deauthorizing and reauthorizing it through sysfs
-(`/sys/bus/usb/devices/<X>/authorized`), then selecting configuration 4 and
-claiming the hotspot interface before the media daemon puts the device back,
-retried until it wins. While tethering the iPhone is a network device, so USB
-media playback from that phone stops; it resumes when tethering ends (the
-uplink reauthorizes the device on stop so the media daemon reclaims it). Only
-that one Apple device is touched; the media daemon keeps serving every other
-device. iOS's USB Restricted Mode cuts USB data after an hour locked unless
-Settings → Face ID & Passcode → Accessories is on.
+While tethering, the iPhone is a network device, so USB media playback from
+that phone stops; it resumes when tethering ends. iOS's USB Restricted Mode
+cuts USB data after an hour locked unless Settings → Face ID & Passcode →
+Accessories is on.
 
-The iPhone takeover (authorized toggle, configuration 4) and the hotspot
-interface's bring-up (alternate setting 1, GET_MACADDR, ENABLE_NCM,
-CARRIER_CHECK, CLEAR_HALT on both bulk endpoints) follow IterioDev's
-`ipheth-tether`. The two never drive the phone
-at once: the unit has `Conflicts=ipheth-tether.service`, and the Store does
-not install the tether (deploy/README.md, "IterioDev's App Manager").
+The iPhone takeover follows IterioDev's `ipheth-tether`; the Store does not
+install that tether (deploy/README.md, "IterioDev's App Manager").
+
+#### Phones over USB switched off
+
+Taking a phone has a cost: an iPhone taken for its hotspot is no media
+device, so USB audio from it stops, and each time it is plugged in while
+it does not trust the unit, it asks "Trust This Computer?". It is taken
+whether Personal Hotspot is on or not. With phones over USB switched off
+(`usb_phone = off`, or the Store through `usb-phone`), the uplink leaves
+every phone alone: no Android phone's USB tethering is used, and no iPhone
+is taken from the media daemon, switched to configuration 4 or paired, so
+the car keeps it for media, iAP2 and wired CarPlay. USB Ethernet
+adapters, CDC-ECM sticks and Wi-Fi are used; a stick that presents RNDIS
+or NCM counts as a phone and is left alone too. Switched off while the
+uplink runs on a phone, that link ends at once as an unplug ends it (an
+iPhone goes back to the media daemon) and the uplink goes on with the next
+device; switched on again, a phone plugged in is taken at the next scan.
 
 ### Wi-Fi
 
 The unit joins a saved Wi-Fi network (a phone's hotspot, an access point)
-with its own radio, and the uplink uses it like a plugged-in device: the
-Wi-Fi provider (wifi.go) only associates, and DHCP, routing, rules,
-firewall and lease are the ones above. Wi-Fi is off until switched on
-(`wifi = on`, or the Store through `wifi-enable`). Off means only that the
-uplink does not use Wi-Fi: the radio, and the car's own Wi-Fi, hotspot and
-wireless CarPlay, stay as they are.
+with its own radio, and the uplink uses it like a plugged-in device. Wi-Fi
+is off until switched on (`wifi = on`, or the Store through `wifi-enable`).
+Off means only that the uplink does not use Wi-Fi: the radio, and the
+car's own Wi-Fi, hotspot and wireless CarPlay, stay as they are.
 
-The radio is `wlan1` on iDrive 7 and iDrive 8 (on iDrive 8, checked on a
-car, the second adapter of the NXP 88W9098: the first adapter's `wlan0`
-never sends an association request). Switched on, the provider takes
-`wlan1` only while the car does not use it; otherwise Wi-Fi is
-`unavailable`, with the reason, and looked at again every 10 s. While it
-has `wlan1` it looks every 20 s, and when the car starts using it, gives it
-back: our wpa_supplicant stops, the link ends, IPv6 is put back and the
-link stays as the car has it. It takes `wlan1` again no sooner than 60 s
-later, twice as long after each give-back in a row (up to 8 min), and
-keeps how `wlan1` was before it first took it until Wi-Fi is switched off.
-A check that fails (no answer from D-Bus, nl80211) is no reason to give
-`wlan1` back; before taking it, it means `unavailable`. The car uses
-`wlan1` when there is:
+The radio is `wlan1` on iDrive 7 and iDrive 8, joined by our own
+wpa_supplicant (`mgu-wpa`, beside `mgu-uplink`: upstream 2.10 with
+[`wpa/wpa-mgu-sme-connect.patch`](wpa/wpa-mgu-sme-connect.patch), which
+the unit's driver needs). The uplink takes `wlan1` only while the car does
+not use it (as an access point, for P2P, or through its own supplicant or
+connman), and gives it back when the car starts using it; Wi-Fi is then
+`unavailable`, with the reason. After 5 failures in a row to start, Wi-Fi
+is `failed` until it is switched on again or the service restarts.
 
-- `wlan1` in any mode but station (an access point, P2P), read through nl80211
-- hostapd on `wlan1`
-- another wpa_supplicant on `wlan1`, or the unit's D-Bus wpa_supplicant
-  (`wpa_supplicant -u`) having `wlan1` (asked over the system bus)
-- connman managing `wlan1` (its `-i`/`-I` options and `main.conf`'s
-  `NetworkInterfaceBlacklist`); on the 88W9098 units connman manages only
-  the CarPlay interfaces (`connmand -i wfd0,p2p-wfd0-0,p2p-wfd0-1`)
-
-Once it has `wlan1`, the provider unblocks its radio when rfkill
-soft-blocks it (and leaves it unblocked), turns IPv6 off on `wlan1` and
-brings it up; it puts IPv6 and the link state back when Wi-Fi is switched
-off or the service stops. When the car blocks the radio or sets `wlan1`
-down under it (connman switching its Wi-Fi off blocks every WLAN rfkill;
-wpa_supplicant then reports `INTERFACE_DISABLED` and refuses to scan), or
-`wlan1` is created again (the driver is reloaded around suspend; another
-`ifindex`), the provider lets go of `wlan1` and takes it again: at once
-after a supplicant that ran 2 min, else as a failure below. When taking `wlan1` or running wpa_supplicant
-fails, it is tried again after 30 s, waiting twice as long each time (and
-nothing is looked at meanwhile); after
-5 failures in a row Wi-Fi is `failed` until it is switched on again or the
-service restarts. An iPhone's hotspot is seen with Settings → Personal
-Hotspot → Maximise Compatibility on (2.4 GHz).
-
-The association is our own wpa_supplicant (`mgu-wpa`, beside
-`mgu-uplink`): upstream 2.10 with [`wpa/wpa-mgu-sme-connect.patch`](wpa/wpa-mgu-sme-connect.patch).
-The unit's driver (moal, `host_mlme=1`) reports the association that
-wpa_supplicant's SME asked for as a connect event, which upstream ignores in
-SME mode; the patch takes it as the association result. It runs on `wlan1`
-only and never touches another wpa_supplicant. Saved networks are in `/var/opt/mgu-uplink/wifi/wpa.conf`,
-in a folder only root can read; a network is saved once it was joined with
-the password given, also when the password of the current network is
-entered again. WPA2 and WPA3 personal (passwords of 8 to 63 printable
-characters) and open networks; no enterprise (EAP). A password or a
-printable-ASCII network name with a `#` after an odd number of `"` is
-refused: wpa.conf can't keep it. A wpa.conf wpa_supplicant can't read is
-moved to `wpa.conf.bad`, and Wi-Fi starts without saved networks;
-`error` says so until the next join or until Wi-Fi is switched.
+Saved networks are in `/var/opt/mgu-uplink/wifi/wpa.conf`, in a folder only
+root can read; a network is saved once it was joined with the password
+given. WPA2 and WPA3 personal (passwords of 8 to 63 printable characters)
+and open networks; no enterprise (EAP). A password or a printable-ASCII
+network name with a `#` after an odd number of `"` is refused: wpa.conf
+can't keep it. A wpa.conf wpa_supplicant can't read is moved to
+`wpa.conf.bad`, and Wi-Fi starts without saved networks.
 
 #### Without `wlan1`: the car's `wlan0`
 
 iDrive 7 units with the Broadcom chip (`bcmdhd`) have no `wlan1`. On them
 the unit joins on the car's own `wlan0` through the car's wpa_supplicant
 (`wifi.backend` `car-supplicant`), while the car's hotspot and wireless
-CarPlay keep running. Everything else is as above. Our networks are added
-to the car's supplicant only while Wi-Fi is on and are never written to
-its configuration; the car's own networks, hotspot and radio are left
-alone. Wi-Fi is `unavailable` while the car uses `wlan0` itself (a network
-of its own, or its Wi-Fi switched off). WPA2 personal and open networks.
+CarPlay keep running. Our networks are added to the car's supplicant only
+while Wi-Fi is on and are never written to its configuration. Wi-Fi is
+`unavailable` while the car uses `wlan0` itself, or while the car's Wi-Fi
+is switched off. WPA2 personal and open networks; WPA3-only networks
+can't be joined.
+
+#### The band
+
+Wireless CarPlay and Android Auto use the car's 5 GHz Wi-Fi when they can,
+and share the radio with a network the uplink joins on the same band. So
+with **Allow 5 GHz** off (`wifi_5ghz = off`, the default; the `wifi-5ghz`
+request), a network seen on 2.4 GHz is joined on 2.4 GHz only. A network
+seen on 5 GHz only (an iPhone's hotspot with Maximize Compatibility off) is
+still joined there (`wifi.fiveOnly`), and one that does not join on
+2.4 GHz within 20 s is joined on either band. With Allow 5 GHz on, a
+network is joined on either band.
+
+#### During wireless CarPlay and Android Auto
+
+While wireless CarPlay or Android Auto is connected, the car's supplicant
+(`wlan0`) scans only off the phone's band. While Wi-Fi is not joined and
+that cannot be done (the band is not known, or the supplicant refuses it),
+and on `wlan1`, the supplicant's own scans stop (`wifi.paused`: `carplay`,
+`android-auto`).
+A `wifi-scan` request and a `wifi-connect` still cover every channel, and
+a joined network stays joined.
 
 ### status.json
 
@@ -199,11 +163,12 @@ the Store and the phone page:
   "state": "trust-needed", "error": "Tap Trust on the iPhone and enter its passcode" }
 ```
 
-with `uplink = auto`, also `wifi`, and `preferred` while a group is preferred:
+with `uplink = auto`, also `wifi`, `usbPhone` (whether phones over USB are
+taken), and `preferred` while a group is preferred:
 
 ```json
 { "device": { "kind": "wifi", "name": "iPhone - Mario" }, "state": "online", "error": null,
-  "preferred": "wifi",
+  "preferred": "wifi", "usbPhone": true,
   "wifi": { "enabled": true, "link": "online", "ssid": "iPhone - Mario", "ip": "172.20.10.2", "signal": -45,
     "networks": [ { "ssid": "iPhone - Mario", "signal": -40, "secure": true, "saved": true, "current": true } ],
     "saved": [ "iPhone - Mario" ], "scanning": false, "error": null } }
@@ -220,9 +185,14 @@ with `uplink = auto`, also `wifi`, and `preferred` while a group is preferred:
 
 `networks` is the latest scan (the strongest per name, at most 20,
 strongest first), `saved` the saved names, `scanning` true for 8 s after a
-scan request, `signal` dBm, `backend` what joins (`mgu-wpa` or
-`car-supplicant`) while Wi-Fi is on and there is a radio. `error` keeps a failed join ("could not join
-… (wrong password, or out of range)", after 40 s) until the next request.
+scan request or a switch-on, `signal` dBm, `backend` what joins (`mgu-wpa` or
+`car-supplicant`) while Wi-Fi is on and there is a radio, `paused`
+(`carplay`, `android-auto`) while the supplicant makes no scans of its own
+during that wireless session, `freq` the frequency (MHz) of the access
+point joined when known, `allow5ghz` the Allow 5 GHz setting and `fiveOnly`
+true while joined on 5 GHz, with Allow 5 GHz off, to a network not seen on
+2.4 GHz. `error` keeps a failed join ("could not join … (wrong password, or
+out of range)") until the next request.
 
 | `state` | |
 |---|---|
@@ -246,13 +216,15 @@ updater only, which relays these; `status.json` shows the results.
 | Request | |
 |---|---|
 | `{"op": "prefer", "kind": "phone"}` | the group tried first (`wifi`, `usb`, `phone`; `""` for none); takes effect within 5 s |
-| `{"op": "wifi-enable", "on": true}` | Wi-Fi on or off |
+| `{"op": "wifi-enable", "on": true}` | Wi-Fi on or off; on also scans at once, as `wifi-scan` does |
+| `{"op": "wifi-5ghz", "on": true}` | Allow 5 GHz: joins on either band (The band, above) |
+| `{"op": "usb-phone", "on": false}` | phones over USB taken or left alone (Phones over USB switched off, above) |
 | `{"op": "wifi-scan"}` | scan now |
 | `{"op": "wifi-connect", "ssid": "…", "psk": "…"}` | join a network, with its password; saved once joined. Without `psk`: a saved network, or an open one |
 | `{"op": "wifi-forget", "ssid": "…"}` | forget a saved network |
 
-The reply is `{"ok": true}` or `{"ok": false, "error": "…"}`. `prefer` and
-`wifi-enable` are kept in `settings_conf`. A password goes to wpa_supplicant
+The reply is `{"ok": true}` or `{"ok": false, "error": "…"}`. `prefer`,
+`wifi-enable`, `wifi-5ghz` and `usb-phone` are kept in `settings_conf`. A password goes to wpa_supplicant
 only: no log line, reply or status names it.
 
 ## Config
@@ -263,9 +235,8 @@ replaced by every update. The unit's own settings go in
 replaces the shipped value, except `uids`, which adds to it), which updates keep.
 What the Store sets through requests goes in
 `/var/opt/mgu-uplink/mgu-uplink.settings.conf`, read after the local conf
-and kept by updates. Only `preferred` and `wifi` are read from it; any other
-line, or a value this version does not know, is logged and skipped, so an
-older version still starts after a rollback.
+and kept by updates; only `preferred`, `wifi`, `wifi_5ghz` and `usb_phone`
+are read from it.
 
 | Key | Value |
 |---|---|
@@ -274,23 +245,19 @@ older version still starts after a rollback.
 | `uplink` | `auto`, or `netdev:<ifname>` for an existing interface (no Wi-Fi, no `preferred`) |
 | `preferred` | `wifi`, `usb` or `phone`, tried first; empty (shipped) for the order above; any other value is logged and ignored |
 | `wifi` | `on` or `off` (shipped) |
+| `wifi_5ghz` | `on`: Wi-Fi joins on either band; `off` (shipped): on 2.4 GHz only where a network is seen there |
+| `usb_phone` | `on` (shipped): phones over USB are used; `off`: left alone |
 | `table`, `rule_pref` | routing table (110) and first rule priority (1100) |
 
 Components that need the internet add themselves without touching the
 conf: the deploy tool writes `/var/opt/mgu-uplink/uids.d/<component>`
 (numeric uids) or `apps.d/<component>` (app names; an empty file stands
 for the app named like the file), one per line, on install and removes it
-on uninstall. The updater's downloads get out this way too, as
-`uids.d/mgu-updater`, which names the uid the updater picked for them. They are read with the 5 s rescan, so an install or removal
-takes effect within seconds; entries that are not a uid or an app name are
-logged and skipped.
-
-A device kind (`uplink = usbecm`, ...) or a `usb_device` left in a unit's
-local conf is ignored, and the start logs it: the uplink takes whatever is
-plugged in.
+on uninstall (deploy/README.md, "Internet for selected components"). An
+install or removal takes effect within seconds.
 
 `uplink`, `table` and the other keys take effect at the next service
-restart; `preferred` and `wifi` set by a request take effect at once.
+restart; `preferred`, `wifi`, `wifi_5ghz` and `usb_phone` set by a request take effect at once.
 
 ## Build, install, update
 
@@ -301,40 +268,17 @@ deploy/hu install mgu-uplink        # build and install over SSH (deploy/README.
 ```
 
 `build/target/mgu-wpa` is built with Docker (linux/amd64), in
-Ubuntu 18.04 ([`wpa/Dockerfile`](wpa/Dockerfile)): the unit's glibc 2.27 and
-loader `/lib/ld-linux-x86-64.so.2`, linked against the `libnl-3`,
-`libnl-genl-3` and `libcrypto` 1.1 the unit has. The image holds upstream's
-`wpa_supplicant-2.10.tar.gz`, checked by sha256; [`wpa/build.sh`](wpa/build.sh)
-applies the patch and builds with the options in [`wpa/config`](wpa/config)
-(nl80211, control socket, WPA2/WPA3 personal; no EAP, WPS, P2P or D-Bus),
-and [`wpa/check.sh`](wpa/check.sh) checks the loader, the libraries and that
-every symbol version is one the unit's libraries define. The same tree
-gives the same bytes, so `release.js check` holds. It is rebuilt when
-`wpa/` changes.
-
-The unit tests cover the framing (RNDIS, NCM blocks with several datagrams
-and chained NDPs, ipheth legacy and NCM receive), the descriptor matching,
-the status file, iPhone pairing against a fake phone (usbmux, lockdown,
-Pair with the Trust wait and its notification, the TLS session, a phone
-that forgot the unit), and Wi-Fi: wpa_supplicant's control replies, and
-the provider against a fake wpa_supplicant (the test binary run as one,
-on its control socket) on a fake radio. Also the order with a preferred
-group, the guarded interfaces, the requests and `settings_conf`. [`test/vm-gadget.sh`](test/vm-gadget.sh) runs the uplinks
-against USB gadgets in a Linux VM: ECM, NCM and RNDIS (f_rndis, and as
-`e0/01/03` through a descriptor-rewriting usbip proxy) gadgets with a DHCP
-server and NAT behind them, and a FunctionFS fake iPhone (gadget_test.go:
-Apple ids, four configurations, the hotspot interface in NCM or legacy
-framing, and a stand-in media daemon holding the device on configuration 2)
-on dummy_hcd.
+Ubuntu 18.04 ([`wpa/Dockerfile`](wpa/Dockerfile)), against the libraries the
+unit has: [`wpa/build.sh`](wpa/build.sh) applies the patch to upstream's
+`wpa_supplicant-2.10.tar.gz` and builds with the options in
+[`wpa/config`](wpa/config) (nl80211, control socket, WPA2/WPA3 personal; no
+EAP, WPS, P2P or D-Bus), and [`wpa/check.sh`](wpa/check.sh) checks that it
+loads with the unit's libraries.
 
 mgu-uplink is a tool component ([`component.json`](component.json)): the
 deploy tool installs it, over SSH from the owner's computer
-(`deploy/mgu-install.js first-install`, unless `--no-uplink`), or from the updater
-(the Store's "Internet uplink" row: from the source that installed it, a
-USB stick `usb-repo` wrote from that source included; one the installer put
-there from the source listing it, of several the one listing it as
-"Internet uplink", a stick included). The version is
-`component.json`'s; `mgu-uplink --version` prints it.
+(`deploy/mgu-install.js first-install`, unless `--no-uplink`), or from the
+Store's "Internet uplink" row. `mgu-uplink --version` prints its version.
 
 | Path | What |
 |---|---|
@@ -347,12 +291,10 @@ there from the source listing it, of several the one listing it as
 | `/etc/systemd/system/mgu-uplink.service` | enabled for `multi-user.target` |
 | `/etc/recmgr-restartlist.conf` | `mgu-uplink` in `[Whitelist]` and `[WhitelistExitSuccess]` |
 
-Without the recmgr entries the head unit restarts whenever the service stops.
-recmgr reads its list at boot, so a first install starts the service at the
-next boot, and an update restarts it only once recmgr has loaded the entries;
-until then the previous version keeps running. The restart removes what the
-old version added and the new one adds it again, so allowed processes are
-offline for the few seconds DHCP takes.
+A first install starts the service at the next boot. An update restarts
+it once the head unit has loaded its restart-list entry (until then the
+previous version keeps running); allowed processes are then offline for the
+few seconds DHCP takes.
 
 ## Check it on the unit
 

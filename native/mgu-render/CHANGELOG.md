@@ -1,5 +1,104 @@
 # mgu-render changelog
 
+## Unreleased
+
+## 0.6.25
+
+- iDrive 7: `touch_area = auto` is the whole screen, 0,0,1920,720. Apps may claim any part of the screen, the back column included; a tap no app claims goes to the HMI. `touch_area` in the configuration sets any other area.
+
+## 0.6.24
+
+- Comments in the configuration and source only; no change on the unit.
+- Video frame files can be NV12, the layout hardware decoders write (the header's format word 1), so a player hands
+  over decoded frames without converting them to I420 on the CPU. X_READY caps 256 (`info.videoNv12` in the JS client)
+  tells a player the renderer reads NV12; I420 files stay as they are.
+
+## 0.6.23
+
+- Text stays drawn when several apps with large fonts (Chinese, Japanese, Korean) are open or opened one after another:
+  an app's glyphs are freed when it closes.
+
+## 0.6.22
+
+- An app can hold only some parts of the iDrive controller: X_GRAB's second word (1 knob, 2 press, 4 tilt; 0 or left
+  out: all three), `grab(on, 'knob')` or `grab(on, ['knob', 'press'])` in the JS client. Where the HMI's gate reads the
+  parts (X_READY caps 128, `info.controllerHold`), the others stay the HMI's: a tilt still leaves an app that holds the
+  knob and the press. Every other gate holds all three, as before.
+
+## 0.6.21
+
+- Multi-touch: a gesture in a claim keeps every finger until the last one is up; a native app that sends X_FINGERS 1 gets
+  each finger with its id (X_FINGER, `fingers()` / `finger` in the JS client, caps bit 64). TOUCH stays the first finger's.
+- Touch: a finger whose UP was lost (missing from a report, or down again) is let go before the next gesture with no
+  TOUCH; an app that sent X_FINGERS 1 gets X_FINGER cancel (phase 4) for it while the app is on screen.
+
+## 0.6.20
+
+- Build: the build image's tag is a hash of its definition, so builds from different definitions never share an image.
+- The car test's `reboot` records the restart for the deploy tool's safe mode before it asks for it.
+- Touch and the iDrive controller go back to the HMI as soon as it shows something over an app that takes the input: a popup, the header menu, the voice assistant, or a screen opened from there. The foreground gate follows the HMI's focus on the app's states and reports the app covered once none of them has had it for 150 ms; the renderer then takes the touch divert out and releases `@mgu-renderd-ccu` (`covered by the HMI: <uid>`), and takes them again when the focus comes back (`covered by the HMI: no app`). An app in the HMI's box stays drawn under the popup; an app on a layer is taken off until it goes. Touch and the controller stayed with the app in front: the popup could not be closed, and a screen opened from the header menu answered neither, its touches going to the app hidden under it.
+- An app whose picture stays as it was through 4 touches or controller turns in a row (within 10 s) gets neither for 10 s; they go to the HMI, and an app on a layer is taken off meanwhile (`<app>: 4 inputs left its picture as it was - touch and the controller go to the HMI for 10 s`, then `<app>: takes touch and the controller again`).
+No changes.
+
+## 0.6.19
+
+- No Remove in the Store: the Renderer stays while the Store is installed.
+
+## 0.6.18
+
+- The page template stops being mounted into the HMI after two boots that mounted it and ended in an HMI failure, with no healthy boot between them: a restart record of recmgr (`hmi.service`) or crashhandler (`HmiMain3D`) written after the mount, read at the shutdown (a drop-in of `var-opt-ro.service`) or at the next boot. A boot counts only on such a record; a switch-off, a restart from BMW's menu, the Store or an update, `systemctl reboot`, a power cut or a slow HMI counts nothing, and an HMI that ran 120 s unbroken with the template clears the count. The HMI then starts with its stock widgets, apps get their layer, and the Renderer's page says `In-page drawing unavailable: the HMI failed with the page template` until another HmiMain3D or template comes. README.md, "The HMI and the page template".
+
+## 0.6.17
+
+- The car-test guide rehearses on any test head unit reached over SSH.
+- An idrive7-apps kit app on our socket goes back to the community socket `/run/mgu-renderd/renderd.sock` once another renderer (idrive7-renderd) has listened there for 5 s: its connection is closed, and the kit connects again, to that socket unless an earlier failed try there turned it to ours (`<app>: kit app sent back to /run/mgu-renderd/renderd.sock, which has its own renderer again`). Kit apps came to us whenever idrive7-renderd restarted (each of its updates, a crash) and stayed until mgu-render restarted, drawn for the wrong screen on cars whose display differs. An app that comes back within 60 s is sent again only after 30 s, then 2 min; after a third time it stays. Without another renderer there, and for every app that is not a kit app (the Store included), nothing changes.
+
+## 0.6.16
+
+- The touch divert rule's nft commands run beside the render loop, never in it: the renderer keeps drawing, answering apps and beating to its guard while nft works. An nft run that takes longer than 10 s is stopped and counts as failed. A failed load is logged once and tried again every 5 s (`touch: loading the nft rule failed, touch stays the HMI's; trying again every 5 s`). At exit the guard takes the rule out. A slow nft (over 1.5 s per run) blocked the loop while touch was diverted, so the guard killed the renderer each time an app gave up its touch area; repeated kills hit the service's start limit, and the deploy check after an update failed with `render.sock: EPIPE`.
+
+## 0.6.15
+
+- The journal names the app the iDrive controller is held for and says when `@mgu-renderd-ccu` is bound and released: `controller: held for <app> (@mgu-renderd-ccu bound)`, `controller: held for <app>` when another of its apps takes it over, and `controller: back to the HMI, @mgu-renderd-ccu released (was held for <app>)`.
+
+## 0.6.14
+
+- The touch divert rule goes to nft in a file (`/tmp/mgu-render-nft-*`), and a load counts only when `nft list table ip mgu_render` finds the table afterwards; otherwise the journal says `touch: loading the nft rule failed, touch stays the HMI's` and the load is tried again 5 s later. nftables 0.7 on iDrive 7 units (MainApp 8.2.0; also reported on MainApp 6.5.5) reads a script given as `-` as a file of that name, fails and exits 0: the journal said `touch: diverted`, the table was never there, and no touch reached the Store or its apps.
+
+## 0.6.13
+
+- The car-test kit refuses a branch that requires the next release of a component the kit does not install, and builds a changed mgu-render at the version its release gives it.
+
+## 0.6.12
+
+- The foreground gate maps an RHMI uuid that more than one `oap_<uid>` folder claims (an earlier install's folder left behind) to the install the app manager has registered (`oap_12201/data/apps/<id>.json`), when exactly one of them is registered; otherwise the uuid stays unmapped, so an app still cannot take another app's uuid. A left-behind folder of the Store kept it out of front for good, and its page stayed black under the HMI's title.
+
+## 0.6.11
+
+- iDrive 7: `touch_area = auto` is 84,0,1836,720, the title strip included. With 84,76,1836,644 a tap on an app's own header tab (the idrive7-apps kit draws its tabs there) went to the HMI, which closed the app: black screen. Apps never claim the status icons, so they still reach the HMI.
+- `local_conf` (default `/var/opt/mgu-render/mgu-render.local.conf`): a unit's own settings, read after the shipped file and every `-s`. An update replaces `mgu-render.conf`; the local file stays, so a setting changed on the car is no longer lost at the next update. Absent: nothing; a bad line is logged and skipped, the good ones apply.
+
+## 0.6.10
+
+Both changes are for iDrive 8 only (centre display 2880x960); on iDrive 7 the renderer behaves as 0.6.9.
+
+- iDrive 8: layer apps hide for a yield surface (`yield_surfaces`) only while it shows a picture: visible and with a buffer (its `configuration` larger than 0x0). On a G82 the HMI keeps cameraplayer's `SID_VIDEO_DIGITAL_HU` 0x198 visible from boot with no buffer, which hid every layer app for good (the Store kept its widget screens). The renderer logs each yield surface's visibility and buffer size as they change.
+- iDrive 8: overlays (`overlay_apps`, empty by default): a root client with a listed app id stays shown over the yield surfaces, is never closed by a touch on the HMI, gets touch first and may claim outside `touch_area` (the climate bar), and its layer is put back on top when another app's layer goes on the screen. While an overlay claims, the touch rule and the firewall's accept go in again every 10 s. On iDrive 7 a listed app is an ordinary app (logged).
+
+## 0.6.9
+
+- The foreground gate finds the HMI's `RemoteHmiApplication` description on iDrive 7 firmware that keeps it elsewhere: after `/usr/lib/oap-mainapp/src-gen/` and the iDrive 8 one, `/usr/lib/oap-mainapp/src-gen/someip/`, then the copy MainApp's installer writes for each app whose manifest names the interface (`/var/opt/public/oap/oap_<uid>/someipInterfaces/`, the one with the most instances).
+- With no description anywhere, the gate says so (`unavailable`) and is not started again. mgu-render/1 apps it gates are offered no mode, so they keep their own screens (the Store its widget screens); those connected before are disconnected once and get that on their next connection.
+
+## 0.6.8
+
+- `render_check.js`, the deploy tool's check after an update (`check` in `component.json`; needs mgu-deploy 0.6.9): a client connects to the renderer's socket and must get its native answer (X_READY, then READY with a screen size); 20 s later the service must still run with no restart, and a second connection must get READY again. It draws nothing. A renderer that fails it goes back to the version before, at the install or at the next start of the head unit.
+
+## 0.6.7
+
+- A layer app's layer goes onto the centre screen through a connection made for it and closed again (`src/relist.c`), never through the renderer's own long-lived one. Winston applies a screen's `add_layer` to the layer list as the calling connection last saw or set it, so a connection open a while dropped every layer other programs (the HMI, another renderer) put on the screen since. The new connection sees the list as it is: our layer goes on top and every other layer stays.
+- When another program sets the screen's layers without ours, Winston says so (the layer's `screen` event) and the layer goes back on top: at once while the app is shown, at its next show otherwise. Taken off more than 10 times in 10 s while shown, it goes back at its next show (journal: `layer taken off the screen`).
+
 ## 0.6.2
 
 - `fps` and `fps.<app>` (0): the frames a second an app that asks for a rate (FPS) gets, in place of the rate it asks; for every such app, or for one (`fps.robertn_store = 30`). Display-bridge apps ask for none and are not paced by it.

@@ -9,10 +9,6 @@ the owner's hardware.
   names on the build machine); never commit a built `javascript/app.js`.
 - Everything on the car happens through the Store's UI or its updates: never
   hand the owner SSH, shell steps or files to place.
-- Test in the head-unit emulator before calling anything done, in a VM of
-  your own (`EMU_LIMA=mgu-emu-<name> ./emu.py up --systemd`, mgu-emulator
-  `AGENTS.md`; `--unit id8` for iDrive 8): `up` prints the SSH port and the
-  `deploy/hu` options to use.
 - Describe the final state in comments and docs (no "changed from" /
   "previously"), build the smallest thing that solves the problem, and don't
   add UI helper text that restates a label.
@@ -34,12 +30,37 @@ every release has to be safe whichever component is updated first:
   files and options working, or require the newer partner.
 - When a change touches the Store and one of its dependencies (updater,
   deploy tool, renderer, uplink, Python) in ways that depend on each other,
-  test it in the emulator before publishing: start from the published
-  release (`./emu.py up --preset store`), publish every component of the
-  branch to a folder (`MGU_PUBLISH=dir:<folder> node release/release.js
-  publish`), give the emulator that folder as a USB stick, and update ONLY
+  test it on a head unit before publishing: start from the published
+  release, publish every component of the
+  branch to a folder from a scratch checkout of it (`MGU_RELEASE_LABELS=off
+  node release/release.js stamp`, so the changed components carry
+  their next versions and every `"next"` is resolved, then
+  `MGU_PUBLISH=dir:<folder> node release/release.js publish` there), give the unit that
+  folder as a USB stick, and update ONLY
   the changed component from it in the Store (its requirements come along).
   Restart when asked, and check that the updater runs, the Store opens with
   its tile, and it can still update the rest. Repeat for each changed
   component, each time from the published release. (`deploy/hu install`
   also installs the branch's deploy tool, so it can't test an order.)
+
+## Pull requests by AI agents
+
+A pull request opened, or mostly written, by an AI agent says in its
+description (`.github/pull_request_template.md` has the fields):
+
+- **AI:** the product **and** the exact model name and version, for example
+  "Claude Code, Claude Opus 5.5" or "Codex, GPT-6.1". "An AI agent", "an AI
+  coding agent" or "AI-assisted" alone is not enough: name both. When several
+  models worked on it, list each, with what it did if that helps.
+- **Tested:** exactly how: which test suites ran and passed; whether it ran
+  on a real car (which iDrive and firmware) or on a test unit; and what was
+  not tested.
+- **Human review:** whether a person reviewed it before it was opened.
+
+A pull request without AI involvement says `AI: none`.
+
+Every pull request that changes anything shown on screen (a page, screen,
+dialog, tile, icon or text of the Store or an app) includes screenshots or a
+screen recording of each changed screen, before and after, under
+**Screenshots:**. A change to how something moves or reacts to input needs a
+recording.

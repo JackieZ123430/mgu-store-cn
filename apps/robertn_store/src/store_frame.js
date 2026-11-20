@@ -11,10 +11,11 @@
  *   scrolls as in frame())
  *   dragOf(model, { textScale, scroll, layout }, key) -> what a drag of grid or list key draws (store_drawn.js)
  *   dragFrame(drag, baseLayer, rowsLayer, from, top, textScale) -> one frame of that drag
+ *   toward(items, i, dir) -> the item the controller's tilt dir ('N', 'E', 'S', 'W') moves the focus to from item i
  *
  * layout: placement()'s; the iDrive 8 design when null.
  *
- * items: { x, y, w, h, r, label, act, reveal?, box? }; an item of a grid or
+ * items: { x, y, w, h, r, label, act (null: a greyed-out button that keeps its place), reveal?, box? }; an item of a grid or
  * list carries box: its grid's or list's box, which bounds where it takes a
  * touch, and while not wholly in view reveal { key, top }: the scroll that
  * shows it.
@@ -22,7 +23,6 @@
  * scroll ({ key: rows scrolled, fractional }) is kept by the caller and
  * follows the focus.
  */
-const { staticOptions, chinese, credit } = require('./i18n.js');
 const SCREENS = require('./am_screens.js');
 const { record } = require('./am_gpu.js');
 const { Recorder } = require('./kit_record.js');
@@ -32,6 +32,7 @@ const { view, icons } = require('./store_ui.js');
 const { tabCells } = require('./am_widgets.js');
 const { gridView, listView, navItems, rightBoxes, keyBoxes, shown } = require('./am_store_widgets.js');
 const { compact } = require('./store_compact.js');
+const { t } = require('./i18n.js');
 
 /* The part of the design the renderer's box shows: the screens' content
  * (the side menu at x 126 to the right edge, the title at y 114 to the
@@ -42,6 +43,8 @@ const FOCUS = '#ffffff';
 const EPS = 1e-6;                         // rows: a scrolled row this close to the edge counts as shown
 const SIZES = ['rowH', 'tileH', 'size'];  // a layout's own sizes: kept over the values' (made for the design)
 const measure = new Recorder(1, 1);       // text widths, as drawn
+const WORDS = ['text', 'title', 'label', 'empty', 'items'];   // a layout's own words, in the display language
+const AFTER_GAP = 24;                     // a text placed after another (opts.after): the room between them
 
 /* The layout for box w x h and its placement: the scale and offset
  * (device = logical * scale + o) and the part of the layout it shows
@@ -63,7 +66,7 @@ function placement(w, h) {
 function ordered(st, page) {
     const cs = st.components;
     if (st.name === 'confirm') {
-        return ['later', 'now'].map((n) => cs.find((c) => c.name === n)).filter(Boolean);
+        return ['later', 'now', 'also'].map((n) => cs.find((c) => c.name === n)).filter(Boolean);
     }
     if (!page) {
         return cs;
@@ -86,9 +89,11 @@ function itemsOf(st, page) {
             const ih = b.h / Math.max(1, list.length);
             list.forEach((it, i) => items.push({ x: b.x + 8, y: b.y + i * ih + 8, w: b.w - 24, h: ih - 16, r: 16, label: it.label, act: it.act }));
         } else if (c.gpu === 'vbutton') {
-            if (o.act && !o.disabled) {
+            // a greyed-out button is not pressed; one with keepPlace keeps its place in the focus order (act null)
+            if (o.act && (!o.disabled || o.keepPlace)) {
                 const round = o.style === 'round';
-                items.push({ x: b.x, y: b.y, w: b.w, h: b.h, r: round ? b.w / 2 : Math.min(18, b.h / 2), label: o.text || 'Back', act: o.act });
+                items.push(Object.assign({ x: b.x, y: b.y, w: b.w, h: b.h, r: round ? b.w / 2 : Math.min(18, b.h / 2), label: o.text || 'Back',
+                    act: o.act }, o.disabled ? { act: null, keepPlace: true } : {}));
             }
         } else if (c.gpu === 'tabs') {
             const t = tabCells(b, o);
@@ -110,18 +115,19 @@ function itemsOf(st, page) {
         } else if (c.gpu === 'appList') {
             const v = listView(b, o);
             const key = `${st.name}.${c.name}`;
-            const gap = Math.round(v.rh * 0.13);
+            const gap = v.gap;
             regions.push({ key, x: b.x, y: b.y, w: b.w, h: b.h, step: v.rh, max: v.max });
             v.all.forEach((it, k) => {
                 const y = b.y + (k - v.top) * v.rh;
                 const out = k < v.top || k + 1 > v.top + v.n + EPS;
                 const reveal = out ? { key, top: k < v.top ? k : k + 1 - v.n } : undefined;
-                items.push({ x: b.x, y, w: b.w, h: v.rh - gap, r: 22, label: it.title, act: it.act, reveal, box: b });
+                items.push({ x: b.x, y, w: b.w, h: v.rh - gap, r: 22, label: it.title, act: it.act, reveal, box: b, list: key });
                 if (it.chipAct) {
                     const chip = rightBoxes({ x: b.x, y, w: b.w, h: v.rh - gap }, it, measure, o.ctlK).find((rb) => rb.kind === 'chip');
                     if (chip) {
                         const ch = 72 * (o.ctlK || 1);
-                        items.push({ x: chip.x, y: y + (v.rh - gap - ch) / 2, w: chip.w - 12, h: ch, r: ch / 2, label: chip.arg, act: it.chipAct, reveal, box: b });
+                        items.push({ x: chip.x, y: y + (v.rh - gap - ch) / 2, w: chip.w - 12, h: ch, r: ch / 2, label: chip.arg, act: it.chipAct, reveal, box: b,
+                            list: key });
                     }
                 }
             });
@@ -133,24 +139,41 @@ function itemsOf(st, page) {
             });
         }
     });
-    return { items: items.filter((it) => it.act), regions };
+    return { items: items.filter((it) => it.act || it.keepPlace), regions };
+}
+
+/* A layout's options with its words in the display language. */
+function translated(opts) {
+    const out = Object.assign({}, opts);
+    WORDS.filter((k) => typeof out[k] === 'string' && out[k]).forEach((k) => { out[k] = t(out[k]); });
+    return out;
 }
 
 /* The screen object am_gpu.js draws: the layout's components with the
  * values over their own options (a layout's own SIZES kept) and the kept
- * scroll. */
+ * scroll. A text with opts.after starts at least AFTER_GAP right of the
+ * end of that one's text. A shown component with opts.shift ({ name: [dx,
+ * dw] }) moves those components right by dx and widens them by dw. */
 function screenOf(v, scroll, layout) {
     const def = (layout || SCREENS).screens.find((s) => s.name === v.screen);
+    const components = def.components.map((c) => {
+        const opts = Object.assign(translated(c.opts), v.values[c.name] || {});
+        if (layout) {
+            SIZES.filter((k) => c.opts[k] !== undefined).forEach((k) => { opts[k] = c.opts[k]; });
+        }
+        if (c.gpu === 'appGrid' || c.gpu === 'appList') {
+            opts.top = scroll[`${def.name}.${c.name}`] || 0;
+        }
+        return Object.assign({}, c, { opts });
+    });
+    const shift = Object.assign({}, ...components.filter((c) => c.opts.shift && !c.opts.hidden).map((c) => c.opts.shift));
+    const placed = components.map((c) => (!shift[c.name] ? c
+        : Object.assign({}, c, { x: c.x + shift[c.name][0], w: c.w + shift[c.name][1] })));
     return { kind: 'gpu', name: def.name, theme: def.theme, bg: 'theme',
-        components: def.components.map((c) => {
-            const opts = Object.assign({}, staticOptions(c.opts), v.values[c.name] || {});
-            if (layout) {
-                SIZES.filter((k) => c.opts[k] !== undefined).forEach((k) => { opts[k] = c.opts[k]; });
-            }
-            if (c.gpu === 'appGrid' || c.gpu === 'appList') {
-                opts.top = scroll[`${def.name}.${c.name}`] || 0;
-            }
-            return Object.assign({}, c, { opts });
+        components: placed.map((c) => {
+            const a = c.opts.after && placed.find((o) => o.name === c.opts.after);
+            const end = a && a.opts.text ? a.x + measure.textWidth(a.opts.text, a.opts.size, { font: a.opts.font }) + AFTER_GAP : 0;
+            return end > c.x ? Object.assign({}, c, { x: Math.round(end), w: Math.max(0, c.w - Math.round(end - c.x)) }) : c;
         }) };
 }
 
@@ -231,10 +254,6 @@ function frame(m, opts) {
     const o = opts || {};
     const l = layoutOf(m, o);
     const rec = record(l.st, recordOpts(o.layout || null, o.textScale));
-    if (chinese) {
-        const vp = o.layout ? { x: 0, y: 0, w: o.layout.design.w } : VIEWPORT;
-        rec.text(credit, vp.x + vp.w - 12, vp.y + 14, 12, '#ffffff40', { align: 'right' });
-    }
     const f = l.items[o.focus];
     if (f && !f.reveal) {
         rec.strokeRoundRect(f.x - 8, f.y - 8, f.w + 16, f.h + 16, f.r + 8, 5, FOCUS);
@@ -256,4 +275,33 @@ function hit(items, x, y) {
     return -1;
 }
 
-module.exports = { frame, layoutOf, dragOf, dragFrame, hit, placement };
+/* The item a tilt of the controller moves the focus to from items[i], of those ahead that way: one in line (sharing
+ * some of items[i]'s span across the tilt) first, the nearest ahead and of those the nearest to the side; else one at
+ * most as far off to the side as ahead, the nearest with the distance to the side counting double. null when none
+ * is. Items out of view count where a scroll puts them. */
+function toward(items, i, dir) {
+    const cur = items[i];
+    if (!cur) {
+        return null;
+    }
+    const across = dir === 'E' || dir === 'W';
+    const cx = cur.x + cur.w / 2;
+    const cy = cur.y + cur.h / 2;
+    let best = null;
+    let score = Infinity;
+    items.forEach((it, k) => {
+        const dx = it.x + it.w / 2 - cx;
+        const dy = it.y + it.h / 2 - cy;
+        const ahead = dir === 'E' ? dx : dir === 'W' ? -dx : dir === 'S' ? dy : -dy;
+        const side = across ? Math.abs(dy) : Math.abs(dx);
+        const inLine = across ? it.y < cur.y + cur.h && cur.y < it.y + it.h : it.x < cur.x + cur.w && cur.x < it.x + it.w;
+        const s = inLine ? ahead * 1e4 + side : 1e12 + ahead + 2 * side;
+        if (k !== i && ahead > 4 && (inLine || side <= ahead) && s < score) {
+            score = s;
+            best = k;
+        }
+    });
+    return best;
+}
+
+module.exports = { frame, layoutOf, dragOf, dragFrame, hit, placement, toward };

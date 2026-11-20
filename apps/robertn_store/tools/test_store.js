@@ -140,7 +140,7 @@ const logged = [];                      // what the app logged
 const quiet = { info(l) { logged.push(String(l)); }, warn(l) { logged.push(String(l)); }, error(l) { logged.push(String(l)); } };
 const WIFI_PSK = 'p@ss "w0rd\\ {x}';
 // the uplink's Wi-Fi: a secured network not saved, an open one
-const WIFI = { enabled: true, link: 'idle', saved: [], scanning: false, error: null,
+const WIFI = { enabled: true, link: 'idle', saved: [], scanning: false, error: null, allow5ghz: false,
     networks: [{ ssid: 'Home', signal: -50, secure: true, saved: false, current: false }, { ssid: 'Cafe', signal: -70, secure: false }] };
 /* mgu-render's client: what the Store asks of it. */
 const gpuLog = [];
@@ -167,14 +167,29 @@ class RenderClient extends EventEmitter {
     frame(rec) { frames.push(rec); return true; }
     dropLayer(id) { dropped.push(id); }
 }
-// FrontCCU: the sample callback the app subscribes with
+// FrontCCU: the sample callback the app subscribes with; HMIContext: the display language's, and its proxy's instance
 let frontCcu = null;
+let displayLanguage = null;
+// KombiIF: the cluster's display time callback, and the value its getter answers
+let clusterTime = null;
+let clusterTimeNow = null;
+const hmiContext = [];
+// interfaces the head unit lacks: building their proxy fails
+const absent = new Set();
 const someipBuilders = {
-    buildTypedProxy: (iface, instance) => Promise.resolve({
+    buildTypedProxy: (iface, instance) => absent.has(iface) ? Promise.reject(new Error(`no ${iface}`)) : Promise.resolve({
         iface, instance,
         init: () => Promise.resolve(),
         waitUntilAvailable: () => Promise.resolve(),
-        statusRotaryEncoderState: { subscribe: (cb) => { frontCcu = cb; return Promise.resolve(); } }
+        statusRotaryEncoderState: { subscribe: (cb) => { frontCcu = cb; return Promise.resolve(); } },
+        statusShowTimeDate: {
+            subscribe: (cb) => { clusterTime = cb; return Promise.resolve(); },
+            getValue: () => Promise.resolve(clusterTimeNow)
+        },
+        currentDisplayLanguage: {
+            subscribe: (cb) => { displayLanguage = cb; hmiContext.push(`${iface} ${instance}`); return Promise.resolve(); },
+            getValue: () => Promise.resolve('ENGLISCH__UK')
+        }
     })
 };
 const stubs = {
@@ -195,6 +210,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms || 15));
 const HIDE_MS = 800;                    // src/store.js HIDE_SETTLE_MS
 const comp = (o) => Object.assign({ id: 'doom', kind: 'app', title: 'DOOM', version: '1.0.1', installed: '1.0.1',
     status: 'installed', queued: false, error: null, uninstallable: true }, o);
+const LONG = 'the build failed (exit 1): no oap-sdk donor among the installed apps carries OnlineApp.js, ' +
+    'so robertn_doom@1.0.1 cannot be linked; install any stock app again, or another app that ships the SDK';
 const base = { type: 'state', online: true, busy: null, rebooting: false, catalog: { checking: false, checkedAt: 1 } };
 const ST = Object.assign({}, base, {
     components: [comp({})],
@@ -226,6 +243,13 @@ function run() {
         app._client.emit('state', Object.assign({}, base, { components: [comp({})] }));
         return tick();
     }).then(() => {
+        const hello = { op: 'hello', id: 'robertn_store', version: 'test' };
+        eq(sent.filter((r) => r.op === 'hello'), [hello], 'a connection says which Store this is');
+        app._client.emit('state', Object.assign({}, base, { components: [comp({})] }));
+        eq(sent.filter((r) => r.op === 'hello'), [hello], 'once per connection');
+        app._client.emit('down');
+        app._client.emit('state', Object.assign({}, base, { components: [comp({})] }));
+        eq(sent.filter((r) => r.op === 'hello'), [hello, hello], 'and again after a reconnect');
         eq(last(/storeNavSources\.Visible/), 'storeNavSources.Visible=0', 'Sources hidden');
         eq(last(/storeNavPhone\.Visible/), 'storeNavPhone.Visible=0', 'Phone access hidden');
         eq(last(/storeSourceAccounts\.Visible/), 'storeSourceAccounts.Visible=0', 'Accounts hidden');
@@ -244,6 +268,21 @@ function run() {
         eq(writes.filter((w) => /^storeAccountList\.[01]\./.test(w)).slice(-4), ['storeAccountList.0.Text1stCol=rn',
             'storeAccountList.0.Text2ndCol=1 source', 'storeAccountList.1.Text1stCol=0badc0de', 'storeAccountList.1.Text2ndCol=Rejected']);
         eq(writes.filter((w) => /storeSrcSignIn/.test(w)), [], 'no sign-in on a source');
+        // each app's row titled with its source's author; one author's two DOOMs with owner/repo
+        app._client.emit('state', Object.assign({}, ST, { components: [comp({ source: 'mgu-store' }), comp({ id: 'quake', title: 'Quake', source: 'idrive7-apps' })] }));
+        return tick();
+    }).then(() => {
+        eq([last(/storeAppList\.0\.Text1stCol/), last(/storeAppList\.1\.Text1stCol/)],
+            ['storeAppList.0.Text1stCol=DOOM (robertnisipeanu)', 'storeAppList.1.Text1stCol=Quake (someone)']);
+        app._client.emit('state', Object.assign({}, ST, { sources: ST.sources.concat([Object.assign({}, ST.sources[0], { id: 'more', label: 'robertnisipeanu/more' })]),
+            components: [comp({ source: 'mgu-store' }), comp({ id: 'doom2', source: 'more' })] }));
+        return tick();
+    }).then(() => {
+        eq([last(/storeAppList\.0\.Text1stCol/), last(/storeAppList\.1\.Text1stCol/)],
+            ['storeAppList.0.Text1stCol=DOOM (robertnisipeanu/mgu-store)', 'storeAppList.1.Text1stCol=DOOM (robertnisipeanu/more)']);
+        app._client.emit('state', ST);
+        return tick();
+    }).then(() => {
 
         // without the secret nothing is sent
         reset();
@@ -259,6 +298,70 @@ function run() {
         return tick();
     }).then(() => {
         eq(last(/storeStatus\.\d*\.?Text/).split('=')[1], 'Updater not running');
+        // Restart head unit carries the secret
+        reset();
+        app._restart();
+        eq(sent.map(secretless), [{ op: 'reboot' }]);
+        eq(sent[0].secret, 'deadbeef');
+        // while an install runs or waits: Restart head unit and its confirm step's Restart greyed out, and a press sends nothing
+        app._client.emit('state', ST);
+        return tick();
+    }).then(() => {
+        app._client.emit('state', Object.assign({}, ST, { busy: { id: 'doom', op: 'install', phase: 'download', progress: 0, total: 10 } }));
+        return tick();
+    }).then(() => {
+        // as last written: [Restart head unit shown, it can be pressed, its confirm step's Restart can be pressed]
+        const restartWidgets = () => ['storeRestart.visible', 'storeRestart.enabled', 'storeRestartConfirm.enabled'].map((k) => app._written[k]);
+        eq(restartWidgets(), [true, false, false], 'greyed out while an install runs');
+        reset();
+        app._restart();
+        eq(sent, [], 'no restart asked for while an install runs');
+        // a press on a greyed-out Restart now (its item has no act) does nothing
+        app._act(null);
+        eq([sent, app._drawn.stack.length], [[], 1], 'a greyed-out Restart now: nothing sent, no page opened');
+        app._client.emit('state', Object.assign({}, ST, { components: [comp({ queued: true })] }));
+        return tick().then(() => {
+            eq(restartWidgets(), [true, false, false], 'and while one waits');
+            app._client.emit('state', ST);
+            return tick();
+        }).then(() => {
+            eq(restartWidgets(), [true, true, true], 'pressable again after');
+            app._client.emit('state', Object.assign({}, ST, { rebooting: true }));
+            return tick();
+        }).then(() => eq(restartWidgets()[0], false, 'hidden while the unit restarts'));
+    }).then(() => {
+        app._client.emit('state', ST);
+        return tick();
+    }).then(() => {
+        // safe mode: the status line says so, Leave safe mode is shown, and it sends safe-mode-off with the secret
+        app._client.emit('state', Object.assign({}, ST, { safeMode: { at: '2026-11-09T10:00:00Z', reason: 'test' } }));
+        return tick();
+    }).then(() => {
+        eq(last(/storeStatus\.\d*\.?Text/).split('=')[1], 'Safe mode');
+        eq(last(/storeSafeModeOff\.Visible/), 'storeSafeModeOff.Visible=1', 'Leave safe mode shown in safe mode');
+        reset();
+        app._components.storeSafeModeOff.emit('action', {});
+        eq(sent.map(secretless), [{ op: 'safe-mode-off' }]);
+        eq(sent[0].secret, 'deadbeef');
+        // not while an install runs
+        app._client.emit('state', Object.assign({}, ST, { safeMode: { at: null, reason: null }, busy: { id: 'doom', op: 'install', phase: 'download' } }));
+        return tick();
+    }).then(() => {
+        eq(last(/storeSafeModeOff\.Visible/), 'storeSafeModeOff.Visible=0', 'Leave safe mode hidden while an install runs');
+        app._client.emit('state', ST);
+        return tick();
+    }).then(() => {
+        eq(last(/storeSafeModeOff\.Visible/), 'storeSafeModeOff.Visible=0', 'Leave safe mode hidden out of safe mode');
+        eq(last(/storeStatus\.\d*\.?Text/).split('=')[1] !== 'Safe mode', true, 'no safe mode in the status line');
+        // an error of any length is written whole: the status line and a source's error wrap over their rows
+        app._sourceId = 'idrive7-apps';
+        app._client.emit('state', Object.assign({}, ST, { components: [comp({ error: LONG })],
+            sources: ST.sources.map((s) => (s.id === 'idrive7-apps' ? Object.assign({}, s, { status: 'error', error: LONG }) : s)) }));
+        return tick();
+    }).then(() => {
+        eq(last(/storeStatus\.\d*\.?Text/).split('=').slice(1).join('='), `DOOM: ${LONG}`);
+        eq(last(/storeSrcError\.\d*\.?Text/).split('=').slice(1).join('='), LONG);
+        app._sourceId = null;
         app._client.emit('state', ST);
         return tick();
     }).then(() => {
@@ -864,6 +967,39 @@ function runWidgetsExtra() {
         reset();
         app._remove();
         eq(sent.map(secretless), [{ op: 'uninstall', id: 'doom' }]);
+        // an app with a tool only it requires: the step lists it, and Remove all takes it along
+        reset();
+        app._client.emit('state', Object.assign({}, st, { components: [comp({ installed: '1.0.0', status: 'installed', requiredAlone: ['mgu-renderd'] }),
+            id8only, id8installed, renderer, held] }));
+        return tick();
+    }).then(() => {
+        eq([last(/storeRemoveTools\.0\.Text=/), last(/storeRemoveAll\.Visible/)],
+            ['storeRemoveTools.0.Text=Tools only it uses: GPU renderer 1.1.0', 'storeRemoveAll.Visible=1'], 'the tools only it uses, and Remove all');
+        reset();
+        app._components.storeRemoveAll.emit('action', {});
+        return tick();
+    }).then(() => {
+        eq(sent.map(secretless), [{ op: 'uninstall', id: 'doom', tools: ['mgu-renderd'] }], 'Remove all sends the tools with the app');
+        reset();
+        app._act({ do: 'remove', id: 'doom', tools: ['mgu-renderd'] });
+        eq(sent.map(secretless), [{ op: 'uninstall', id: 'doom', tools: ['mgu-renderd'] }], 'as the drawn Remove all does');
+        // a refused Remove: the updater's reason, for that component's page, until its page or Remove opens again
+        app._client.emit('reply-error', 'Waze on cluster needs doom', 'uninstall');
+        eq(app._drawnModel().removeNote, { id: 'doom', error: 'Waze on cluster needs doom', by: null }, 'a refused Remove keeps the reason');
+        app._client.emit('reply-error', `${st.components[0].title} needs doom`, 'uninstall');
+        eq(app._drawnModel().removeNote.by, st.components[0].id, 'and the component that needs it, by its title');
+        app._act({ do: 'open', page: { name: 'confirm', kind: 'remove', id: 'doom' } });
+        eq(app._drawnModel().removeNote, null, 'a new Remove clears it');
+        app._client.emit('reply-error', 'Waze on cluster needs doom', 'uninstall');
+        app._act({ do: 'open', page: { name: 'app', id: 'doom' } });
+        eq(app._drawnModel().removeNote, null, 'so does opening a component\'s page');
+        app._back();
+        app._back();
+        reset();
+        app._client.emit('state', st);
+        return tick();
+    }).then(() => {
+        eq(last(/storeRemoveAll\.Visible/), 'storeRemoveAll.Visible=0', 'none without such tools');
         reset();
         app._client.emit('state', Object.assign({}, st, { signin: true }));
         return tick();
@@ -939,6 +1075,7 @@ function runDrawn() {
         eq(gpu.visible, true, 'shown with its host state');
         eq(gpu.claims, [mode === 'embed' ? { x: 0, y: 0, w: 1796, h: 632 } : { x: 0, y: 0, w: 1790, h: 638 }], 'touch claimed: the box');
         eq(frames.length > 0 && drawn.items.some((i) => i.label === 'DOOM'), true, 'the Store tab drawn');
+        eq(drawn.filter, 'app', 'the Store tab opens on Apps');
         eq(app._drawnModel().version, 'test', 'the Store\'s version, from where this HMI\'s oap-sdk keeps package.json');
         eq([lastText(proxy(1, 0)), lastText(proxy(1, 3)), lastText(proxy(1, 4)), lastText(proxy(1, 7))],
             ['Store', 'Settings', 'All', 'DOOM'], 'proxies in focus order: side menu, filters, tiles');
@@ -1065,7 +1202,7 @@ function runDrawn() {
         gpu.emit('touch', 'up', x0, y0 - 120);
         drawn.pop();
         // a new page with a picture not decoded yet: its first frame waits for it
-        const pic = path.join(__dirname, '..', 'robertn_store@0.9.11', 'rhmiData', 'variantGroups', 'Common', 'images', 'store_icon.png');
+        const pic = path.join(__dirname, '..', require('../mgu-app.json').tree, 'rhmiData', 'variantGroups', 'Common', 'images', 'store_icon.png');
         const extra = Array.from({ length: 30 }, (_, i) => comp({ id: `x${i}`, title: `Extra ${i}`, version: '1.0.0', installed: null, status: 'available' }));
         app._client.emit('state', Object.assign({}, st, { components: st.components.concat(extra, [comp({ id: 'pictured', title: 'Pictured',
             version: '1.0.0', installed: null, status: 'available', icon: pic })]) }));
@@ -1129,7 +1266,8 @@ function runDrawn() {
         eq(drawn.stack.length, 1, 'BACK leaves the page');
         eq(gpu.visible, true, 'and the tabs show');
         eq(drawn.focus, 7, 'the focus back on the tile the page opened from');
-        // touch: a tap on Renderer's tile opens it; Install installs it beside the other renderer
+        // touch: under Tools, a tap on Renderer's tile opens it; Install installs it beside the other renderer
+        app._act({ do: 'filter', filter: 'tool' });
         reset();
         const tile = drawn.items.find((i) => i.label === 'Renderer');
         gpu.emit('touch', 'down', tile.x + 10, tile.y + 10);
@@ -1144,6 +1282,7 @@ function runDrawn() {
         return tick();
     }).then(() => {
         eq(sent, [{ op: 'install', id: 'mgu-render' }]);
+        app._act({ do: 'filter', filter: 'app' });
         // the install ends with the tool pending a restart: nothing opens; its page offers Restart head unit
         reset();
         ends('mgu-render', { installed: '0.1.0', status: 'installed', pendingReboot: true });
@@ -1161,6 +1300,26 @@ function runDrawn() {
     }).then(() => {
         eq([states, drawn.top().name, drawn.items.map((i) => i.label).indexOf('Restart head unit') >= 0], [[], 'app', true],
             'none for an app queued for the next start; its page offers Restart head unit');
+        drawn.pop();
+        // Update all: the Store's own update asked for last
+        app._client.emit('state', Object.assign({}, st, { components: [
+            comp({ id: 'robertn_store', title: 'Store', installed: '0.9.0', status: 'update', uninstallable: false }),
+            comp({ installed: '1.0.0', status: 'update' }),
+            comp({ id: 'mgu-render', kind: 'tool', title: 'Renderer', installed: '0.1.0', version: '0.1.1', status: 'update' })] }));
+        reset();
+        app._act({ do: 'update-all' });
+        eq(sent.map((r) => r.id), ['doom', 'mgu-render', 'robertn_store'], 'Update all asks for the Store\'s own update last');
+        // Undo update: on the page of a component the updater offers it for, after its confirm step
+        app._client.emit('state', Object.assign({}, st, { components: st.components.map((c) => (c.id === 'doom' ?
+            Object.assign({}, c, { installed: '1.0.1', status: 'installed', previous: '1.0.0', pendingReboot: false, nextStart: null }) : c)) }));
+        drawn.push({ name: 'app', id: 'doom' });
+        const undo = drawn.items.find((i) => i.label === 'Undo update');
+        eq(undo && undo.act, { do: 'open', page: { name: 'confirm', kind: 'undo', id: 'doom' } }, 'Undo update on the page');
+        app._act(undo.act);
+        eq(drawn.items.map((i) => i.label), ['Cancel', 'Undo update'], 'its dialog: Cancel, Undo update');
+        reset();
+        app._act(drawn.items.find((i) => i.label === 'Undo update').act);
+        eq([sent.map(secretless), drawn.top().name], [[{ op: 'rollback', id: 'doom' }], 'app'], 'it asks for the rollback; the dialog closes');
         drawn.pop();
         app._client.emit('state', st);
         // a drag scrolls without pressing
@@ -1335,7 +1494,7 @@ function runDrawn() {
         eq(logged.filter((l) => l.indexOf('w0rd') >= 0), [], 'no password in the log');
         // joined and saved: Forget asks first; Don't use Wi-Fi, Scan
         app._client.emit('state', Object.assign({}, st, { uplink: { device: { kind: 'wifi', name: 'Home' }, state: 'online', error: null, preferred: '',
-            wifi: Object.assign({}, WIFI, { link: 'online', ssid: 'Home', ip: '172.20.10.2', saved: ['Home'],
+            usbPhone: true, wifi: Object.assign({}, WIFI, { link: 'online', ssid: 'Home', ip: '172.20.10.2', saved: ['Home'],
                 networks: [Object.assign({}, WIFI.networks[0], { saved: true, current: true }), WIFI.networks[1]] }) } }));
         reset();
         tap('Forget');
@@ -1346,24 +1505,72 @@ function runDrawn() {
         app._states[host(3)].emit('visible', { visible: false });
         app._states[host(2)].emit('focus', { focus: true });
         reset();
-        ["Don't use Wi-Fi", 'Scan'].forEach(tap);
-        eq(sent.map(secretless), [{ op: 'wifi-enable', on: false }, { op: 'wifi-scan' }]);
+        ["Don't use Wi-Fi", 'Scan', 'Allow 5 GHz'].forEach(tap);
+        eq(sent.map(secretless), [{ op: 'wifi-enable', on: false }, { op: 'wifi-scan' }, { op: 'wifi-5ghz', on: true }]);
         // the uplink's refusal shows on the page
         app._client.emit('reply-error', 'Wi-Fi needs uplink = auto', 'wifi-scan');
         eq(app._drawnModel().uplinkNote, 'Wi-Fi needs uplink = auto');
-        // the preferred connection
-        reset();
-        tap('Preferred: Automatic');
-        eq([states, drawn.top().name], [[`open ${host(3)}`], 'prefer']);
-        app._states[host(3)].emit('visible', { visible: true });
-        tap('USB');
-        eq(sent.map(secretless), [{ op: 'uplink-prefer', kind: 'usb' }]);
-        // back to Settings
-        drawn.pop();
-        app._states[host(3)].emit('visible', { visible: false });
+        // back to Settings; its Preferred connection row, the Access card's third, in view, opens that page
         drawn.pop();
         app._states[host(2)].emit('visible', { visible: false });
         app._states[host(1)].emit('focus', { focus: true });
+        reset();
+        const row = drawn.items.find((i) => i.label === 'Preferred connection');
+        eq(!row.reveal, true, 'Preferred connection: in view');
+        tap('Preferred connection');
+        eq([states, drawn.top().name, app._drawnModel().uplinkNote], [[`open ${host(2)}`], 'prefer', null],
+            'the page opens without the Wi-Fi page\'s refusal');
+        app._states[host(1)].emit('focus', { focus: false });
+        app._states[host(2)].emit('visible', { visible: true });
+        app._states[host(2)].emit('focus', { focus: true });
+        tap('USB');
+        tap('Phone over USB');
+        eq(sent.map(secretless), [{ op: 'uplink-prefer', kind: 'usb' }, { op: 'usb-phone', on: false }]);
+        // back to Settings
+        drawn.pop();
+        app._states[host(2)].emit('visible', { visible: false });
+        app._states[host(1)].emit('focus', { focus: true });
+    }).then(() => {
+        // the proxy: its address typed (iDrive 7: the speller; iDrive 8: the keyboard page), checked here, sent to the updater
+        const proxied = (p) => app._client.emit('state', Object.assign({}, st, { proxy: Object.assign({ on: false, kind: null, address: null,
+            auth: false, error: null }, p) }));
+        const typeIn = (text) => {
+            if (HMI === 'ID7') {
+                spellerAnswers.push(text);
+                return tick();
+            }
+            return tick().then(() => {
+                drawn.top().text = text;
+                app._act({ do: 'key', key: 'OK' });
+                return tick();
+            });
+        };
+        proxied({});
+        reset();
+        logged.length = 0;
+        app._act({ do: 'proxy-toggle' });
+        return typeIn('socks4://192.168.8.1:1080').then(() => {
+            eq([sent, app._drawnModel().proxyNote], [[], 'Use http://host:port or socks5://host:port'], 'proxy: not an address, nothing sent');
+            app._act({ do: 'proxy-edit' });
+            return typeIn(' socks5://me:s3cret@192.168.8.1:7891 ');
+        }).then(() => {
+            eq([sent.map(secretless), !!(sent[0] || {}).secret, app._drawnModel().proxyNote],
+                [[{ op: 'proxy-set', url: 'socks5://me:s3cret@192.168.8.1:7891' }], true, null], 'proxy: set, with the updater secret');
+            eq(logged.filter((l) => l.indexOf('s3cret') >= 0), [], 'no proxy password in the log');
+            app._client.emit('reply-error', 'cannot save the proxy: EROFS', 'proxy-set');
+            eq(app._drawnModel().proxyNote, 'cannot save the proxy: EROFS', 'the updater\'s refusal shows on the page');
+            proxied({ on: true, kind: 'socks5', address: '192.168.8.1:7891' });
+            reset();
+            app._act({ do: 'proxy-toggle' });
+            eq(sent.map(secretless), [{ op: 'proxy-set', url: '' }], 'proxy: on, the switch turns it off');
+            if (HMI !== 'ID7') {
+                // the keyboard opens on the address there is, unless it has a password, which is not shown
+                app._act({ do: 'proxy-edit' });
+                eq([drawn.top().name, drawn.top().text, drawn.top().layout, drawn.top().symbols], ['type', 'socks5://192.168.8.1:7891', 'text', true],
+                    'the keyboard with every symbol, for a user name and password');
+                app._back();
+            }
+        });
     }).then(() => {
         if (HMI === 'ID7') {
             return null;
@@ -1520,6 +1727,119 @@ function runDrawn() {
             eq(drawn.focus, 5, 'with the controller gate the renderer\'s dial counts instead');
             drawn.controller = false;
         }
+        // a tilt (the renderer's CCU with the controller gate, FrontCCU in embed without it): the focus to the nearest
+        // item that way; left with nothing there closes the page, on the tabs it does nothing
+        {
+            drawn.setTab('store');
+            const label = () => (drawn.items[drawn.focus] || {}).label;
+            const tiles = drawn.items.filter((i) => i.box);
+            const first = drawn.items.indexOf(tiles[0]);
+            const tilt = (t) => { gpu.emit('ccu', { seq: 0, knob: 7, press: 0, tilt: t }); gpu.emit('ccu', { seq: 0, knob: 7, press: 0, tilt: 0 }); };
+            drawn.ccu = null;
+            drawn.focus = first;
+            tilt(4);
+            eq(label(), tiles[1].label, 'tilted right, the controller\'s first event: the next tile in the row');
+            gpu.emit('ccu', { seq: 0, knob: 7, press: 0, tilt: 10 });
+            gpu.emit('ccu', { seq: 0, knob: 7, press: 0, tilt: 15 });
+            tilt(10);
+            eq(label(), tiles[0].label, 'tilted left: back to the first tile, once while held, an invalid sample in between');
+            tilt(11);
+            eq(drawn.items.slice(0, 4).map((i) => i.label).indexOf(label()) >= 0, true, 'left of the grid: the side menu (' + label() + ')');
+            tilt(10);
+            eq(drawn.stack.length, 1, 'left of the side menu on the tabs: nothing');
+            drawn.focus = first;
+            drawn.host.act(drawn.items[first].act);
+            eq(drawn.stack.length, 2, 'a tile\'s page');
+            for (let k = 0; k < 8 && drawn.stack.length > 1; k++) {
+                tilt(10);
+            }
+            eq(drawn.stack.length, 1, 'tilting left on a page ends on the tabs, as BACK does');
+            if (mode === 'embed') {
+                const fccu = (d) => frontCcu({ frontRotaryEncoderOperation: 7, frontSequenceNumberOperatingElement: 0,
+                    frontRotaryEncoderPushButton: 'KEINE_BETAETIGUNG', frontRotaryEncoderDeflection: d });
+                drawn.embedProxies = false;
+                drawn.setTab('store');
+                fccu('MITTELSTELLUNG');
+                drawn.focus = first;
+                fccu('OST_KURZ_GEDRUECKT');
+                eq(label(), tiles[1].label, 'FrontCCU tilted east: the next tile');
+                fccu('SIGNAL_UNGUELTIG');
+                fccu('OST_KURZ_GEDRUECKT');
+                eq(label(), tiles[1].label, 'held: once, an invalid sample in between');
+                fccu('MITTELSTELLUNG');
+                drawn.focus = 0;
+                fccu(7);
+                eq(label(), drawn.items[1].label, 'FrontCCU tilted south (as an ordinal): the next item down the side menu');
+                const at = drawn.focus;
+                ['WEST_KURZ_GEDRUECKT', 'NORD_KURZ_GEDRUECKT', 10, 1].forEach((d) => { fccu(0); fccu(d); });
+                fccu(0);
+                eq([drawn.focus, drawn.stack.length], [at, 1], 'FrontCCU west and north: the HMI\'s (BACK, its header menu), not the Store\'s');
+            }
+        }
+        // the deploy tool's safe mode: Leave safe mode on Store after the side menu; a press asks the updater to leave it
+        drawn.setTab('store');
+        const safe = Object.assign({}, st, { safeMode: { at: '2026-11-09T10:00:00Z', reason: 'test' } });
+        app._client.emit('state', safe);
+        eq([drawn.items[4].label, lastText(proxy(1, 4)), drawn.items.some((i) => i.label === 'Restart now')], ['Leave safe mode', 'Leave safe mode', false],
+            'safe mode: Leave safe mode after the side menu, in Restart now\'s place');
+        reset();
+        drawn.proxyPress(1, 4);
+        eq(sent.map(secretless), [{ op: 'safe-mode-off' }], 'safe mode: Leave safe mode sends safe-mode-off');
+        eq(sent[0].secret, 'deadbeef', 'with the secret');
+        app._client.emit('state', Object.assign({}, safe, { busy: { id: 'doom', op: 'install', phase: 'download' } }));
+        eq(drawn.items.some((i) => i.label === 'Leave safe mode'), false, 'safe mode: Leave safe mode hidden while an install runs');
+        app._client.emit('state', st);
+        eq(drawn.items.some((i) => i.label === 'Leave safe mode'), false, 'out of safe mode: no Leave safe mode');
+        // Installed puts what runs or waits first; while the focus is on a row the rows stay where they are, so it stays on its row
+        const inst = (doom) => Object.assign({}, st, { components: [
+            comp({ id: 'alpha', title: 'Alpha', version: '1.0.0', installed: '1.0.0', status: 'installed' }),
+            comp({ id: 'beta', title: 'Beta', version: '1.0.0', installed: '1.0.0', status: 'installed' }),
+            comp(Object.assign({ id: 'doom', title: 'DOOM', version: '1.0.1', installed: '1.0.1', status: 'installed', pendingReboot: true }, doom))] });
+        const done = { pendingReboot: false };
+        const rows = () => drawn.items.map((i) => i.label).filter((l) => ['Alpha', 'Beta', 'DOOM'].indexOf(l) >= 0);
+        const focused = () => (drawn.items[drawn.focus] || {}).label;
+        drawn.setTab('installed');
+        drawn.focus = 0;
+        app._client.emit('state', inst({}));
+        eq(rows(), ['DOOM', 'Alpha', 'Beta'], 'a restart pending first');
+        eq(drawn.items.map((i) => i.label).slice(4, 5), ['Restart now'], 'a restart pending: Restart now');
+        app._client.emit('state', inst(done));
+        eq([rows(), focused()], [['Alpha', 'Beta', 'DOOM'], 'Store'], 'the focus on the side menu: restarted, DOOM last');
+        eq(drawn.items.some((i) => i.label === 'Restart now'), false, 'the focus on the side menu: restarted, no Restart now');
+        app._client.emit('state', inst({}));
+        // the HMI's focus on Beta's proxy
+        const beta = drawn.items.findIndex((i) => i.label === 'Beta');
+        app._components[proxy(1, beta)].emit('focus', { value: true });
+        app._client.emit('state', inst(done));
+        eq([rows(), focused()], [['DOOM', 'Alpha', 'Beta'], 'Beta'], 'the focus on a row: the rows stay, the focus on Beta');
+        eq(drawn.items.some((i) => i.label === 'Restart now'), true, 'the focus on a row: Restart now stays as drawn');
+        app._client.emit('state', Object.assign(inst(done), { components: inst(done).components.concat([
+            comp({ id: 'gamma', title: 'Gamma', version: '1.0.0', installed: '1.0.0', status: 'installed' })]) }));
+        eq(drawn.items.map((i) => i.label).filter((l) => ['Alpha', 'Beta', 'DOOM', 'Gamma'].indexOf(l) >= 0), ['DOOM', 'Alpha', 'Beta', 'Gamma'],
+            'a row installed meanwhile: after them');
+        // a page opened from a row comes back to it
+        const all4 = (o) => Object.assign(inst(o), { components: inst(o).components.concat([
+            comp({ id: 'gamma', title: 'Gamma', version: '1.0.0', installed: '1.0.0', status: 'installed' })]) });
+        app._client.emit('state', all4({}));
+        const doomAt = drawn.items.findIndex((i) => i.label === 'DOOM');
+        app._components[proxy(1, doomAt)].emit('focus', { value: true });
+        drawn.proxyPress(1, doomAt);
+        eq([drawn.top().name, drawn.top().id], ['app', 'doom'], 'DOOM\'s page');
+        app._client.emit('state', all4(done));
+        drawn.pop();
+        eq([rows(), focused()], [['DOOM', 'Alpha', 'Beta'], 'DOOM'], 'back: the rows as they were, the focus on DOOM');
+        // a drag from a row: the rows stay through it and after it, until the focus moves
+        const box = drawn.items[drawn.focus];
+        gpu.emit('touch', 'down', box.x + 40, box.y + 20);
+        gpu.emit('touch', 'move', box.x + 40, box.y + 60);
+        eq([drawn.focus, drawn._model().held && drawn._model().held.apps.slice(0, 3)], [-1, ['doom', 'alpha', 'beta']], 'a drag: the rows held');
+        gpu.emit('touch', 'up', box.x + 40, box.y + 60);
+        drawn.render();
+        eq(rows(), ['DOOM', 'Alpha', 'Beta'], 'after the drag: as they were');
+        app._components[proxy(1, 0)].emit('focus', { value: true });
+        eq([rows(), focused()], [['Alpha', 'Beta', 'DOOM'], 'Store'], 'the focus off the rows: in order again');
+        drawn.setTab('store');
+        app._client.emit('state', st);
         // a popup over a layer page hides the layer
         if (mode === 'layer') {
             app._states[host(1)].emit('focus', { focus: false });
@@ -1611,7 +1931,125 @@ function runTiming() {
     });
 }
 
-run().then(runWidgetsExtra).then(runDrawn).then(runTiming).then(() => {
+/* The words follow the HMI's display language, English without a translation. */
+function runLanguage() {
+    const i18n = require(path.join(SRC, 'i18n.js'));
+    const check = () => (last(/^storeCheck\.0\.(Text|PrimaryText)=/) || '').split('=')[1];
+    const nav = () => (last(/^storeNavApps\.0\.(Text2ndCol|FrequencyText)=/) || '').split('=')[1];
+    app._setupLanguage();
+    app._setVisible(true);
+    app._forgetWritten();
+    app._client.emit('state', Object.assign({}, ST, { components: [comp({ status: 'update', version: '1.0.2' })] }));
+    return tick().then(() => {
+        eq(hmiContext, ['de.bmw.infotainment.hmi.hmicontext.HMIContext HMI_CID',
+            'de.bmw.infotainment.hmi.hmicontext2.HMIContext2 1'], 'both HMI contexts of the CID');
+        eq([check(), nav()], ['Check for updates', '1 update'], 'English');
+        displayLanguage('CHINESISCH_SIMPLE');
+        return tick();
+    }).then(() => {
+        eq([check(), nav()], ['检查更新', '1 项更新'], 'Simplified Chinese: the widget screens follow');
+        displayLanguage('DEUTSCH');
+        return tick();
+    }).then(() => {
+        eq([check(), nav()], ['Nach Updates suchen', '1 Update'], 'German');
+        displayLanguage('KEINE_SPRACHE');
+        return tick();
+    }).then(() => {
+        eq([check(), nav()], ['Check for updates', '1 update'], 'no language: English');
+        displayLanguage('CHINESISCH_SIMPLE');
+        displayLanguage(255);
+        return tick();
+    }).then(() => {
+        eq(check(), 'Check for updates', 'an invalid value: English');
+        i18n.setHmiLanguage(null);
+    });
+}
+
+/* A head unit without one HMI context, or without either: the other's language, else English. */
+function runAbsentContext() {
+    const i18n = require(path.join(SRC, 'i18n.js'));
+    const check = () => (last(/^storeCheck\.0\.(Text|PrimaryText)=/) || '').split('=')[1];
+    hmiContext.length = 0;
+    displayLanguage = null;
+    absent.add('de.bmw.infotainment.hmi.hmicontext2.HMIContext2');
+    app._setupLanguage();
+    return tick().then(() => {
+        eq(hmiContext, ['de.bmw.infotainment.hmi.hmicontext.HMIContext HMI_CID'], 'only the HMI context the unit has');
+        displayLanguage('CHINESISCH_SIMPLE');
+        return tick();
+    }).then(() => {
+        eq(check(), '检查更新', 'the language follows the one HMI context');
+        i18n.setHmiLanguage(null);
+        app._forgetWritten();
+        app._render();
+        hmiContext.length = 0;
+        absent.add('de.bmw.infotainment.hmi.hmicontext.HMIContext');
+        app._setupLanguage();
+        return tick();
+    }).then(() => {
+        eq([hmiContext.length, check()], [0, 'Check for updates'], 'no HMI context: English');
+        absent.clear();
+    });
+}
+
+/* The status line's time as the HMI's clock shows it: the cluster's display
+ * time at start and on each change; the system's time zone without it. */
+function runClusterClock() {
+    const status = () => last(/storeStatus\.\d*\.?Text/).split('=')[1];
+    const checkedAt = Date.now() - 60000;
+    const show = (ms, status) => { const d = new Date(ms); return { displayHour: d.getUTCHours(), displayMinute: d.getUTCMinutes(),
+        displaySecond: d.getUTCSeconds(), displayDateDay: d.getUTCDate(), displayDateWeekDay: 'MONTAG',
+        displayDateMonth: d.getUTCMonth() + 1, displayDateYear: d.getUTCFullYear(), statusDisplayClockTimeDate: status }; };
+    const hhmm = (ms) => { const d = new Date(ms); return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`; };
+    const H = 3600000;
+    clusterTimeNow = show(Date.now() + 5.75 * H, 1);
+    app._setVisible(true);
+    app._client.emit('state', Object.assign({}, ST, { catalog: { checking: false, checkedAt } }));
+    app._setupClusterClock();
+    return tick().then(() => {
+        eq(status(), `Up to date, checked ${hhmm(checkedAt + 5.75 * H)}`, 'the cluster time at start: UTC+5:45');
+        clusterTime(show(Date.now() - 5.5 * H, 1));
+        return tick();
+    }).then(() => {
+        eq(status(), `Up to date, checked ${hhmm(checkedAt - 5.5 * H)}`, 'a change follows: UTC-5:30');
+        clusterTime(show(Date.now(), 0));
+        return tick();
+    }).then(() => {
+        const d = new Date(checkedAt);
+        eq(status(), `Up to date, checked ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+            'no valid cluster time: the system time zone');
+        absent.add('de.bmw.infotainment.KombiIF');
+        app._setupClusterClock();
+        return tick();
+    }).then(() => {
+        absent.clear();
+        clusterTime = null;
+    });
+}
+
+/* The tile keeps the name and icon the app manager gave it: the app maps its
+ * state and enables it, and never points it at the app's own bundles. */
+function runEntryPoint() {
+    const calls = [];
+    const record = (name) => (v) => { calls.push(v === undefined ? name : `${name} ${v}`); return Promise.resolve(); };
+    const description = { name: 'robertn_store', uuid: 'tile-uuid', textId: 'SID_STORE_TITLE', icon: 'store_icon.png' };
+    const tile = {
+        getDescription: () => description,
+        init: record('init'),
+        setAvailability: record('availability'),
+        entryPoint: { setText: record('text'), setIcon: record('icon') }
+    };
+    app.appDescription = { application: { entryPoints: [description] } };
+    app.getEntryPoints = () => [tile];
+    states.length = 0;
+    return app._registerEntryPoints().then(() => {
+        eq(calls, ['init', 'availability ENABLED'], 'the tile: enabled, its name and icon left to the app manager');
+        eq(states.length, 1, 'the tile opens the root screen');
+        eq(app._entryUuid, 'tile-uuid', 'the tile is remembered');
+    });
+}
+
+run().then(runWidgetsExtra).then(runLanguage).then(runAbsentContext).then(runClusterClock).then(runEntryPoint).then(runDrawn).then(runTiming).then(() => {
     cleanUp();
     console.log(`store: ${checks} checks pass`);
     process.exit(0);

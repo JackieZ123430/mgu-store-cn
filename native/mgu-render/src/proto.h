@@ -61,28 +61,33 @@ enum {
 /*
  * Video frames (MI_VIDEO): another program (a player) writes them to a file /dev/shm/mgu-video-<name>; the app names
  * the file and draws OP_VIDEO where the picture goes. The file: struct mgu_video_head, then nslot frames of w*h*3/2
- * bytes each, I420 (the Y plane, then U, then V, rows without padding). The writer fills slot (slot + 1) % nslot,
+ * bytes each, rows without padding: I420 (the Y plane, then U, then V) or NV12 (the Y plane, then one plane of U V
+ * pairs, w/2 pairs a row, h/2 rows), as format says (NV12 where X_READY offers CAP_VIDEO_NV12). The writer fills slot (slot + 1) % nslot,
  * then sets slot, then seq + 1; the renderer reads seq + slot, then that slot - with 3 slots the writer is two frames
  * away from the one being read. A newer seq draws the app's last frame again, without a message from the app.
  */
 #define MGU_VIDEO_MAGIC 0x4656474du   /* "MGVF" */
+enum { MGU_VIDEO_I420 = 0, MGU_VIDEO_NV12 = 1 };
 struct mgu_video_head {
     uint32_t magic, version;          /* MGU_VIDEO_MAGIC, 1 */
     uint32_t w, h;                    /* even, 16..2048 */
     uint32_t seq, slot, nslot;        /* frames written so far, the newest one's slot, slots (1..4) */
     uint32_t matrix, full;            /* colours: 0 BT.601 / 1 BT.709; 0 limited (16-235) / 1 full range */
-    uint32_t pad[7];                  /* 64 bytes */
+    uint32_t format;                  /* MGU_VIDEO_I420 (0) / MGU_VIDEO_NV12 (1) */
+    uint32_t pad[6];                  /* 64 bytes */
 };
 
 /* client -> daemon, native only ("MR" + n: clear of every number the other dialects use) */
 enum {
     X_MODE = 0x4d520001,    /* u32 mode (MODE_*): where the surface goes; before PLACE, or again to move it */
-    X_GRAB = 0x4d520002,    /* u32 on: as MU_GRAB, events come as X_CCU */
+    X_GRAB = 0x4d520002,    /* u32 on[, u32 hold (HOLD_*)]: as MU_GRAB, events come as X_CCU; hold: the parts the HMI
+                               doesn't get meanwhile, 0 or none = all three (the gate's file names them) */
     X_PIXMAP = 0x4d520003,  /* u32 id, u32 w, u32 h (1..GFX_PIXMAP_SIDE), u32 format (PIX_*), u32 filter (0 nearest,
                                1 linear): an image the app writes in regions (X_PIXELS); drawn with OP_IMAGE */
     X_PIXELS = 0x4d520004,  /* u32 id, u32 n (1..64), (u32 x y w h)*n, then each rect's pixels in turn, rows top-down,
                                packed (w * bytes per pixel per row), the whole padded to 4 */
     X_PALETTE = 0x4d520005, /* u32 id, 256 * 3 bytes RGB: an INDEX8 pixmap's colours, for the whole picture */
+    X_FINGERS = 0x4d520006, /* u32 on: every finger of a gesture in a claim comes as X_FINGER, instead of TOUCH */
 };
 
 /* pixmap formats */
@@ -121,6 +126,9 @@ enum {
                                u32 refresh mHz */
     X_STATE = 0x4d520102,   /* u32 mode, u32 on screen, u32 in front (the HMI shows the app's screen): on change */
     X_CCU = 0x4d520103,     /* as EU_CCU */
+    X_FINGER = 0x4d520104,  /* u32 phase (1 down, 2 move, 3 up, 4 cancel: its UP was lost, not a tap), u32 finger id
+                               (0..15), f32 x, f32 y logical px: one finger of a gesture that began in a claim
+                               (after X_FINGERS 1) */
 };
 
 enum {
@@ -130,6 +138,17 @@ enum {
     CAP_PIXMAP = 8,         /* X_PIXMAP / X_PIXELS / X_PALETTE */
     CAP_VIDEO = 16,         /* MI_VIDEO / MI_DROP_VIDEO / OP_VIDEO */
     CAP_EMBED_ZERO_COPY = 32, /* embed frames are drawn straight into the HMI compositor's GPU buffers (no readback) */
+    CAP_FINGERS = 64,       /* X_FINGERS: every finger, with its id (X_FINGER) */
+    CAP_CONTROLLER_HOLD = 128, /* the loaded gate holds only the parts X_GRAB's hold names (else all three) */
+    CAP_VIDEO_NV12 = 256,   /* video frame files may be NV12 (mgu_video_head format 1) */
+};
+
+/* X_GRAB's hold: the parts of the controller the HMI doesn't get while the app grabs it */
+enum {
+    HOLD_KNOB = 1,
+    HOLD_PRESS = 2,
+    HOLD_TILT = 4,
+    HOLD_ALL = 7,
 };
 
 /* draw opcodes, all dialects */

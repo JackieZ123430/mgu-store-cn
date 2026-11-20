@@ -3,7 +3,7 @@
  * Renderer screens (mgu-renderd, the idrive7-apps GPU overlay): drawn with the kit (kit/, MIT) the way an
  * app on the car draws them. One recording (kit/record.js draw commands) is
  *   - played back in software here (the renderer's own fallback path) -> PNG for the builder's preview
- *   - sent to the emulator's real mgu-renderd by emulator.js -> on the live HMI at the screen's resolution
+ *   - sent to a unit's mgu-renderd -> on the live HMI at the screen's resolution
  *
  * screen = { kind: 'gpu', name, theme: kit theme id, bg: 'theme' | 'none' | '#rrggbb',
  *            bgArea?: 'app' (bg fills only the head unit's app area, GPU.appArea: the HMI's menus show through),
@@ -28,12 +28,15 @@ const DRAW = {
         const c = t[o.color] || o.color || t.text;
         if (!o.wrap) return cv.text(W.fit(cv, o.text, b.w, o.size, o.font), o.align === 'center' ? b.x + b.w / 2 : o.align === 'right' ? b.x + b.w : b.x,
             b.y + o.size * 0.8, o.size, c, { font: o.font, align: o.align });
-        // wrapped (left aligned): each line of the text a paragraph, as many lines as the box holds
+        // wrapped (left aligned): each line of the text a paragraph, as many lines as the box holds; o.lead a first
+        // paragraph in o.leadColor
         let y = b.y;
-        for (const para of String(o.text).split('\n')) {
+        const paras = String(o.text).split('\n').map((p) => [p, c]);
+        if (o.lead) paras.unshift([o.lead, t[o.leadColor] || o.leadColor || c]);
+        for (const [para, pc] of paras) {
             const room = Math.floor((b.y + b.h - y) / (o.size * 1.25));
             if (room < 1) break;
-            y += Math.max(1, W.wrap(cv, para, b.x, y, b.w, o.size, c, room, o.font)) * o.size * 1.25;
+            y += Math.max(1, W.wrap(cv, para, b.x, y, b.w, o.size, pc, room, o.font)) * o.size * 1.25;
         }
     },
     rect: (cv, t, b, o) => cv.roundRect(b.x, b.y, b.w, b.h, Math.min(o.radius || 0, b.w / 2, b.h / 2), t[o.color] || o.color || t.panelTop),
@@ -83,7 +86,7 @@ function renderPng(project, stateIndex, view) {
     return cv.png();
 }
 
-// Touch (the builder's Try mode, and the app on the emulator / car: mgu-renderd --touch, E_TOUCH): a press or drag at p
+// Touch (the builder's Try mode, and the app on a unit: mgu-renderd --touch, E_TOUCH): a press or drag at p
 // (design px) on an element changes its state the way the app would. Kit elements here, the app widgets in
 // widgets.js (W.TRY). drag: moves count too. A tap (released on the element) also runs its onTap.
 const TRY = {

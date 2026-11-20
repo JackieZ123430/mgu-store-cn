@@ -1,5 +1,7 @@
 'use strict';
-const { t: tr } = require('./i18n.js');
+const i18n = require('./i18n.js');
+
+const tr = i18n.t;
 /**
  * The Store's texts, from mgu-updater's state (native/mgu-updater/js/updater.js
  * state()): the status line, each row's second column, what a press on a
@@ -8,12 +10,49 @@ const { t: tr } = require('./i18n.js');
  * report hides what depends on it.
  */
 
-const PHASE = { download: tr("Downloading"), verify: tr("Verifying"), build: tr("Building"), install: tr("Installing"),
-    uninstall: tr("Removing"), check: tr("Checking") };
+const PHASE = { download: 'Downloading', verify: 'Verifying', build: 'Building', install: 'Installing',
+    uninstall: 'Removing', check: 'Checking' };
 
+/* Minutes the HMI's clock is ahead of UTC, modulo a day (setClusterTime),
+ * null while the instrument cluster reports no valid time. */
+let clockOffset = null;
+
+const DAY_MS = 86400000;
+const QUARTER_MS = 900000;
+const CLUSTER_UNFILLED = 15;
+
+/* The HMI's clock is the instrument cluster's display time (KombiIF
+ * statusShowTimeDate): its time zone and summer time are the ones set on
+ * the head unit. The offset is its time of day less UTC's, in quarter
+ * hours; times show as hours and minutes only, so the date does not
+ * matter. The HMI shows the time while statusDisplayClockTimeDate is odd
+ * and --:-- while it is even; 15 (unfilled) leaves the clock as it is.
+ * Returns whether the offset changed. */
+function setClusterTime(show, now) {
+    const status = show && show.statusDisplayClockTimeDate;
+    if (status === CLUSTER_UNFILLED || typeof status !== 'number') {
+        return false;
+    }
+    let offset = null;
+    if (status % 2 === 1 && show.displayHour < 24 && show.displayMinute < 60) {
+        const sec = show.displaySecond < 60 ? show.displaySecond : 0;
+        const diff = ((((show.displayHour * 60 + show.displayMinute) * 60 + sec) * 1000 - now) % DAY_MS + DAY_MS) % DAY_MS;
+        offset = (Math.round(diff / QUARTER_MS) * 15) % 1440;
+    }
+    const changed = offset !== clockOffset;
+    clockOffset = offset;
+    return changed;
+}
+
+/* A time as the HMI's clock shows it: in the head unit's time zone once
+ * the cluster reports it, else the system's. */
 function clock(ms) {
-    const d = new Date(ms);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    if (clockOffset === null) {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+    const d = new Date(ms + clockOffset * 60000);
+    return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 function percent(busy) {
@@ -48,31 +87,56 @@ function startPending(row) {
         : !!row.pendingReboot && row.kind === 'app' && (row.status === 'update' || row.status === 'available');
 }
 
-/* Each source's short name, by id: an https URL's host, else the last part
- * of its owner/repo or folder path, or the whole label where another
- * source's last part is the same (two people's `apps`). */
-function sourceNames(sources) {
-    const label = (s) => String(s.label || s.id).replace(/^https:\/\/([^/]+).*$/, '$1');
-    const last = (s) => label(s).split('/').pop();
-    const names = {};
-    (sources || []).forEach((s) => {
-        names[s.id] = (sources || []).some((o) => o.id !== s.id && label(o) !== label(s) && last(o) === last(s)) ? label(s) : last(s);
-    });
-    return names;
+/* Where a source's components come from, as their rows show it: a GitHub
+ * repo's owner, an https source's host, a USB stick's label. */
+function sourceAuthor(src) {
+    const label = String(src.label || src.id);
+    if (src.usb || src.type === 'usb') {
+        return label;
+    }
+    if (/^https:\/\//.test(label)) {
+        return label.replace(/^https:\/\/([^/]+).*$/, '$1');
+    }
+    return label.indexOf('/') > 0 ? label.slice(0, label.indexOf('/')) : label;
 }
 
-/* The components, each titled with its source's name where another
- * source lists one of the same id (two repositories' Doom). */
+/* The source name of each of a screen's rows (row -> text): its source's
+ * author, or its whole owner/repo where another of the rows has the same
+ * title and the same author from another source (one owner's two repos'
+ * DOOM). '' for a row of no known source. */
+function sourceNames(rows, sources) {
+    const of = (r) => (r && r.source && (sources || []).find((s) => s.id === r.source)) || null;
+    const author = (r) => (of(r) ? sourceAuthor(of(r)) : '');
+    return (r) => {
+        const s = of(r);
+        if (!s) {
+            return '';
+        }
+        const twin = (rows || []).some((o) => o !== r && o.title === r.title && o.source !== r.source && author(o) === author(r));
+        return twin && !(s.usb || s.type === 'usb') ? String(s.label || s.id).replace(/^https:\/\//, '') : author(r);
+    };
+}
+
+/* The updater's state with each component's title and description in the
+ * display language (its catalog "texts", src/i18n.js text). */
+function localized(st) {
+    if (!st || !Array.isArray(st.components) || !st.components.some((c) => c && c.texts)) {
+        return st;
+    }
+    return Object.assign({}, st, { components: st.components.map((c) => (c && c.texts
+        ? Object.assign({}, c, { title: i18n.text(c, 'title'), description: i18n.text(c, 'description') }) : c)) });
+}
+
+/* The components, each titled with its source's name (sourceNames). */
 function withSources(rows, sources) {
-    const names = sourceNames(sources);
-    const twin = (r) => r.source && (rows || []).some((o) => (o.listedId || o.id) === (r.listedId || r.id) && o.source && o.source !== r.source);
-    return (rows || []).map((r) => (twin(r) && names[r.source] ? Object.assign({}, r, { title: `${r.title} (${names[r.source]})` }) : r));
+    const name = sourceNames(rows, sources);
+    return (rows || []).map((r) => (name(r) ? Object.assign({}, r, { title: `${r.title} (${name(r)})` }) : r));
 }
 
 /* The second column of a component's row. */
 function rowState(row, busy) {
     if (busy && busy.id === row.id) {
-        return busy.phase === 'download' ? `${percent(busy)}%` : PHASE[busy.phase] || tr("Installing");
+        return busy.phase === 'download' ? `${percent(busy)}%` : tr(PHASE[busy.phase] || 'Installing');
     }
     if (row.queued) {
         return tr("Waiting");
@@ -89,6 +153,12 @@ function rowState(row, busy) {
     if (startPending(row)) {
         return tr("Restart pending");
     }
+    if (row.installed && row.repair && row.status !== 'update') {
+        return tr("Not working");
+    }
+    if (setupable(row, busy)) {
+        return tr("Needs setup");
+    }
     switch (row.status) {
     case 'update': return tr("Update {0}", row.revision && row.version === row.installed ? row.revision : row.version);
     case 'available': return tr("Install {0}", row.version);
@@ -96,8 +166,9 @@ function rowState(row, busy) {
     }
 }
 
-/* What a press on the row does: install, remove (after a confirm step), or
- * nothing. A removal the last start failed to apply is tried again. */
+/* What a press on the row does: install, set up (a tool's install step,
+ * setupable), remove (after a confirm step), or nothing. A removal the last
+ * start failed to apply is tried again. */
 function rowAction(row, busy) {
     if ((busy && busy.id === row.id) || row.queued) {
         return null;
@@ -105,10 +176,25 @@ function rowAction(row, busy) {
     if (row.error && row.applyFailed === 'remove') {
         return removable(row, busy) ? 'remove' : null;
     }
+    /* a failed Set up, with no update offered: tried again from the kept copy */
+    if (row.error && setupable(Object.assign({}, row, { error: null }), busy)) {
+        return 'setup';
+    }
     if (!notForUnit(row) && !row.blocked && (((row.status === 'update' || row.status === 'available') && !startPending(row)) || row.error)) {
         return 'install';
     }
+    if (setupable(row, busy)) {
+        return 'setup';
+    }
     return removable(row, busy) ? 'remove' : null;
+}
+
+/* Whether the installed tool's install step waits for Set up (the
+ * updater's needsSetup), with no update of it offered, and it is neither
+ * blocked nor for another head unit. */
+function setupable(row, busy) {
+    return !!row.installed && !!row.needsSetup && row.status !== 'update' && !row.error && !row.queued && !row.blocked &&
+        row.compat !== 'no' && !(busy && busy.id === row.id);
 }
 
 /* Whether the component can be removed now (after a confirm step): one
@@ -118,6 +204,20 @@ function rowAction(row, busy) {
 function removable(row, busy) {
     return row.uninstallable === true && (!!row.installed || row.nextStart === 'install' || !!row.applyFailed) &&
         row.nextStart !== 'remove' && !row.queued && !(busy && busy.id === row.id);
+}
+
+/* The installed tools only this app requires (the updater's
+ * requiredAlone), which its removal may take along. */
+function requiredAlone(rows, row) {
+    return (Array.isArray(row.requiredAlone) ? row.requiredAlone : []).map((id) => rows.find((r) => r.id === id)).filter((r) => r && r.installed);
+}
+
+/* Whether the component can go back to its version before now (after a
+ * confirm step): the updater offers it (previous), and nothing is running,
+ * queued or waiting for a restart for it. */
+function undoable(row, busy) {
+    return typeof row.previous === 'string' && !!row.previous && !!row.installed && !row.queued && !row.pendingReboot &&
+        !row.nextStart && !(busy && busy.id === row.id);
 }
 
 /* The second column of the start screen's Apps and Head-unit tools rows,
@@ -132,7 +232,7 @@ function groupState(rows, busy) {
         return tr("Failed");
     }
     const updates = rows.filter((r) => r.status === 'update' && !notForUnit(r) && !r.blocked && !startPending(r)).length;
-    return updates ? tr("{0} update{1}", updates, updates > 1 ? 's' : '') : '';
+    return updates ? (updates > 1 ? tr('{0} updates', updates) : tr('{0} update', updates)) : '';
 }
 
 /* The start screen's status line. Unreachable, the updater has either run
@@ -145,6 +245,9 @@ function statusLine(st, connected, secret) {
     if (st.rebooting) {
         return tr("Restarting");
     }
+    if (st.safeMode) {
+        return tr("Safe mode");
+    }
     if (st.privacy && st.privacy !== 'patched') {
         return tr("App privacy patch not in effect");
     }
@@ -154,6 +257,13 @@ function statusLine(st, connected, secret) {
     }
     if (st.rebootError && !st.busy) {
         return tr("Restart failed: {0}", st.rebootError);
+    }
+    if (st.mainappGuard) {
+        return tr("Restart head unit to install apps");
+    }
+    const hidden = st.components.find((c) => c.tileHidden && c.installed);
+    if (hidden) {
+        return tr("Restart head unit to show {0}", hidden.title);
     }
     if (st.catalog.checking) {
         return tr("Checking for updates");
@@ -166,12 +276,12 @@ function statusLine(st, connected, secret) {
         return tr("Check failed: {0}", st.catalog.error);
     }
     const updates = st.components.filter((c) => c.status === 'update' && !notForUnit(c) && !c.blocked && !startPending(c)).length;
-    return `${updates ? tr("{0} update{1}", updates, updates > 1 ? 's' : '') : tr("Up to date")}, ${checked}`;
+    return `${updates ? (updates > 1 ? tr('{0} updates', updates) : tr('{0} update', updates)) : tr("Up to date")}, ${checked}`;
 }
 
 /* ---- sources ---- */
 
-const SOURCE_STATE = { checking: tr("Checking"), error: tr("Error"), 'auth-needed': tr("Sign in"), offline: tr("Offline") };
+const SOURCE_STATE = { checking: 'Checking', error: 'Error', 'auth-needed': 'Sign in', offline: 'Offline' };
 
 function sourceLabel(src) {
     return src.label || src.id;
@@ -180,7 +290,7 @@ function sourceLabel(src) {
 /* The second column of a source's row: what needs the owner, else the
  * account that reads it. */
 function sourceState(src) {
-    return SOURCE_STATE[src.status] || (src.usb ? 'USB' : sourceAccount(src) || 'OK');
+    return (SOURCE_STATE[src.status] && tr(SOURCE_STATE[src.status])) || (src.usb ? 'USB' : sourceAccount(src) || 'OK');
 }
 
 /* The second column of the start screen's Sources row: what needs the
@@ -221,7 +331,7 @@ function tokenState(token) {
         return tr("Rejected");
     }
     const n = (token.usedBy || []).length;
-    return n ? tr("{0} source{1}", n, n > 1 ? 's' : '') : tr("Unused");
+    return n ? (n > 1 ? tr('{0} sources', n) : tr('{0} source', n)) : tr("Unused");
 }
 
 /* The sources an account reads, by label. */
@@ -352,9 +462,19 @@ function probeStatus(probe) {
     case 'ok': return '';
     case 'auth-needed': return tr("Not found or private");
     case 'offline': return tr("Offline");
-    case 'rate-limited': return tr("GitHub rate limit reached");
+    case 'rate-limited': return tr("GitHub limit reached. Try later or sign in.");
     default: return probe.error ? String(probe.error) : tr("Failed");
     }
+}
+
+/* Why text is not a proxy address the updater takes (its tunnel.js parse:
+ * http:// or socks5://, a host, an optional port and user name and
+ * password, nothing after them); null when it is one. */
+function proxyUrlError(text) {
+    const m = /^(?:http|socks5h?):\/\/(?:([^\s@/?#]*)@)?(\[[0-9a-f:.]+\]|[^\s:@/?#[\]]+)(?::(\d{1,5}))?\/?$/i.exec(String(text || '').trim());
+    // a % in a user name or password starts an escape (%40 for @)
+    const escapes = !m || !m[1] || /^(?:[^%]|%[0-9a-f]{2})*$/i.test(m[1]);
+    return m && escapes && (!m[3] || (Number(m[3]) > 0 && Number(m[3]) < 65536)) ? null : tr("Use http://host:port or socks5://host:port");
 }
 
 /* The Accounts page's status line: Add token's progress or refusal. */
@@ -368,6 +488,23 @@ function tokenMessage(m) {
     }
 }
 
+/* The title of the component the updater's refusal of a Remove names as
+ * needing it (its keptBy: "<title> needs <id>", or "<title> needs a
+ * <capability>: ..."), or null for any other refusal. */
+function neededBy(msg) {
+    const m = /^(.+) needs (?:a [^:]+: .*|\S+)$/.exec(String(msg));
+    return m ? m[1] : null;
+}
+
+/* Why the updater refused a Remove (note: { error, by: the id of the
+ * component that needs it, when known }), for the component's page:
+ * "Needed by <its title in rows>", else the refusal as it is. */
+function removeRefusal(note, rows) {
+    const title = neededBy(note.error);
+    const by = title && note.by && rows.find((r) => r.id === note.by);
+    return title ? tr("Needed by {0}", by ? by.title : title) : String(note.error);
+}
+
 /* The Sources page's status line. */
 function sourcesMessage(m) {
     switch (m.kind) {
@@ -379,6 +516,6 @@ function sourcesMessage(m) {
     }
 }
 
-module.exports = { listed, startPending, sourceNames, withSources, removable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
+module.exports = { setClusterTime, clock, setupable, proxyUrlError, localized, listed, startPending, sourceAuthor, sourceNames, withSources, removable, requiredAlone, undoable, hmiNames, notForUnit, parseSource, pickOptions, probeStatus, neededBy, removeRefusal, sourcesMessage, tokenMessage, PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode,
     phoneState, phoneAddress };

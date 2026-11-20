@@ -1,28 +1,80 @@
 'use strict';
-// 中文汉化：抖音 小白科技杂物社 / BiliBili 小白151 / GitHub JackieZ123430.
-const language = require('./language.js');
-const words = require('./locale_zh.js');
-const chinese = language === 'zh-CN';
-const credit = '汉化：抖音 小白科技杂物社 · BiliBili 小白151 · GitHub JackieZ123430';
+/**
+ * The Store's words in the head unit's display language. The English text
+ * is the key: t('Update {0}', version) is its translation in the language
+ * in use, with {0}, {1} ... replaced by the arguments, or the English where
+ * the language has no translation. Arguments are data (names, versions,
+ * sources, SSIDs, the updater's errors) and are never translated.
+ *
+ * The languages are src/locales.js (tools/gen_locales.js, from
+ * locales/<code>.json). setHmiLanguage(value) picks the one for the HMI's
+ * display language (a CommonTypes.Language name), English for any other,
+ * an invalid value or none. A language with "drawn": false (a script the
+ * renderer cannot lay out) is English while the drawn screens are in use
+ * (useDrawn).
+ *
+ * text(c, 'title') is a component's title or description in the language,
+ * from its "texts" ({ "<code>": { title, description } }, the catalog's):
+ * the language's, else that of its base language (pt for pt-BR), else c's
+ * own, English.
+ */
+const LOCALES = require('./locales.js');
 
-// Interpolate after lookup. Repository names, SSIDs, tokens, error payloads and
-// other arguments are data; they are never searched or replaced as UI words.
+let current = null;
+let drawn = false;
+
+function codes() {
+    return LOCALES.map((l) => l.code);
+}
+
+/* Returns whether the language changed. */
+function setHmiLanguage(value) {
+    const next = LOCALES.find((l) => typeof value === 'string' && l.hmiLanguages.indexOf(value) >= 0) || null;
+    if (next === current) {
+        return false;
+    }
+    current = next;
+    return true;
+}
+
+/* Whether the drawn screens are in use. Returns whether the words changed. */
+function useDrawn(on) {
+    const before = active();
+    drawn = !!on;
+    return active() !== before;
+}
+
+/* The locale whose words are shown: none for English. */
+function active() {
+    return current && !(drawn && current.drawn === false) ? current : null;
+}
+
+function language() {
+    return active() ? active().code : 'en';
+}
+
+function font() {
+    return (active() && active().font) || null;
+}
+
+function text(c, field) {
+    const own = c && typeof c[field] === 'string' ? c[field] : '';
+    const texts = c && c.texts;
+    const code = language();
+    if (!texts || typeof texts !== 'object' || code === 'en') {
+        return own;
+    }
+    const pick = (k) => {
+        const v = Object.prototype.hasOwnProperty.call(texts, k) && texts[k] && texts[k][field];
+        return typeof v === 'string' && v ? v : null;
+    };
+    return pick(code) || pick(code.split('-')[0]) || own;
+}
+
 function t(key, ...args) {
-    const text = chinese && Object.prototype.hasOwnProperty.call(words, key) ? words[key] : key;
-    return String(text).replace(/\{(\d+)\}/g, (match, i) => Number(i) < args.length ? String(args[i]) : match);
+    const words = active() && active().words;
+    const text = words && Object.prototype.hasOwnProperty.call(words, key) && typeof words[key] === 'string' ? words[key] : key;
+    return text.replace(/\{(\d+)\}/g, (match, i) => (Number(i) < args.length ? String(args[i]) : match));
 }
 
-// Only a layout's static display options use this. Runtime view values and
-// actions are merged afterwards, preserving externally supplied text and IDs.
-function staticOptions(value) {
-    if (Array.isArray(value)) return value.map(staticOptions);
-    if (!value || typeof value !== 'object') return value;
-    const out = {};
-    Object.keys(value).forEach((key) => {
-        const v = value[key];
-        out[key] = typeof v === 'string' && ['text', 'title', 'label', 'empty', 'labels'].indexOf(key) >= 0
-            ? t(v) : v && typeof v === 'object' ? staticOptions(v) : v;
-    });
-    return out;
-}
-module.exports = { t, language, chinese, credit, staticOptions };
+module.exports = { codes, setHmiLanguage, useDrawn, language, font, text, t };

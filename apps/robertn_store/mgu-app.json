@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "id": "robertn_store",
-  "version": "0.9.11",
-  "tree": "robertn_store@0.9.11",
+  "version": "0.9.41",
+  "tree": "package",
   "modules": [
     "src/store.js",
     "src/store_view.js",
@@ -22,18 +22,15 @@
     "src/am_store_widgets.js",
     "src/kit_record.js",
     "src/kit_canvas.js",
+    "src/i18n.js",
+    "src/locales.js",
     "src/kit_fonts.js",
     "src/kit_vicons.js",
     "src/kit_png.js",
     "src/kit_themes.js",
     "src/font_regular.js",
     "src/font_semibold.js",
-    "lib/mgu_render_client.js",
-    "src/language.js",
-    "src/locale_zh.js",
-    "src/i18n.js",
-    "src/hmi_text.js",
-    "src/font_chinese.js"
+    "lib/mgu_render_client.js"
   ],
   "sdk": [
     "oap-sdk/src/core/OnlineApp.js",

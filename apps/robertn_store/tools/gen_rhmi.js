@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Writes robertn_store@0.9.11's application.xml and uiDescription.json for
+ * Writes the staged tree's application.xml and uiDescription.json for
  * iDrive 7 (uiDescriptions/ID7) and iDrive 8 (uiDescriptions/ID8) from the
  * tables below, so container and component ids, names, widgets and cells
  * stay in lockstep.
@@ -9,7 +9,8 @@
  * iDrive 7, LT_State_Wide_List with LT_Button_MediaEntry_1Row rows on
  * iDrive 8):
  *
- *   1  ST_OnlineApps_Store             the entry state: a status line, Check for
+ *   1  ST_OnlineApps_Store             the entry state: a status line, Leave
+ *                                      safe mode (in safe mode), Check for
  *                                      updates, the progress of the running
  *                                      install, the rows Apps, Head-unit tools,
  *                                      Sources and Phone access, and Restart
@@ -47,7 +48,9 @@
  *                                      text, the status
  *   8  ST_OnlineApps_StoreSourceRemove the confirm step of a source's Remove
  *   9  ST_OnlineApps_StoreRemove       the confirm step of a component's Remove:
- *                                      its name, Cancel, Remove
+ *                                      its name, the tools only it uses,
+ *                                      Cancel, Remove, and Remove all while it
+ *                                      lists tools
  *  30  ST_OnlineApps_StorePhone        Phone access: On/Off, the page's QR code,
  *                                      its address, its error
  *
@@ -61,6 +64,13 @@
  * state. Each depth's state has the one below as its parent (on iDrive 8
  * none, statesFor); depth 1 is the entry state while its mode is in use.
  *
+ * The widget screens' own words are string ids (SID_STORE_<WORDS>), so the
+ * HMI shows them in its display language: the RHMI text files
+ * (rhmiData/variantGroups/Common/texts) are written from them, en_GB.json and
+ * en_US.json in English and those each language names (locales/<code>.json
+ * "rhmiTexts") in its words,
+ * English where it has none. What the app writes at runtime is text.
+ *
  * A list is one button component; the app sets its row count at runtime.
  * Ids share one space across containers, layout groups (100 + 2 * state
  * id, + 1) and components. iDrive 8's description has the hidden label
@@ -72,18 +82,21 @@
 const fs = require('fs');
 const path = require('path');
 
-const PKG = path.join(__dirname, '..', 'robertn_store@0.9.11');
+const PKG = path.join(__dirname, '..', require('../mgu-app.json').tree);
 const DIR = (hmi) => path.join(PKG, 'rhmiData', 'uiDescriptions', hmi);
+const TEXTS = path.join(PKG, 'rhmiData', 'variantGroups', 'Common', 'texts');
 const ID7 = DIR('ID7');
 const ID8 = DIR('ID8');
 const PROXIES = [48, 24, 12];
 
 /* Abstract components: kind button, row (two columns; a list too), label,
- * picture, progress. */
+ * text (a label wrapped over several rows: an error in full), picture,
+ * progress. */
 const button = (id, name, text) => ({ id, kind: 'button', name, text, focusable: 3 });
 const row = (id, name, text) => ({ id, kind: 'row', name, text, focusable: 3 });
 const list = (id, name) => ({ id, kind: 'row', name, text: '', focusable: 3 });
 const label = (id, name, text) => ({ id, kind: 'label', name, text: text || '', focusable: 0 });
+const text = (id, name, t) => ({ id, kind: 'text', name, text: t || '', focusable: 0 });
 const picture = (id, name) => ({ id, kind: 'picture', name, focusable: 0 });
 
 /* Each head unit's widget and cells for each kind. */
@@ -95,6 +108,7 @@ const WIDGETS = {
         button: (c) => ({ type: 'button', widget: 'LT_Button_1Row', cells: { Text: c.text } }),
         row: (c) => ({ type: 'button', widget: 'LT_Button_1Row_2Col7030_2Text', cells: { Text1stCol: c.text, Text2ndCol: '' } }),
         label: (c) => ({ type: 'label', widget: 'LT_Label_1Row', cells: { Text: c.text } }),
+        text: (c) => ({ type: 'label', widget: 'LT_Label_4Row_1TextDyn', cells: { Text: c.text } }),
         picture: () => ({ type: 'label', widget: 'LT_Label_1Graphic_Scalable', cells: {} }),
         progress: () => ({ type: 'progressBar', widget: 'LT_Progressbar_Ent_ProgressBig', cells: { TextLeft: '', TextRight: '' } })
     },
@@ -103,19 +117,26 @@ const WIDGETS = {
         button: (c) => ({ type: 'button', widget: 'LT_Button_MediaEntry_1Row', cells: media(c.text, null) }),
         row: (c) => ({ type: 'button', widget: 'LT_Button_MediaEntry_1Row', cells: media(c.text, '') }),
         label: (c) => ({ type: 'label', widget: 'LT_ScrollLabel', cells: { Text: c.text } }),
+        text: (c) => ({ type: 'label', widget: 'LT_ScrollLabel', cells: { Text: c.text } }),
         picture: () => ({ type: 'label', widget: null, cells: {} }),
         progress: () => ({ type: 'button', widget: 'LT_Button_MediaEntry_1Row', cells: media('', '') })
     }
 };
 
+/* The string id of English words: SID_STORE_ and the words in capitals,
+ * a ? as _Q. */
+const sid = (words) => `SID_STORE_${words.replace(/\?/g, ' Q').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
+const words = (text) => (text ? { value: sid(text), type: 'StringId' } : { value: '', type: 'Text' });
+
 function state(id, name, titleId, title, parent, components) {
-    return { id, name, titleId, title: { value: title, type: 'Text' }, parent, components };
+    return { id, name, titleId, title: words(title), titleText: title, parent, components };
 }
 
 const MAIN = {
     id: 1, name: 'ST_OnlineApps_Store', titleId: 10, title: { value: 'SID_STORE_TITLE', type: 'StringId' },
     components: [
-        label(20, 'storeStatus', 'Store'),
+        text(20, 'storeStatus', 'Store'),
+        button(150, 'storeSafeModeOff', 'Leave safe mode'),
         button(21, 'storeCheck', 'Check for updates'),
         { id: 22, kind: 'progress', name: 'storeProgress', focusable: 0 },
         row(23, 'storeNavApps', 'Apps'),
@@ -139,7 +160,7 @@ const SOURCE = state(6, 'ST_OnlineApps_StoreSource', 15, 'Source', SOURCES.id, [
     row(28, 'storeSrcChannel', 'Channel'),
     row(85, 'storeSrcAccount', 'Account'),
     row(86, 'storeSrcComponents', 'Components'),
-    label(89, 'storeSrcError'),
+    text(89, 'storeSrcError'),
     button(88, 'storeSrcRemove', 'Remove'),
     label(67, 'storeSrcAppLabel', 'Install on GitHub'),
     picture(68, 'storeSrcAppQr'),
@@ -192,8 +213,10 @@ const WIDGET_STATES = [
     ]),
     state(9, 'ST_OnlineApps_StoreRemove', 18, 'Remove?', MAIN.id, [
         label(97, 'storeRemoveName'),
+        text(148, 'storeRemoveTools'),
         button(98, 'storeRemoveCancel', 'Cancel'),
-        button(99, 'storeRemoveConfirm', 'Remove')
+        button(99, 'storeRemoveConfirm', 'Remove'),
+        button(149, 'storeRemoveAll', 'Remove all')
     ]),
     state(30, 'ST_OnlineApps_StorePhone', 19, 'Phone access', MAIN.id, [
         row(130, 'storePhoneToggle', 'Phone access'),
@@ -298,7 +321,7 @@ function uiDescription(hmi) {
             const cells = {};
             Object.keys(w.cells).forEach((k) => {
                 const v = w.cells[k];
-                cells[k] = { value: v, type: typeof v === 'boolean' ? 'Bool' : 'Text' };
+                cells[k] = typeof v === 'boolean' ? { value: v, type: 'Bool' } : words(v);
             });
             components[c.id] = {
                 type: w.type,
@@ -314,12 +337,41 @@ function uiDescription(hmi) {
     return { schemaVersion: '1.3.0', containers };
 }
 
+/* The words behind the string ids, by id: the tile's and every state's and
+ * component's own. */
+function english() {
+    const out = { SID_TEMP_EMPTY: '', SID_STORE_TITLE: 'Store' };
+    ['ID7', 'ID8'].forEach((hmi) => statesFor(hmi).forEach((s) => {
+        [s.titleText].concat(s.components.map((c) => c.text))
+            .filter(Boolean).forEach((t) => { out[sid(t)] = t; });
+    }));
+    return out;
+}
+
+/* The HMI's English text files (the oap-sdk's names for ENGLISCH__UK and ENGLISCH__US). */
+const ENGLISH = ['en_GB', 'en_US'];
+
+/* The RHMI text files: English, and each locale's (its rhmiTexts). */
+function texts() {
+    const en = english();
+    const out = {};
+    ENGLISH.forEach((n) => { out[`${n}.json`] = en; });
+    require('./gen_locales.js').read().forEach((l) => {
+        const file = {};
+        Object.keys(en).forEach((id) => { file[id] = Object.prototype.hasOwnProperty.call(l.words, en[id]) ? l.words[en[id]] : en[id]; });
+        l.rhmiTexts.forEach((n) => { out[`${n}.json`] = file; });
+    });
+    return out;
+}
+
 function write() {
     ['ID7', 'ID8'].forEach((hmi) => {
         fs.mkdirSync(DIR(hmi), { recursive: true });
         fs.writeFileSync(path.join(DIR(hmi), 'application.xml'), xml(hmi));
         fs.writeFileSync(path.join(DIR(hmi), 'uiDescription.json'), JSON.stringify(uiDescription(hmi), null, 2) + '\n');
     });
+    const files = texts();
+    Object.keys(files).forEach((n) => fs.writeFileSync(path.join(TEXTS, n), JSON.stringify(files[n], null, 2) + '\n'));
 }
 
 if (require.main === module) {
@@ -332,4 +384,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { write, statesFor, widgetOf, hostName, proxyName, PROXIES, ID7, ID8 };
+module.exports = { write, texts, sid, statesFor, widgetOf, hostName, proxyName, PROXIES, ID7, ID8 };

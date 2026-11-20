@@ -193,7 +193,7 @@ func TestWiFiProvider(t *testing.T) {
 	})
 
 	// The uplink's lease on the interface makes it online.
-	p.setOnline("172.20.10.2")
+	p.setOnline("172.20.10.2", "")
 	waitWiFi(t, p, "online", func(st wifiStatus) bool { return st.Link == "online" && st.IP == "172.20.10.2" })
 	if b, _ := os.ReadFile(c.statusFile()); !strings.Contains(string(b), `"link": "online"`) ||
 		!strings.Contains(string(b), `"ssid": "Home"`) {
@@ -546,7 +546,12 @@ func TestWiFiUnavailable(t *testing.T) {
 		}, "the D-Bus wpa_supplicant has wlant0"},
 		{func() { set(nl80211Station, false, errors.New("no reply")) }, "can't ask the D-Bus wpa_supplicant"},
 	} {
-		step.setup()
+		// the provider sees each step's change whole: a scan has it look again at once
+		func() {
+			p.reqMu.Lock()
+			defer p.reqMu.Unlock()
+			step.setup()
+		}()
 		waitWiFi(t, p, step.why, func(st wifiStatus) bool {
 			return st.Link == "unavailable" && st.Error != nil && strings.Contains(*st.Error, step.why)
 		})

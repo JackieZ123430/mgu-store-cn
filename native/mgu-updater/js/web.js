@@ -71,7 +71,7 @@ const DEFAULTS = {
     web_secret: '/run/mgu-updater/web-secret'
 };
 const NFT_COMMENT = 'mgu-updater-web';
-const UNITS = ['mgu-updater', 'mgu-uplink', 'mgu-app-fallback'];
+const UNITS = ['mgu-updater', 'mgu-uplink', 'mgu-app-fallback', 'mgu-render', 'mgu-render-hmi', 'mgu-deploy-verify'];
 const POLL_MS = Number(process.env.MGU_WEB_POLL_MS || 5000);
 const RULE_MS = Number(process.env.MGU_WEB_RULE_MS || 30000);
 const RESTART_MS = Number(process.env.MGU_WEB_RESTART_MS || 5000);
@@ -336,7 +336,8 @@ const OPS = {
     'login-cancel': () => ({}),
     'token-add': (b) => (str(b.token, 4096) && (b.label === undefined || str(b.label, 64)) ?
         Object.assign({ token: b.token.trim() }, b.label ? { label: b.label.trim() } : {}) : null),
-    'token-remove': (b) => (str(b.id, 64) ? { id: b.id } : null)
+    'token-remove': (b) => (str(b.id, 64) ? { id: b.id } : null),
+    'proxy-set': (b) => (typeof b.url === 'string' && b.url.length <= 2048 ? { url: b.url.trim() } : null)
 };
 
 function serve() {
@@ -845,6 +846,14 @@ function render(st) {
   }
   if (changed('components', st.components || [])) { renderComponents(st.components || []); }
   renderLogin(st.login);
+  var px = st.proxy;
+  $('proxyBox').hidden = !px;
+  if (px) {
+    $('proxyState').textContent = px.on ? (px.kind || '') + (px.address ? ' · ' + px.address : '') : 'Off';
+    $('proxyErr').textContent = px.error || '';
+    $('proxyErr').hidden = !px.error;
+    $('proxyOff').hidden = !px.on;
+  }
 }
 
 var inflight = false;
@@ -870,7 +879,7 @@ function ghRepo(v) {
 }
 /* What the typed repository offers (source-probe): the channel list shows only that. */
 var probe = { key: null, seq: 0, status: null, tokens: '' };
-var PROBE_NOTE = { 'auth-needed': 'Not found or private', offline: 'Offline', 'rate-limited': 'GitHub rate limit reached' };
+var PROBE_NOTE = { 'auth-needed': 'Not found or private', offline: 'Offline', 'rate-limited': 'GitHub limit reached. Try later or sign in.' };
 function setChannels(list) {
   var sel = $('addChannel');
   sel.textContent = '';
@@ -967,6 +976,13 @@ $('tokenForm').onsubmit = function (ev) {
   if (!v) { return; }
   op({ op: 'token-add', token: v }).then(function () { $('tokenValue').value = ''; });
 };
+$('proxyForm').onsubmit = function (ev) {
+  ev.preventDefault();
+  var v = $('proxyValue').value.trim();
+  if (!v) { return; }
+  op({ op: 'proxy-set', url: v }).then(function () { $('proxyValue').value = ''; });
+};
+$('proxyOff').onclick = function () { op({ op: 'proxy-set', url: '' }); };
 $('loginStart').onclick = function () { op({ op: 'login-start' }); };
 $('loginCancel').onclick = function () { op({ op: 'login-cancel' }); };
 $('logForm').onsubmit = function (ev) {
@@ -1037,6 +1053,12 @@ a{color:var(--acc)}
 <h2>Tokens</h2>
 <div id="tokens"></div>
 <form id="tokenForm"><input id="tokenValue" type="password" aria-label="Token" placeholder="Token" autocomplete="off"><button class="pri">Add token</button><button id="loginStart" type="button" hidden>Sign in with GitHub</button></form>
+<div id="proxyBox" hidden>
+<h2>Proxy</h2>
+<div id="proxyState" class="mut"></div>
+<p id="proxyErr" class="bad" hidden></p>
+<form id="proxyForm"><input id="proxyValue" aria-label="Proxy" placeholder="socks5://192.168.8.1:7891" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off"><button class="pri">Save</button><button id="proxyOff" type="button" hidden>Turn off</button></form>
+</div>
 <h2>Components</h2>
 <div id="components"></div>
 <h2>Logs</h2>

@@ -431,7 +431,7 @@ class Canvas {
      */
     text(str, x, y, size, c, opts) {
         opts = opts || {};
-        const f = fonts.get(opts.font || 'label', size, String(str));
+        const f = fonts.get(opts.font || 'label', size, str);
         if (!f) return 0;
         c = rgba(c);
         const scale = size / f.size;
@@ -439,7 +439,7 @@ class Canvas {
         const w = fonts.measure(f, s) * scale + (opts.spacing || 0) * Math.max(0, s.length - 1);
         let pen = opts.align === 'center' ? x - w / 2 : opts.align === 'right' ? x - w : x;
         for (const ch of s) {
-            const g = f.glyphs[ch.codePointAt(0)] || f.glyphs[63];
+            const g = fonts.glyph(f, ch);
             if (!g) continue;
             const [gx, gy, gw, gh, ox, oy, adv] = g;
             if (gw && gh) this._blit(f, gx, gy, gw, gh, pen + ox * scale, y + oy * scale, scale, c);
@@ -449,7 +449,7 @@ class Canvas {
     }
 
     textWidth(str, size, opts) {
-        const f = fonts.get((opts && opts.font) || 'label', size, String(str));
+        const f = fonts.get((opts && opts.font) || 'label', size, str);
         return f ? fonts.measure(f, String(str)) * (size / f.size) + ((opts && opts.spacing) || 0) * Math.max(0, String(str).length - 1) : 0;
     }
 

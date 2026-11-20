@@ -6,9 +6,9 @@
  *   node tools/test_view.js
  */
 const assert = require('assert');
-const { listed, sourceNames, withSources, rowState, rowAction, removable, groupState, statusLine, sourceLabel, sourceState, sourcesState, sourceActions,
+const { listed, sourceAuthor, sourceNames, withSources, rowState, rowAction, removable, undoable, groupState, statusLine, sourceLabel, sourceState, sourcesState, sourceActions,
     sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState, loginStatus, loginCode, phoneState, phoneAddress,
-    parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage } = require('../src/store_view.js');
+    parseSource, pickOptions, probeStatus, neededBy, removeRefusal, sourcesMessage, proxyUrlError, setClusterTime, clock } = require('../src/store_view.js');
 
 const row = (o) => Object.assign({ id: 'doom', kind: 'app', title: 'DOOM', version: '1.0.1', installed: '1.0.0',
     status: 'update', queued: false, error: null, pendingReboot: false }, o);
@@ -61,12 +61,14 @@ const cases = [
     [parsed('https://github.com'), 'null'],
     [parsed('https://raw.githubusercontent.com/owner/repo/main/catalog.json'),
         '{"type":"https","url":"https://raw.githubusercontent.com/owner/repo/main/catalog.json"}'],
-    [sourcesMessage({ kind: 'invalid-source', text: 'foo' }), 'Not owner/repo or https://host/path: foo'],
-    [tokenMessage({ kind: 'checking' }), 'Checking token'],
-    [tokenMessage({ kind: 'added', label: 'robertn' }), 'Added robertn'],
-    [tokenMessage({ kind: 'refused', error: 'GitHub does not accept this token' }), 'Add token failed: GitHub does not accept this token'],
-    [tokenMessage({ kind: 'speller', error: 'use case factory timed out' }), 'Text entry failed: use case factory timed out'],
-    [sourcesMessage({ kind: 'speller', error: 'use case factory timed out' }), 'Text entry failed: use case factory timed out'],
+    // a refused Remove: the updater's keptBy names the component that needs it, shown with its title in the rows
+    [neededBy('Waze on cluster needs cluster-render'), 'Waze on cluster'],
+    [neededBy('Waze on cluster needs a renderer: remove it first, or install another renderer'), 'Waze on cluster'],
+    [neededBy('cluster-render cannot be removed'), null],
+    [removeRefusal({ error: 'Waze on cluster needs cluster-render', by: 'waze-on-cluster' },
+        [{ id: 'waze-on-cluster', title: 'Waze im Kombiinstrument' }]), 'Needed by Waze im Kombiinstrument'],
+    [removeRefusal({ error: 'Waze on cluster needs cluster-render', by: null }, []), 'Needed by Waze on cluster'],
+    [removeRefusal({ error: 'cluster-render cannot be removed', by: null }, []), 'cluster-render cannot be removed'],
     [sourcesMessage({ kind: 'refused', op: 'source-add', error: 'owner/repo is already a source' }),
         'Add source failed: owner/repo is already a source'],
     [sourcesMessage({ kind: 'refused', op: 'source-remove', error: 'forbidden' }), 'Remove failed: forbidden'],
@@ -92,14 +94,25 @@ const cases = [
     [rowAction(row({ blocked: 'doom is already installed from o/r', uninstallable: true }), null), 'remove'],
     [groupState([row({ blocked: 'doom is already installed from o/r' })], null), ''],
     [statusLine(st({ components: [row({ blocked: 'doom is already installed from o/r' })] }), true, true), 'Up to date, checked 14:02'],
-    [JSON.stringify(withSources([row({ source: 'a' }), row({ source: 'b' }), row({ id: 'x', title: 'X', source: 'a' })],
-        [{ id: 'a', label: 'o/apps' }, { id: 'b', label: 'usb:S/mgu-repo/b' }]).map((r) => r.title)), '["DOOM (apps)","DOOM (b)","X"]'],
-    [JSON.stringify(withSources([row({ source: 'a' }), row({ source: 'b' }), row({ source: 'c' })],
-        [{ id: 'a', label: 'one/doom-apps' }, { id: 'b', label: 'two/doom-apps' }, { id: 'c', label: 'three/other' }]).map((r) => r.title)),
-        '["DOOM (one/doom-apps)","DOOM (two/doom-apps)","DOOM (other)"]'],
-    [JSON.stringify(sourceNames([{ id: 'mgu-store', label: 'robertnisipeanu/mgu-store' }, { id: 'i7', label: 'cauliflowermossgrape/idrive7-apps' },
-        { id: 'a', label: 'one/apps' }, { id: 'b', label: 'two/apps' }, { id: 'x', label: 'https://apps.example.org/index.json' }, { id: 'y' }])),
-        '{"mgu-store":"mgu-store","i7":"idrive7-apps","a":"one/apps","b":"two/apps","x":"apps.example.org","y":"y"}'],
+    // a row's source: its author; the whole owner/repo where another row has the same title and author from another source
+    [JSON.stringify([{ id: 'mgu-store', label: 'robertnisipeanu/mgu-store' }, { id: 'i7', label: 'cauliflowermossgrape/idrive7-apps' },
+        { id: 'x', type: 'https', label: 'https://apps.example.org/index.json' }, { id: 'usb:S/b', type: 'usb', usb: true, label: 'STICK' },
+        { id: 'y' }].map(sourceAuthor)), '["robertnisipeanu","cauliflowermossgrape","apps.example.org","STICK","y"]'],
+    [JSON.stringify(withSources([row({ source: 'a' }), row({ source: 'b' }), row({ id: 'x', title: 'X', source: 'a' }), row({ id: 'n', title: 'N' })],
+        [{ id: 'a', label: 'o/apps' }, { id: 'b', type: 'usb', usb: true, label: 'S' }]).map((r) => r.title)), '["DOOM (o)","DOOM (S)","X (o)","N"]'],
+    [JSON.stringify(withSources([row({ source: 'a' }), row({ source: 'b' }), row({ source: 'c' }), row({ id: 'x', title: 'X', source: 'a' })],
+        [{ id: 'a', label: 'one/apps' }, { id: 'b', label: 'one/more-apps' }, { id: 'c', label: 'two/apps' }]).map((r) => r.title)),
+        '["DOOM (one/apps)","DOOM (one/more-apps)","DOOM (two)","X (one)"]'],
+    (() => {
+        const rows = [row({ source: 'a' }), row({ source: 'b' }), row({ id: 'q', title: 'Quake', source: 'b' })];
+        const sources = [{ id: 'a', label: 'robertnisipeanu/mgu-store' }, { id: 'b', label: 'robertnisipeanu/idrive-apps' }];
+        // the same author's two DOOMs on one screen: owner/repo; on a screen with one of them: the author
+        return [JSON.stringify([rows.map(sourceNames(rows, sources)), sourceNames(rows.slice(1), sources)(rows[1])]),
+            JSON.stringify([['robertnisipeanu/mgu-store', 'robertnisipeanu/idrive-apps', 'robertnisipeanu'], 'robertnisipeanu'])];
+    })(),
+    // two sticks' DOOM keep their sticks' labels; a row of no known source has none
+    [sourceNames([row({ source: 's1' }), row({ source: 's2' })], [{ id: 's1', usb: true, label: 'S' }, { id: 's2', usb: true, label: 'S' }])(row({ source: 's1' })), 'S'],
+    [sourceNames([row({ source: 'gone' })], [])(row({ source: 'gone' })), ''],
     [rowAction(row({ compat: 'no', uninstallable: true }), null), 'remove'],
     [rowAction(row({ compat: 'yes' }), null), 'install'],
     [groupState([row({}), row({ id: 'vc', compat: 'no' })], null), '1 update'],
@@ -111,6 +124,26 @@ const cases = [
     [listed(row({ status: 'available', installed: null })), true],
     [statusLine(st({ components: [row({ status: 'available', installed: null, compat: 'no', error: 'is for iDrive 8' })] }), true, true),
         'Up to date, checked 14:02'],
+    // installed, and the deploy tool says it does not work until it is set up again (the updater's repair)
+    [rowState(row({ status: 'installed', repair: 'mgu-x.service missing' }), null), 'Not working'],
+    // an update available: offered, as it sets the component up again too
+    [rowState(row({ status: 'update', repair: 'mgu-x.service missing' }), null), 'Update 1.0.1'],
+    [rowState(row({ status: 'installed', repair: 'x', pendingReboot: true }), null), 'Not working'],
+    [rowState(row({ status: 'installed', repair: 'x', queued: true }), null), 'Waiting'],
+    // a tool whose install step waits after a firmware update (the updater's needsSetup): a press sets it up; an update offered wins
+    [rowState(row({ status: 'installed', needsSetup: 'installed under firmware old' }), null), 'Needs setup'],
+    [rowAction(row({ status: 'installed', needsSetup: 'x' }), null), 'setup'],
+    [rowAction(row({ status: 'update', needsSetup: 'x' }), null), 'install'],
+    [rowState(row({ status: 'update', needsSetup: 'x' }), null), 'Update 1.0.1'],
+    [rowAction(row({ status: 'installed', needsSetup: 'x' }), { id: 'doom', phase: 'install' }), null],
+    // not for one blocked or for another head unit
+    [rowAction(row({ status: 'installed', needsSetup: 'x', blocked: 'doom is already installed from o/r' }), null), null],
+    [rowState(row({ status: 'installed', needsSetup: 'x', blocked: 'doom is already installed from o/r' }), null), 'Installed 1.0.0'],
+    [rowAction(row({ status: 'installed', needsSetup: 'x', compat: 'no' }), null), null],
+    // a failed Set up is tried again as Set up; a failed update with one offered, as an install
+    [rowAction(row({ status: 'installed', needsSetup: 'x', error: 'setup failed: activate exited 3' }), null), 'setup'],
+    [rowState(row({ status: 'installed', needsSetup: 'x', error: 'setup failed' }), null), 'Failed, retry'],
+    [rowAction(row({ status: 'update', needsSetup: 'x', error: 'no connection' }), null), 'install'],
     [rowState(row({ kind: 'tool', status: 'installed', pendingReboot: true }), null), 'Restart pending'],
     [rowState(row({ kind: 'tool', status: 'update', pendingReboot: true }), null), 'Update 1.0.1'],
     // an app install queued for the next start (iDrive 8): not offered again
@@ -163,6 +196,15 @@ const cases = [
     [rowAction(row({ status: 'installed', uninstallable: true, queued: true }), null), null],
     [rowAction(row({ status: 'installed', uninstallable: false }), null), null],
     [rowAction(row({ status: 'installed', uninstallable: 'yes' }), null), null],
+    // Undo update: where the updater offers it, nothing else running, queued or waiting for a restart
+    [undoable(row({ status: 'installed', previous: '1.0.0' }), null), true],
+    [undoable(row({ status: 'installed' }), null), false],
+    [undoable(row({ status: 'installed', previous: null }), null), false],
+    [undoable(row({ status: 'available', installed: null, previous: '1.0.0' }), null), false],
+    [undoable(row({ status: 'installed', previous: '1.0.0' }), { id: 'doom', phase: 'install' }), false],
+    [undoable(row({ status: 'installed', previous: '1.0.0', queued: true }), null), false],
+    [undoable(row({ status: 'installed', previous: '1.0.0', pendingReboot: true }), null), false],
+    [undoable(row({ status: 'installed', previous: '1.0.0', nextStart: 'remove' }), null), false],
     [sourceLabel(src({})), 'someone/idrive7-apps'],
     [sourceLabel(src({ label: undefined })), 'idrive7-apps'],
     [sourceState(src({})), 'OK'],
@@ -251,6 +293,18 @@ const cases = [
     [statusLine(st({ privacy: 'restart-needed', components: [row({})] }), true), 'App privacy patch not in effect'],
     [statusLine(st({ privacy: 'unknown', components: [row({})] }), true), 'App privacy patch not in effect'],
     [statusLine(st({ privacy: 'patched', components: [row({})] }), true), '1 update, checked 14:02'],
+    // the deploy tool's safe mode, before everything but a restart under way
+    [statusLine(st({ safeMode: { at: null, reason: null }, privacy: 'mismatch', components: [row({ error: 'failed' })] }), true), 'Safe mode'],
+    [statusLine(st({ safeMode: { at: null, reason: null }, rebooting: true }), true), 'Restarting'],
+    [statusLine(st({ safeMode: null, components: [row({})] }), true), '1 update, checked 14:02'],
+    // the deploy tool's MainApp guard holds app changes until the next start
+    [statusLine(st({ mainappGuard: 'the app manager stopped 12s after mgu-deploy restarted it', components: [row({ tileHidden: true })] }), true),
+        'Restart head unit to install apps'],
+    // an app of ours whose tile an install that restarted the app manager left hidden
+    [statusLine(st({ components: [row({ status: 'installed', tileHidden: true }), row({ id: 'vc' })] }), true), 'Restart head unit to show DOOM'],
+    [statusLine(st({ components: [row({ status: 'available', installed: null, tileHidden: true })] }), true), 'Up to date, checked 14:02'],
+    // an install error comes before both
+    [statusLine(st({ mainappGuard: 'x', components: [row({ tileHidden: true, error: 'install failed' })] }), true), 'DOOM: install failed'],
     [statusLine(st({ rebooting: true, components: [row({ error: 'x' })] }), true), 'Restarting'],
     [statusLine(st({ rebootError: 'the head unit did not restart', components: [row({})] }), true),
         'Restart failed: the head unit did not restart'],
@@ -266,9 +320,63 @@ const cases = [
     [probeStatus({ status: 'ok', releases: false, tags: false, branches: [] }), ''],
     [probeStatus({ status: 'auth-needed' }), 'Not found or private'],
     [probeStatus({ status: 'offline' }), 'Offline'],
-    [probeStatus({ status: 'rate-limited' }), 'GitHub rate limit reached'],
+    [probeStatus({ status: 'rate-limited' }), 'GitHub limit reached. Try later or sign in.'],
     [probeStatus({ status: 'error', error: 'HTTP 500 from api.github.com' }), 'HTTP 500 from api.github.com'],
-    [sourcesMessage({ kind: 'checking', repo: 'o/r' }), 'Checking o/r']
+    // a proxy address: what the updater takes
+    [['http://192.168.8.1:7890', 'socks5://192.168.8.1:7891', 'socks5h://u:p@proxy.lan', 'http://[fd00::1]:3128/', ' http://h:1 ', 'SOCKS5://u:p%40ss@h:1']
+        .map(proxyUrlError).join(','), ',,,,,'],
+    [['', 'https://h:1', 'socks4://h:1', 'h:1', 'http://h:1/x', 'http://h:99999', 'http://h :1', 'http://h:1?x', 'socks5://u:p%zz@h:1']
+        .map(proxyUrlError).filter((e) => e === 'Use http://host:port or socks5://host:port').length, 9]
 ];
 cases.forEach(([got, want], i) => assert.strictEqual(got, want, `case ${i}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`));
-console.log(`store_view: ${cases.length} cases pass`);
+
+/* The HMI's clock: the instrument cluster's display time in the head unit's time zone. */
+const NOW = Date.UTC(2026, 10, 7, 23, 22, 40);
+const show = (o) => Object.assign({ displayHour: 1, displayMinute: 22, displaySecond: 41, displayDateDay: 8,
+    displayDateWeekDay: 'SONNTAG', displayDateMonth: 11, displayDateYear: 2026, statusDisplayClockTimeDate: 1 }, o);
+const local = (ms) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const CHECKED = Date.UTC(2026, 10, 7, 23, 2);
+const clockCases = [
+    // no cluster time yet: the system's time zone
+    () => [clock(CHECKED), local(CHECKED)],
+    // UTC+2 across midnight
+    () => [setClusterTime(show({}), NOW), true],
+    () => [clock(CHECKED), '01:02'],
+    () => [statusLine(st({ catalog: { checking: false, error: null, checkedAt: CHECKED } }), true), 'Up to date, checked 01:02'],
+    () => [statusLine(st({ online: false, catalog: { checking: false, error: null, checkedAt: CHECKED } }), true), 'Offline, checked 01:02'],
+    // the same offset again: no change
+    () => [setClusterTime(show({ displayMinute: 23, displaySecond: 40 }), NOW + 60000), false],
+    // the cluster's reading a few seconds behind still gives whole quarter hours
+    () => [setClusterTime(show({ displayMinute: 22, displaySecond: 30 }), NOW), false],
+    // UTC-3:30 (Newfoundland), UTC+5:45 (Kathmandu), UTC+13 (New Zealand summer)
+    () => [setClusterTime(show({ displayHour: 19, displayMinute: 52, displayDateDay: 7 }), NOW), true],
+    () => [clock(CHECKED), '19:32'],
+    () => [setClusterTime(show({ displayHour: 5, displayMinute: 7, displayDateDay: 8 }), NOW), true],
+    () => [clock(CHECKED), '04:47'],
+    () => [setClusterTime(show({ displayHour: 12, displayMinute: 22, displayDateDay: 8 }), NOW), true],
+    () => [clock(CHECKED), '12:02'],
+    // UTC: offset 0, formatted in UTC
+    () => [setClusterTime(show({ displayHour: 23, displayDateDay: 7 }), NOW), true],
+    () => [clock(CHECKED), '23:02'],
+    // no valid date: the time of day is enough
+    () => [setClusterTime(show({ displayHour: 1, displayDateDay: 255, displayDateMonth: 15, displayDateYear: 65535 }), NOW), true],
+    () => [clock(CHECKED), '01:02'],
+    // unfilled (15): the clock stays as it is
+    () => [setClusterTime(show({ displayHour: 9, statusDisplayClockTimeDate: 15 }), NOW), false],
+    () => [clock(CHECKED), '01:02'],
+    // an odd status shows the time, an even one does not (the HMI shows --:--): the system's time zone
+    () => [setClusterTime(show({ displayHour: 3, statusDisplayClockTimeDate: 3 }), NOW), true],
+    () => [clock(CHECKED), '03:02'],
+    () => [setClusterTime(show({ statusDisplayClockTimeDate: 0 }), NOW), true],
+    () => [clock(CHECKED), local(CHECKED)],
+    // out of range fields: none
+    () => [setClusterTime(show({ displayHour: 255 }), NOW), false],
+    () => [setClusterTime(show({ displayMinute: 60 }), NOW), false],
+    () => [setClusterTime(null, NOW), false],
+    () => [clock(CHECKED), local(CHECKED)]
+];
+clockCases.forEach((f, i) => {
+    const [got, want] = f();
+    assert.strictEqual(got, want, `clock case ${i}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+});
+console.log(`store_view: ${cases.length + clockCases.length} cases pass`);

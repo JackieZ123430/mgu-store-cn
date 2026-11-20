@@ -6,14 +6,21 @@
  *   github:<owner>/<repo>  GitHub Releases of the repository: each version
  *                          is the release <id>@<version> with its artifact
  *                          as the one asset; the release "catalog" holds
- *                          catalog.json. Runs in GitHub Actions only, with
+ *                          catalog.json and the icons it names. Runs in GitHub Actions only, with
  *                          the workflow's GITHUB_TOKEN (GH_TOKEN).
  *   dir:<path>             A local folder (relative paths: to the repository):
- *                          catalog.json and the artifacts side by side, a
- *                          catalog for the emulator or a USB stick.
+ *                          catalog.json, the icons it names and the
+ *                          artifacts side by side, a catalog for a test
+ *                          unit or a USB stick.
  *
  * Catalogs are not signed: the unit trusts a source over HTTPS (and its
  * token), and checks every artifact against the catalog's size and sha256.
+ *
+ * A catalog entry's artifact url (listedUrl): in a public repository the
+ * asset's release download (https://github.com/<owner>/<repo>/releases/
+ * download/<tag>/<name>, its browser_download_url), which a car without a
+ * token fetches without GitHub's API and its rate limit; in a private one
+ * the asset's API URL, which the car downloads with its token.
  */
 const fs = require('fs');
 const os = require('os');
@@ -75,10 +82,43 @@ function assetSha256(tag) {
     }
 }
 
+let visibility = null;
+/* Whether the repository is public (asked once). */
+function isPublic() {
+    if (visibility === null) {
+        visibility = JSON.parse(gh(['api', `repos/${WHERE}`])).private === false ? 'public' : 'private';
+    }
+    return visibility === 'public';
+}
+
+/* The url a catalog lists a release asset under (above). */
+function assetUrl(asset) {
+    return isPublic() ? asset.browser_download_url : asset.url;
+}
+
+/* The release <id>@<version> of a published entry, or null. */
+function releaseOf(tag) {
+    try {
+        return JSON.parse(gh(['api', `repos/${WHERE}/releases/tags/${encodeURIComponent(tag)}`]));
+    } catch (e) {
+        return null;
+    }
+}
+
+/* The release "catalog", created when it is not there. */
+function catalogRelease() {
+    try {
+        gh(['release', 'view', CATALOG_TAG, '-R', WHERE]);
+    } catch (e) {
+        gh(['release', 'create', CATALOG_TAG, '-R', WHERE, '--latest=false', '--title', 'Catalog',
+            '--notes', 'catalog.json: the newest version of every component (release/README.md)']);
+    }
+}
+
 /* Publishing to GitHub runs in GitHub Actions (.github/workflows/release.yml). */
 function githubPreflight(dryRun) {
     if (!dryRun && process.env.GITHUB_ACTIONS !== 'true') {
-        throw new Error('publishing runs in GitHub Actions: push a v* tag or run the Release workflow (release/README.md)');
+        throw new Error('publishing runs in GitHub Actions: run the Release workflow (release/README.md)');
     }
 }
 
@@ -89,10 +129,17 @@ const targets = {
             const file = path.join(WHERE, 'catalog.json');
             return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
         },
+        listedUrl(entry) {
+            return entry.artifact.url;
+        },
         uploadArtifact(entry, file) {
             fs.mkdirSync(WHERE, { recursive: true });
             fs.copyFileSync(file, path.join(WHERE, entry.artifact.name));
             return entry.artifact.name;
+        },
+        uploadCatalogAsset(file) {
+            fs.mkdirSync(WHERE, { recursive: true });
+            fs.copyFileSync(file, path.join(WHERE, path.basename(file)));
         },
         uploadCatalog(catalogFile) {
             fs.mkdirSync(WHERE, { recursive: true });
@@ -102,6 +149,17 @@ const targets = {
     },
     github: {
         preflight: githubPreflight,
+        /* The newest status named context on a commit of the repository
+         * (GitHub's status object: state, description, ...), or null. */
+        commitStatus(sha, context) {
+            let statuses;
+            try {
+                statuses = JSON.parse(gh(['api', `repos/${WHERE}/commits/${sha}/statuses?per_page=100`]));
+            } catch (e) {
+                throw new Error(`cannot read the statuses of ${sha.slice(0, 12)} in ${WHERE}: ${String(e.stderr || e.message).trim()}`);
+            }
+            return statuses.find((st) => st.context === context) || null;
+        },
         fetchCatalogText() {
             const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mgu-catalog-'));
             try {
@@ -116,21 +174,29 @@ const targets = {
                 fs.rmSync(dir, { recursive: true, force: true });
             }
         },
-        /* Returns the asset's API URL: the head unit downloads it with its
-         * token and Accept: application/octet-stream. A release left by an
-         * interrupted publish is completed rather than created again. The
-         * release's one asset is the artifact, whatever name GitHub gave it.
-         * Each new release is marked Latest, so a run's last one is the
-         * repository's Latest. */
+        /* A published entry's artifact url as this repository lists it
+         * (assetUrl), from its release's one asset. */
+        listedUrl(entry) {
+            const url = entry.artifact.url || '';
+            const download = /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\//.test(url);
+            if (download === isPublic()) {
+                return url;
+            }
+            const release = releaseOf(`${entry.id}@${entry.version}`);
+            const asset = release && release.assets.length === 1 && release.assets[0];
+            if (!asset || asset.size !== entry.artifact.size) {
+                throw new Error(`${entry.id}@${entry.version}: its release's asset is missing or not ${entry.artifact.size} bytes`);
+            }
+            return assetUrl(asset);
+        },
+        /* Returns the url the catalog lists the asset under (assetUrl). A
+         * release left by an interrupted publish is completed rather than
+         * created again. The release's one asset is the artifact, whatever
+         * name GitHub gave it. Each new release is marked Latest, so a run's
+         * last one is the repository's Latest. */
         uploadArtifact(entry, file) {
             const tag = `${entry.id}@${entry.version}`;
-            const view = () => {
-                try {
-                    return JSON.parse(gh(['api', `repos/${WHERE}/releases/tags/${encodeURIComponent(tag)}`]));
-                } catch (e) {
-                    return null;
-                }
-            };
+            const view = () => releaseOf(tag);
             let release = view();
             if (!release) {
                 const commit = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -146,15 +212,15 @@ const targets = {
             if (!asset || asset.size !== entry.artifact.size) {
                 throw new Error(`${tag}: the release's asset is missing or not ${entry.artifact.size} bytes`);
             }
-            return asset.url;
+            return assetUrl(asset);
+        },
+        /* A file beside catalog.json in the release "catalog", under its name. */
+        uploadCatalogAsset(file) {
+            catalogRelease();
+            gh(['release', 'upload', CATALOG_TAG, '-R', WHERE, '--clobber', file]);
         },
         uploadCatalog(catalogFile) {
-            try {
-                gh(['release', 'view', CATALOG_TAG, '-R', WHERE]);
-            } catch (e) {
-                gh(['release', 'create', CATALOG_TAG, '-R', WHERE, '--latest=false', '--title', 'Catalog',
-                    '--notes', 'catalog.json: the newest version of every component (release/README.md)']);
-            }
+            catalogRelease();
             gh(['release', 'upload', CATALOG_TAG, '-R', WHERE, '--clobber', catalogFile]);
         }
     }

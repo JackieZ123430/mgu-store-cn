@@ -4,25 +4,31 @@
  * "python": "<script>", "args": [...]}`; README.md, "Building on the unit").
  * Node 8.
  *
- * The repo's files are written to a folder of their own in state_dir and
- * handed to the build uid (uids.js: no account, not in the uplink's
+ * The repo's files are written to a folder of their own (in opts.base,
+ * else state_dir) and handed to the build uid (uids.js: no account, not in the uplink's
  * lists, so no network); the script runs there as that uid, under this Node
  * or conf `python` (the mgu-python tool), cwd = the repo copy, with
  *   MGU_SDK_DONOR  the SDK donor bundle the deploy tool names (read-only)
  *   MGU_OUT        an empty folder, where it leaves <id>@<version>.tgz,
  *                  unless the build names its `output` in the repo
  * HOME and TMPDIR point into its folder too, and this Node's and Python's
- * folders are on PATH. A build with `sdk` finds the oap-sdk module the
+ * folders are on PATH. Python's TLS takes no account of certificate dates
+ * (py/sitecustomize.py). A build with `sdk` finds the oap-sdk module the
  * deploy tool generates from the donor (index.js, package.json) in that
  * folder of the repo copy. A build with `network` gets the internet through
  * an HTTP proxy the fetch uid runs for it alone (proxy.js; http_proxy and
  * https_proxy), and fails without the uplink. It is stopped past
- * build_timeout_s, or once its folder holds more than build_max_bytes.
+ * build_timeout_s, or once its folder holds more than build_max_bytes
+ * (opts.maxBytes when given: a build stopped for that, or failing with
+ * its file system full, fails with err.overRoom, for the caller to run it
+ * again with more room).
  * Every process of the build uid is killed before a build starts (and
  * before root hands it the repo copy) and after it ends, so nothing a
  * script left running, in its process group or not, reaches the next
  * build. Root reads the result only as a regular file inside MGU_OUT,
- * bounded, and removes the folder's contents as the build uid.
+ * bounded, and removes the folder (removeBuild).
+ * At most MAX_LOG_LINES lines and MAX_LOG_BYTES of a build's output and its
+ * proxy's requests go to the log.
  */
 const fs = require('fs');
 const path = require('path');
@@ -30,13 +36,17 @@ const crypto = require('crypto');
 const cp = require('child_process');
 
 const MAX_LOG_LINES = 2000;
+const MAX_LOG_BYTES = 256 << 10;
 
 /* node -e COPY_OUTPUT <from> <to> <max bytes>: copies a regular file of at
  * most that size, opened without following a link and without blocking (a
- * FIFO is no file). */
+ * FIFO is no file), to a new file beside <to> that then replaces whatever
+ * the build left at <to>. */
 const COPY_OUTPUT = `
 const fs = require('fs');
+const path = require('path');
 const [from, to, max] = process.argv.slice(1);
+const part = path.join(path.dirname(to), '.' + path.basename(to) + '.' + process.pid + '.part');
 let fd;
 try {
     fd = fs.openSync(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -50,7 +60,7 @@ if (!st.isFile() || st.size > Number(max)) {
     process.exit(1);
 }
 try {
-    const outFd = fs.openSync(to, 'wx', 0o644);
+    const outFd = fs.openSync(part, 'wx', 0o644);
     const buf = Buffer.alloc(1 << 20);
     let total = 0;
     for (;;) {
@@ -61,6 +71,7 @@ try {
         for (let off = 0; off < n;) off += fs.writeSync(outFd, buf, off, n - off);
     }
     fs.closeSync(outFd);
+    fs.renameSync(part, to);
 } catch (e) {
     process.stderr.write('cannot copy it (' + (e.code || e.message) + ')');
     process.exit(1);
@@ -83,18 +94,51 @@ function usage(dir) {
     }
 }
 
+/* Bytes free on the file system holding dir (df), or Infinity when df cannot tell. */
+function freeBytes(dir) {
+    try {
+        const f = cp.execFileSync('df', ['-Pk', dir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').pop().split(/\s+/);
+        return Number(f[3]) >= 0 ? Number(f[3]) * 1024 : Infinity;
+    } catch (e) {
+        return Infinity;
+    }
+}
+
+/* Whether a process whose real uid is uid still runs (not a zombie). */
+function anyRunning(uid) {
+    let pids;
+    try {
+        pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n));
+    } catch (e) {
+        return true;
+    }
+    return pids.some((pid) => {
+        let text;
+        try {
+            text = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+        } catch (e) {
+            return false; // gone
+        }
+        const real = /^Uid:\s+(\d+)/m.exec(text);
+        return !!real && Number(real[1]) === uid && !/^State:\s+[ZX]/m.test(text);
+    });
+}
+
 /* Kills every process of the build uid (kill(-1) as that uid, which spares
- * only the caller). Not as root (tests): there is no build uid then. */
+ * only the caller): the system's kill, which starts far faster than a Node;
+ * a Node's when there is no kill or something of the uid still runs after
+ * it. Not as root (tests): there is no build uid then. */
 function killAll(uid, gid) {
     if (process.getuid() !== 0) {
         return Promise.resolve();
     }
-    return new Promise((resolve) => {
-        const k = cp.spawn(process.execPath, ['-e', 'try { process.kill(-1, "SIGKILL"); } catch (e) { /* none */ }'],
-            { uid, gid, stdio: 'ignore', env: {} });
-        k.on('error', () => resolve());
-        k.on('close', () => resolve());
+    const as = (cmd, args) => new Promise((resolve) => {
+        const k = cp.spawn(cmd, args, { uid, gid, stdio: 'ignore', env: {} });
+        k.on('error', () => resolve(false));
+        k.on('close', () => resolve(true));
     });
+    return as('/bin/kill', ['-KILL', '--', '-1']).then((ran) => (ran && !anyRunning(uid) ? null :
+        as(process.execPath, ['-e', 'try { process.kill(-1, "SIGKILL"); } catch (e) { /* none */ }'])));
 }
 
 /* The proxy for a network build, as the fetch uid: resolves with
@@ -146,14 +190,40 @@ function startProxy(conf, lease, log, id) {
             }
         });
         child.stdin.end(JSON.stringify({ token, uid: asRoot ? Number(conf.build_uid) : process.getuid(), dns: lease.dns,
-            maxBytes: Number(conf.build_max_bytes), idleMs: 60000, open: process.env.MGU_TEST_PROXY_OPEN === '1' }));
+            lease: conf.lease || undefined, maxBytes: Number(conf.build_max_bytes), idleMs: 60000, open: process.env.MGU_TEST_PROXY_OPEN === '1',
+            proxy: conf.proxy || undefined }));
     });
+}
+
+/* Removes a build folder, each part as the uid that owns it: a build uid's
+ * as that uid, so root follows nothing it planted; root's (a build that
+ * failed before root handed it over) as root. */
+function removeBuild(dir) {
+    const parts = ['repo', 'out', 'tmp'].map((p) => path.join(dir, p));
+    return parts.reduce((p, part) => p.then(() => new Promise((resolve) => {
+        let st;
+        try {
+            st = fs.lstatSync(part);
+        } catch (e) {
+            resolve();
+            return;
+        }
+        const rm = cp.spawn('rm', ['-rf', part], Object.assign({ stdio: 'ignore' },
+            process.getuid() === 0 ? { uid: st.uid, gid: st.gid } : {}));
+        rm.on('error', () => resolve());
+        rm.on('close', () => resolve());
+    })), Promise.resolve()).then(() => parts.concat([dir]).forEach((d) => {
+        try {
+            fs.rmdirSync(d);
+        } catch (e) { /* gone, or not empty: the next start retries */ }
+    }));
 }
 
 /* opts: { conf, entry, files: [{ name, data, mode }] (the repo, relative to
  * its root), donor, sdk (the folder holding the generated oap-sdk module,
  * for a build with `sdk`), lease ({ online, dns }, for a network build),
- * log }. Resolves with the package's bytes. */
+ * log, base (the folder to build in), maxBytes }. Resolves with the
+ * package's bytes. */
 function runBuild(opts) {
     const { conf, entry, files, donor, sdk, log } = opts;
     const python = !!entry.script.python;
@@ -161,33 +231,40 @@ function runBuild(opts) {
     let proxy = null;
     const uid = Number(conf.build_uid);
     const gid = Number(conf.build_gid);
-    const maxBytes = Number(conf.build_max_bytes);
+    const room = Number(opts.maxBytes) || 0;
+    const maxBytes = room || Number(conf.build_max_bytes);
     const timeoutMs = Number(conf.build_timeout_s) * 1000;
     const asRoot = process.getuid() === 0;
     // every process of the build uid is killed: it must be the builds' alone
     if (!(uid >= 1000) || [conf.fetch_uid, conf.web_uid].map(Number).indexOf(uid) >= 0) {
         return Promise.reject(new Error(`build_uid ${conf.build_uid} is not a uid of the builds' own`));
     }
-    const dir = path.join(conf.state_dir, `build-${crypto.randomBytes(6).toString('hex')}`);
+    const base = opts.base || conf.state_dir;
+    const dir = path.join(base, `build-${crypto.randomBytes(6).toString('hex')}`);
     const repo = path.join(dir, 'repo');
     const out = path.join(dir, 'out');
     const tmp = path.join(dir, 'tmp');
     const name = `${entry.id}@${entry.version}.tgz`;
-    const retire = () => killAll(uid, gid).then(() => new Promise((resolve) => {
+    const retire = () => killAll(uid, gid).then(() => {
         if (proxy) {
             proxy.stop();
         }
-        const rm = cp.spawn('rm', ['-rf', repo, out, tmp], Object.assign({ stdio: 'ignore' }, asRoot ? { uid, gid } : {}));
-        rm.on('error', () => resolve());
-        rm.on('close', () => {
-            [repo, out, tmp, dir].forEach((d) => {
-                try {
-                    fs.rmdirSync(d);
-                } catch (e) { /* not empty: the next start retries */ }
-            });
-            resolve();
-        });
-    }));
+        return removeBuild(dir);
+    });
+    let lines = 0;
+    let bytes = 0;
+    let cut = false;
+    let over = false;
+    const say = (l) => {
+        lines += 1;
+        bytes += Buffer.byteLength(l);
+        if (lines <= MAX_LOG_LINES && bytes <= MAX_LOG_BYTES) {
+            log(l);
+        } else if (!cut) {
+            cut = true;
+            log(`build ${entry.id}: the rest of its output is left out of the log`);
+        }
+    };
     return killAll(uid, gid)
         .then(() => {
             const script = entry.script.node || entry.script.python;
@@ -198,13 +275,13 @@ function runBuild(opts) {
                 throw new Error(`needs Python (${interpreter}): install mgu-python`);
             }
             let total = 0;
-            mkdirp(conf.state_dir, 0o755);
+            mkdirp(base, 0o755);
             fs.mkdirSync(dir, 0o755);
             [repo, out, tmp].forEach((d) => fs.mkdirSync(d, 0o700));
             files.forEach((f) => {
                 total += f.data.length;
                 if (total > maxBytes) {
-                    throw new Error(`the repo is more than ${maxBytes} bytes`);
+                    throw Object.assign(new Error(`the repo is more than ${maxBytes} bytes`), { overRoom: !!room });
                 }
                 const to = path.join(repo, f.name);
                 mkdirp(path.dirname(to), 0o755);
@@ -223,7 +300,7 @@ function runBuild(opts) {
             }
             log(`build ${entry.id}@${entry.version}: ${python ? 'python' : 'node'} ${[script].concat(entry.script.args).join(' ')}` +
                 `${entry.script.network ? ' (with internet)' : ''}`);
-            return entry.script.network ? startProxy(conf, opts.lease || { online: false }, log, entry.id).then((p) => {
+            return entry.script.network ? startProxy(conf, opts.lease || { online: false }, say, entry.id).then((p) => {
                 proxy = p;
             }) : null;
         })
@@ -232,8 +309,9 @@ function runBuild(opts) {
             const env = { MGU_SDK_DONOR: donor, MGU_OUT: out, HOME: tmp, TMPDIR: tmp,
                 PATH: [path.dirname(process.execPath)].concat(python ? [path.dirname(interpreter)] : [], ['/usr/bin', '/bin']).join(':') };
             if (python) {
-                // the CA bundle mgu-python carries: the unit's own may be missing
-                Object.assign(env, { PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1',
+                // the CA bundle mgu-python carries: the unit's own may be missing; py/sitecustomize.py:
+                // certificates checked but for their dates, for a unit whose clock is off
+                Object.assign(env, { PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1', PYTHONPATH: path.join(__dirname, 'py'),
                     SSL_CERT_FILE: path.join(path.dirname(path.dirname(interpreter)), 'ssl', 'cacert.pem') });
             }
             if (proxy) {
@@ -247,14 +325,8 @@ function runBuild(opts) {
                     stdio: ['ignore', 'pipe', 'pipe'],
                     env
                 }, asRoot ? { uid, gid } : {}));
-                let lines = 0;
                 let stopped = null;
-                const onLine = (d) => d.toString().split('\n').filter(Boolean).forEach((l) => {
-                    lines += 1;
-                    if (lines <= MAX_LOG_LINES) {
-                        log(`build ${entry.id}: ${l}`);
-                    }
-                });
+                const onLine = (d) => d.toString().split('\n').filter(Boolean).forEach((l) => say(`build ${entry.id}: ${l}`));
                 child.stdout.on('data', onLine);
                 child.stderr.on('data', onLine);
                 const stop = (why) => {
@@ -269,9 +341,10 @@ function runBuild(opts) {
                 const timer = setTimeout(() => stop(`took longer than ${conf.build_timeout_s} s`), timeoutMs);
                 const watch = setInterval(() => {
                     if (usage(dir) > maxBytes) {
+                        over = !!room;
                         stop(`wrote more than ${maxBytes} bytes`);
                     }
-                }, 2000);
+                }, room ? 500 : 2000);
                 child.on('error', (err) => {
                     clearTimeout(timer);
                     clearInterval(watch);
@@ -287,10 +360,13 @@ function runBuild(opts) {
                         process.kill(-child.pid, 'SIGKILL');
                     } catch (e) { /* gone */ }
                     killAll(uid, gid).then(() => {
+                        if (room && (stopped || code !== 0) && freeBytes(dir) < 1 << 20) {
+                            over = true;
+                        }
                         if (stopped) {
-                            reject(new Error(`the build ${stopped}`));
+                            reject(Object.assign(new Error(`the build ${stopped}`), { overRoom: over }));
                         } else if (code !== 0) {
-                            reject(new Error(`the build failed (${signal || `exit ${code}`})`));
+                            reject(Object.assign(new Error(`the build failed (${signal || `exit ${code}`})`), { overRoom: over }));
                         } else {
                             resolve();
                         }
@@ -352,22 +428,15 @@ function runBuild(opts) {
         }));
 }
 
-/* Build folders an earlier run left, emptied as the build uid. */
-function cleanBuilds(conf) {
-    try {
-        fs.readdirSync(conf.state_dir).filter((n) => /^build-/.test(n)).forEach((n) => {
-            const dir = path.join(conf.state_dir, n);
-            const parts = ['repo', 'out', 'tmp'].map((p) => path.join(dir, p));
-            const rm = cp.spawn('rm', ['-rf'].concat(parts), Object.assign({ stdio: 'ignore' },
-                process.getuid() === 0 ? { uid: Number(conf.build_uid), gid: Number(conf.build_gid) } : {}));
-            rm.on('error', () => {});
-            rm.on('close', () => parts.concat([dir]).forEach((d) => {
-                try {
-                    fs.rmdirSync(d);
-                } catch (e) { /* the next start retries */ }
-            }));
-        });
-    } catch (e) { /* no state_dir yet */ }
+/* Build folders an earlier run left, in state_dir and the dirs given. */
+function cleanBuilds(conf, dirs) {
+    const found = [];
+    [conf.state_dir].concat(dirs || []).forEach((d) => {
+        try {
+            fs.readdirSync(d).filter((n) => /^build-/.test(n)).forEach((n) => found.push(path.join(d, n)));
+        } catch (e) { /* no such folder yet */ }
+    });
+    return Promise.all(found.map(removeBuild));
 }
 
 module.exports = { runBuild, cleanBuilds, startProxy };

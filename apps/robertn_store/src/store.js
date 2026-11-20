@@ -14,20 +14,22 @@
  * root daemon, reads the sources' catalogs, downloads and installs; this app
  * shows the state it streams over its socket and sends it requests: "check"
  * (Check for updates), "install <id>" (a row whose component is not
- * installed, has an update, or failed), "reboot" (Restart head unit, once
- * confirmed), and the privileged ones, which carry the secret the updater
- * leaves in this app's data folder: "uninstall" (a removable installed
+ * installed, has an update, or failed), and the privileged ones, which carry
+ * the secret the updater leaves in this app's data folder: "reboot" (Restart
+ * head unit, once confirmed), "uninstall" (a removable installed
  * component, once confirmed), "source-add", "source-probe", "source-remove", "token-add",
  * "token-remove" (an account, once confirmed), "login-start" / "login-cancel" (GitHub
  * sign-in, which adds an account), "web" (Phone access on or off), and the
- * ones the updater relays to mgu-uplink: "wifi-enable", "wifi-scan",
+ * ones the updater relays to mgu-uplink: "wifi-enable", "wifi-5ghz" (Allow 5 GHz), "wifi-scan",
  * "wifi-connect" (with the password typed for a secured network not saved
- * yet), "wifi-forget" (once confirmed) and "uplink-prefer" (the preferred
- * connection). On the drawn screens, Settings has Wi-Fi while the uplink
- * reports it (state.uplink.wifi): the networks, Use Wi-Fi, Scan and the
- * preferred connection; the widget screens have none of it.
+ * yet), "wifi-forget" (once confirmed), "uplink-prefer" (the preferred
+ * connection) and "usb-phone" (Phone over USB). On the drawn screens, Settings has Wi-Fi and
+ * Preferred connection while the uplink reports its Wi-Fi (state.uplink.wifi): the networks,
+ * Allow 5 GHz, Use Wi-Fi and Scan; the group tried first and Phone over USB; the widget screens
+ * have none of it.
  *
- * The start screen has the status line, Check for updates, the progress of
+ * The start screen has the status line, Leave safe mode while the deploy
+ * tool's safe mode keeps our tools off ("safe-mode-off"), Check for updates, the progress of
  * the running install, the rows Apps and Head-unit tools, which open their
  * lists, Sources and Phone access (shown when the updater reports them),
  * and Restart head unit, which opens its confirm step (Cancel, Restart). A
@@ -59,9 +61,6 @@
  * when opened again.
  */
 'use strict';
-const { t: tr, chinese } = require('./i18n.js');
-const { HmiText } = require('./hmi_text.js');
-
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -69,18 +68,22 @@ const OnlineApp = require('oap-sdk/src/core/OnlineApp.js');
 const logging = require('oap-sdk/src/logging/logging');
 const someipBuilders = require('oap-sdk/src/someip/someipBuilders');
 const { UpdaterClient } = require('./client.js');
+const i18n = require('./i18n.js');
 const { qrPng } = require('./qr.js');
 const { spell } = require('./speller.js');
 const { Drawn, DEPTHS } = require('./store_drawn.js');
-const { typeKey, wifiOf } = require('./store_ui.js');
+const { typeKey, wifiOf, proxyOf, restartShown, canRestart } = require('./store_ui.js');
 const { PHASE, percent, rowState, rowAction, groupState, statusLine, sourceLabel, sourceState,
     sourcesState, sourceActions, sourceChannel, sourceAccount, tokenLabel, tokenState, tokenSources, accountsState,
-    loginStatus, loginCode, phoneState, phoneAddress, parseSource, pickOptions, probeStatus, sourcesMessage, tokenMessage,
-    removable, withSources, listed } = require('./store_view.js');
+    loginStatus, loginCode, phoneState, phoneAddress, parseSource, pickOptions, probeStatus, neededBy, sourcesMessage, tokenMessage,
+    removable, requiredAlone, undoable, withSources, listed, localized, proxyUrlError, setClusterTime } = require('./store_view.js');
 
 const logger = logging.getSDKLogger();
+const tr = i18n.t;
 
 const SOCKET = '/dev/shm/mgu-updater/updater.sock';
+// the id the updater knows the Store by (updater.conf store_app)
+const APP_ID = 'robertn_store';
 /* The updater writes the privileged secret, and while the phone page is on
  * its access URL, into this app's data folder (owner this app's uid, 0400);
  * both are read again on every use. */
@@ -99,7 +102,11 @@ const TOKEN_ADD_MS = 30000;             // how long Add token says "Checking tok
 const FOCUS_BACK_MS = 2000;             // how long a page waits for the HMI to give the focus back from the speller
 const PROBE_MS = 30000;                 // how long a repo being added waits for the updater's answer
 const IF_FRONTCCU = 'de.bmw.infotainment.controlelements.FrontCCU';
-const UPLINK_OPS = ['uplink-prefer', 'wifi-enable', 'wifi-scan', 'wifi-connect', 'wifi-forget'];
+const IF_KOMBI = 'de.bmw.infotainment.KombiIF';
+/* The HMI's context, by the instance of the CID: iDrive 7's HMI offers the first, iDrive 8's the second. */
+const HMI_CONTEXTS = [['de.bmw.infotainment.hmi.hmicontext.HMIContext', 'HMI_CID'],
+    ['de.bmw.infotainment.hmi.hmicontext2.HMIContext2', '1']];
+const UPLINK_OPS = ['uplink-prefer', 'usb-phone', 'wifi-enable', 'wifi-5ghz', 'wifi-scan', 'wifi-connect', 'wifi-forget'];
 
 /* The drawn screens' host states and their proxies (tools/gen_rhmi.js). */
 const PROXIES = [48, 24, 12];
@@ -113,7 +120,7 @@ const ROOTS = { widgets: 'ST_OnlineApps_Store', layer: hostName('layer', 1), emb
 const ID8_CELLS = { Text: 'PrimaryText', Text1stCol: 'PrimaryText', Text2ndCol: 'FrequencyText', TextLeft: 'PrimaryText',
     TextRight: 'FrequencyText' };
 const ID8_LABELS = new Set(['storeStatus', 'storeSourcesStatus', 'storeSrcError', 'storeAccountsStatus', 'storeAccountName',
-    'storeAccountSources', 'storeLoginCode', 'storeLoginUrl', 'storeLoginStatus', 'storeRemoveName', 'storePhoneUrl',
+    'storeAccountSources', 'storeLoginCode', 'storeLoginUrl', 'storeLoginStatus', 'storeRemoveName', 'storeRemoveTools', 'storePhoneUrl',
     'storePhoneError', 'storeSrcAppLabel', 'storeSrcAppUrl', 'storePickStatus']);
 
 /* tools/gen_rhmi.js */
@@ -135,7 +142,7 @@ const LISTS = {
     tool: { state: 'ST_OnlineApps_StoreTools', nav: 'storeNavTools', list: 'storeToolList' }
 };
 const KINDS = Object.keys(LISTS);
-const C = { status: 'storeStatus', check: 'storeCheck', progress: 'storeProgress', restart: 'storeRestart',
+const C = { status: 'storeStatus', safeModeOff: 'storeSafeModeOff', check: 'storeCheck', progress: 'storeProgress', restart: 'storeRestart',
     navSources: 'storeNavSources', navPhone: 'storeNavPhone',
     restartCancel: 'storeRestartCancel', restartConfirm: 'storeRestartConfirm',
     sourcesStatus: 'storeSourcesStatus', sourceList: 'storeSourceList', sourceAdd: 'storeSourceAdd',
@@ -150,7 +157,8 @@ const C = { status: 'storeStatus', check: 'storeCheck', progress: 'storeProgress
     loginQr: 'storeLoginQr', loginCode: 'storeLoginCode', loginUrl: 'storeLoginUrl',
     loginStatus: 'storeLoginStatus', loginCancel: 'storeLoginCancel',
     srcRemoveCancel: 'storeSrcRemoveCancel', srcRemoveConfirm: 'storeSrcRemoveConfirm',
-    removeName: 'storeRemoveName', removeCancel: 'storeRemoveCancel', removeConfirm: 'storeRemoveConfirm',
+    removeName: 'storeRemoveName', removeTools: 'storeRemoveTools', removeCancel: 'storeRemoveCancel', removeConfirm: 'storeRemoveConfirm',
+    removeAll: 'storeRemoveAll',
     srcAppLabel: 'storeSrcAppLabel', srcAppQr: 'storeSrcAppQr', srcAppUrl: 'storeSrcAppUrl',
     phoneToggle: 'storePhoneToggle', phoneQr: 'storePhoneQr', phoneUrl: 'storePhoneUrl',
     phoneError: 'storePhoneError' };
@@ -233,6 +241,8 @@ class Store extends OnlineApp {
         this._spelling = false;         // the HMI's speller is up
         this._typing = null;            // the drawn keyboard's page up: { page, resolve, under (the page it took the place of) }
         this._uplinkNote = null;        // the refusal of the last Wi-Fi or preferred-connection request
+        this._proxyNote = null;         // why the last proxy change was refused
+        this._removeNote = null;        // the updater's refusal of the last Remove: { id, error, by }
         this._qr = { login: { key: null, file: null, chain: Promise.resolve() },
             phone: { key: null, file: null, chain: Promise.resolve() }, app: { key: null, file: null, chain: Promise.resolve() } };
         this._hmi = 'ID7';
@@ -258,11 +268,17 @@ class Store extends OnlineApp {
             this._render();
         });
         this._st = null;
+        this._stRaw = null;
         this._connected = false;
         this._client = new UpdaterClient(SOCKET, { reconnectMs: RECONNECT_MS });
         this._client.on('state', (st) => {
+            // each connection says which Store this is: the updater's word that its update started
+            if (!this._connected) {
+                this._client.send({ op: 'hello', id: APP_ID, version: this._version() });
+            }
             this._connected = true;
-            this._st = st;
+            this._stRaw = st;
+            this._st = localized(st);
             this._tokenAdded(st);
             this._reprobe();
             this._render();
@@ -277,6 +293,10 @@ class Store extends OnlineApp {
             this._render();
         });
         this._client.on('reply-error', (msg, op) => {
+            // an updater before 0.8.7 does not know hello: nothing to do
+            if (op === 'hello') {
+                return;
+            }
             // replies come in request order, so one without its op answers the last request
             const forOp = op || this._lastOp;
             this._lastOp = null;
@@ -294,6 +314,14 @@ class Store extends OnlineApp {
                 this._probed({ type: 'probe', repo: this._pick.repo, status: 'refused', error: String(msg) });
             } else if (UPLINK_OPS.indexOf(forOp) >= 0) {
                 this._uplinkNote = String(msg);
+                this._render();
+            } else if (forOp === 'uninstall') {
+                // the component that needs it, by the untranslated title the updater names it with
+                const by = (this._stRaw && this._stRaw.components || []).find((c) => c.title === neededBy(msg));
+                this._removeNote = { id: this._removeId, error: String(msg), by: by ? by.id : null };
+                this._render();
+            } else if (forOp === 'proxy-set') {
+                this._proxyNote = String(msg);
                 this._render();
             } else if (forOp === 'token-add' && this._tokenAdding) {
                 this._endTokenAdd({ kind: 'refused', error: String(msg) });
@@ -330,6 +358,8 @@ class Store extends OnlineApp {
         }
         const foregroundStart = this._startedForeground();
         return this._setupRhmi()
+            .then(() => this._setupLanguage())
+            .then(() => this._setupClusterClock())
             .then(() => this._setupController())
             .then(() => this._rendererAnswer())
             .then(() => this._registerEntryPoints())
@@ -363,6 +393,51 @@ class Store extends OnlineApp {
         const data = this.getVisibilityData && this.getVisibilityData();
         const reason = (data && data.reason) || this.startReason;
         return FOREGROUND_REASONS.includes(reason);
+    }
+
+    /* The words follow the HMI's display language (src/i18n.js), from
+     * whichever HMI context the HMI offers: read at start and on each
+     * change; English until then, and without it. */
+    _setupLanguage() {
+        logger.info(`languages: en ${i18n.codes().join(' ')}`);
+        HMI_CONTEXTS.forEach(([iface, instance]) => {
+            let proxy;
+            someipBuilders.buildTypedProxy(iface, instance)
+                .then((p) => { proxy = p; return proxy.init(); })
+                .then(() => proxy.waitUntilAvailable())
+                .then(() => proxy.currentDisplayLanguage.subscribe((v) => this._displayLanguage(v)))
+                .then(() => proxy.currentDisplayLanguage.getValue())
+                .then((v) => this._displayLanguage(v))
+                .catch((err) => logger.warn(`display language unavailable from ${iface}: ${err && err.message}`));
+        });
+    }
+
+    _displayLanguage(value) {
+        if (i18n.setHmiLanguage(value)) {
+            logger.info(`display language ${value}: ${i18n.language()}`);
+            this._st = localized(this._stRaw);
+            this._forgetWritten();
+            this._render();
+        }
+    }
+
+    /* Times show as the HMI's clock does, in the head unit's time zone: from
+     * the instrument cluster's display time (store_view.js setClusterTime),
+     * read at start and on each change; the system's time zone without it. */
+    _setupClusterClock() {
+        let proxy;
+        const show = (v) => {
+            if (setClusterTime(v, Date.now())) {
+                this._render();
+            }
+        };
+        someipBuilders.buildTypedProxy(IF_KOMBI, '1')
+            .then((p) => { proxy = p; return proxy.init(); })
+            .then(() => proxy.waitUntilAvailable())
+            .then(() => proxy.statusShowTimeDate.subscribe(show))
+            .then(() => proxy.statusShowTimeDate.getValue())
+            .then(show)
+            .catch((err) => logger.warn(`cluster clock unavailable: ${err && err.message}`));
     }
 
     /* The controller for the drawn screens in embed mode (src/store_drawn.js
@@ -457,6 +532,7 @@ class Store extends OnlineApp {
         });
         removeStaleQr();
         this._bind(C.check, () => this._send({ op: 'check' }));
+        this._bind(C.safeModeOff, () => this._privileged({ op: 'safe-mode-off' }));
         this._bind(C.restart, () => this._openState(S.restart));
         this._bind(C.restartCancel, () => this._closeState(S.restart));
         this._bind(C.restartConfirm, () => this._restart());
@@ -466,6 +542,7 @@ class Store extends OnlineApp {
         });
         this._bind(C.removeCancel, () => this._closeState(S.remove));
         this._bind(C.removeConfirm, () => this._remove());
+        this._bind(C.removeAll, () => this._remove(this._removeTools().map((t) => t.id)));
         this._bind(C.navSources, () => this._openState(S.sources));
         this._bind(C.sourceList, (row) => this._onSource(row));
         this._bind(C.sourceAdd, () => this._addSource());
@@ -489,7 +566,7 @@ class Store extends OnlineApp {
         // Presses also arrive as the application's raw 'userEvent'; both paths
         // land in _press, which keeps a press delivered twice to one.
         rhmi.on('userEvent', (ev) => {
-            const entry = ev && ev.eventType === tr("ACTION") && this._actionById[Number(ev.sourceId)];
+            const entry = ev && ev.eventType === 'ACTION' && this._actionById[Number(ev.sourceId)];
             if (entry) {
                 this._press(entry.name, entry.handler, Number((ev.parameterMap || {})[ROW_KEY]) || 0);
             }
@@ -562,6 +639,9 @@ class Store extends OnlineApp {
         }
         logger.info(`screens: ${ui}`);
         this._ui = ui;
+        if (i18n.useDrawn(ui !== 'widgets')) {
+            this._st = localized(this._stRaw);
+        }
         this._forgetWritten();
         this._render();
         if (!this._entryUuid) {
@@ -613,11 +693,14 @@ class Store extends OnlineApp {
             version: this._version(), note: this._sourcesNote, login: this._login,
             webText: web && web.enabled ? readFile(WEB_URL_FILE) : '', accountsNote: this._accountsNote,
             pick: this._pick && { repo: this._pick.repo, probe: this._pick.probe, tokenNote: !!this._pick.tokenNote },
-            uplinkNote: this._uplinkNote };
+            uplinkNote: this._uplinkNote, proxyNote: this._proxyNote, removeNote: this._removeNote, language: i18n.language() };
     }
 
     /* A press on the drawn screens (src/store_ui.js acts). */
     _act(act) {
+        if (!act) {
+            return;
+        }
         logger.info(`press ${act.do}${act.id ? ` ${act.id}` : ''}`);
         switch (act.do) {
         case 'tab': this._drawn.setTab(act.tab); break;
@@ -631,8 +714,17 @@ class Store extends OnlineApp {
                 this._removalRefused = false;
             } else if (act.page.name === 'confirm' && act.page.kind === 'account-remove') {
                 this._tokenId = act.page.id;
+            } else if (act.page.name === 'app') {
+                this._removeNote = null;
             } else if (act.page.name === 'confirm' && act.page.kind === 'remove') {
                 this._removeId = act.page.id;
+                this._removeNote = null;
+            } else if (act.page.name === 'confirm' && act.page.kind === 'undo') {
+                this._undoId = act.page.id;
+            } else if (act.page.name === 'proxy') {
+                this._proxyNote = null;
+            } else if (act.page.name === 'prefer') {
+                this._uplinkNote = null;
             } else if (act.page.name === 'wifi') {
                 const w = wifiOf({ connected: this._connected, st: this._st });
                 this._uplinkNote = null;
@@ -643,13 +735,18 @@ class Store extends OnlineApp {
             this._drawn.push(act.page);
             break;
         case 'install': this._install(act.id); break;
-        case 'update-all':
-            (this._connected && this._st ? this._st.components : [])
-                .filter((c) => c.status === 'update' && rowAction(c, this._st.busy) === 'install')
-                .forEach((c) => this._install(c.id));
+        case 'update-all': {
+            // the Store's own update last: it closes the Store
+            const ids = (this._connected && this._st ? this._st.components : [])
+                .filter((c) => c.status === 'update' && rowAction(c, this._st.busy) === 'install').map((c) => c.id);
+            ids.filter((id) => id !== APP_ID).concat(ids.filter((id) => id === APP_ID)).forEach((id) => this._install(id));
             break;
-        case 'remove': this._removeId = act.id; this._remove(); break;
+        }
+        case 'remove': this._removeId = act.id; this._remove(act.tools); break;
+        case 'undo': this._undoId = act.id; this._undo(); break;
+        case 'setup': this._setup(act.id); break;
         case 'restart': this._restart(); break;
+        case 'safe-mode-off': this._privileged({ op: 'safe-mode-off' }); break;
         case 'source-remove': this._sourceId = act.id; this._removeSource(); break;
         case 'account-remove': this._tokenId = act.id; this._removeAccount(); break;
         case 'add-source': this._addSource(); break;
@@ -668,6 +765,13 @@ class Store extends OnlineApp {
             }
             break;
         }
+        case 'wifi-5ghz': {
+            const w = wifiOf({ connected: this._connected, st: this._st });
+            if (w) {
+                this._uplink({ op: 'wifi-5ghz', on: !w.allow5ghz });
+            }
+            break;
+        }
         case 'wifi-scan': this._uplink({ op: 'wifi-scan' }); break;
         case 'wifi-join': this._uplink({ op: 'wifi-connect', ssid: act.ssid }); break;
         case 'wifi-password': this._wifiPassword(act.ssid); break;
@@ -676,6 +780,23 @@ class Store extends OnlineApp {
             this._uplink({ op: 'wifi-forget', ssid: act.ssid });
             break;
         case 'uplink-prefer': this._uplink({ op: 'uplink-prefer', kind: act.kind }); break;
+        case 'usb-phone': {
+            const u = this._connected && this._st && this._st.uplink;
+            if (u && typeof u.usbPhone === 'boolean') {
+                this._uplink({ op: 'usb-phone', on: !u.usbPhone });
+            }
+            break;
+        }
+        case 'proxy-toggle': {
+            const p = proxyOf({ connected: this._connected, st: this._st });
+            if (p && p.on) {
+                this._setProxy('');
+            } else {
+                this._editProxy();
+            }
+            break;
+        }
+        case 'proxy-edit': this._editProxy(); break;
         default: break;
         }
         this._render();
@@ -711,6 +832,39 @@ class Store extends OnlineApp {
         });
     }
 
+    /* The proxy's address, typed (iDrive 8: the drawn keyboard; iDrive 7: the
+     * HMI's speller), checked here and by the updater, which keeps it. */
+    _editProxy() {
+        this._proxyNote = null;
+        const p = proxyOf({ connected: this._connected, st: this._st });
+        // a user name and password are not shown, so an address with them is typed again in full
+        const text = p && p.on && p.address && !p.auth ? `${p.kind}://${p.address}` : '';
+        this._spell(tr("Proxy"), (m) => { this._proxyNote = sourcesMessage(m); this._render(); },
+            { label: tr("Address"), text, layout: 'text', symbols: true, max: 300 }).then((url) => {
+            const typed = (url || '').trim();
+            if (!typed) {
+                return;
+            }
+            const why = proxyUrlError(typed);
+            if (why) {
+                this._proxyNote = why;
+                this._render();
+                return;
+            }
+            this._setProxy(typed);
+        });
+    }
+
+    _setProxy(url) {
+        this._proxyNote = null;
+        // the address can hold a password: only whether one is set goes to the log
+        logger.info(`proxy ${url ? 'set' : 'off'}`);
+        if (!this._privileged({ op: 'proxy-set', url })) {
+            this._proxyNote = readSecret() ? 'updater not running' : 'no updater secret';
+        }
+        this._render();
+    }
+
     _openState(name) {
         if (this._shutdownPromise) {
             return;
@@ -725,11 +879,16 @@ class Store extends OnlineApp {
             .catch((err) => logger.warn(`closeState ${name} failed: ${err && err.message}`));
     }
 
-    /* The confirm step's Restart; the updater refuses it while an install runs. */
+    /* The confirm step's Restart, greyed out while an install runs or waits;
+     * the updater refuses it then too, and says why in rebootError. */
     _restart() {
+        const m = { connected: this._connected, st: this._st };
+        if (restartShown(m) && !canRestart(m)) {
+            return;
+        }
         this._closePage('restart', isConfirm('restart'));
         logger.info('restart head unit');
-        this._send({ op: 'reboot' });
+        this._privileged({ op: 'reboot' });
     }
 
     /* Sends a request that needs the updater's secret; without the secret
@@ -790,12 +949,18 @@ class Store extends OnlineApp {
         try {
             handler(row);
         } catch (err) {
-            logger.warn(tr("{0} failed: {1}", name, err && err.message));
+            logger.warn(`${name} failed: ${err && err.message}`);
         }
     }
 
     _component(id) {
         return (this._connected && this._st && id && this._st.components.find((c) => c.id === id)) || null;
+    }
+
+    /* The installed tools only the component the Remove confirm step names requires. */
+    _removeTools() {
+        const row = this._component(this._removeId);
+        return row ? requiredAlone(this._st.components, row) : [];
     }
 
     _source(id) {
@@ -816,6 +981,8 @@ class Store extends OnlineApp {
         const action = rowAction(row, this._st.busy);
         if (action === 'install') {
             this._install(row.id);
+        } else if (action === 'setup') {
+            this._setup(row.id);
         } else if (action === 'remove') {
             this._removeId = row.id;
             this._openPage('remove', { name: 'confirm', kind: 'remove', id: row.id });
@@ -830,12 +997,33 @@ class Store extends OnlineApp {
         }
     }
 
-    _remove() {
+    /* tools: the ones only it requires that go with it, as its confirm step listed them. */
+    _remove(tools) {
         this._closePage('remove', isConfirm('remove'));
         const row = this._component(this._removeId);
         if (row && removable(row, this._st.busy)) {
-            logger.info(`uninstall ${row.id}`);
-            this._privileged({ op: 'uninstall', id: row.id });
+            const along = Array.isArray(tools) && tools.length ? { tools } : {};
+            logger.info(`uninstall ${row.id}${along.tools ? ` with ${tools.join(', ')}` : ''}`);
+            this._privileged(Object.assign({ op: 'uninstall', id: row.id }, along));
+        }
+    }
+
+    /* Set up: the tool's install step, which a firmware update left for it (the updater's setup). */
+    _setup(id) {
+        const row = this._component(id);
+        if (row && rowAction(row, this._st.busy) === 'setup') {
+            logger.info(`set up ${row.id}`);
+            this._privileged({ op: 'setup', id: row.id });
+        }
+    }
+
+    /* Undo update: the component back to its version before (the updater's rollback). */
+    _undo() {
+        this._drawn.closePage(isConfirm('undo'));
+        const row = this._component(this._undoId);
+        if (row && undoable(row, this._st.busy)) {
+            logger.info(`back to ${row.previous}: ${row.id}`);
+            this._privileged({ op: 'rollback', id: row.id });
         }
     }
 
@@ -852,7 +1040,7 @@ class Store extends OnlineApp {
     _signIn() {
         this._login = { waiting: true, refusal: null };
         if (this._privileged({ op: 'login-start' })) {
-            logger.info(tr("GitHub sign-in"));
+            logger.info('GitHub sign-in');
             this._openPage('login', { name: 'login' });
         } else {
             this._login.waiting = false;
@@ -1261,8 +1449,11 @@ class Store extends OnlineApp {
         }
     }
 
-    /* The app manager inserts the public tile from application.json and hands
-     * it to the app at start; the SDK emits 'entryPointExecute' on a tap. */
+    /* The app manager inserts the public tile from application.json, with its
+     * name and icon from the manager's own bundles, and hands it to the app at
+     * start; the SDK emits 'entryPointExecute' on a tap. The app leaves the
+     * name and icon alone: its own bundles end with its process, and a tile
+     * pointing at them shows no name once the manager stops the app. */
     _registerEntryPoints() {
         const descriptions = (this.appDescription &&
             this.appDescription.application.entryPoints) || [];
@@ -1275,10 +1466,6 @@ class Store extends OnlineApp {
         return ours.init()
             .then(() => this.rhmiApplication.mapEntryState(description.uuid, this._states[ROOTS[this._ui]]))
             .then(() => { this._entryUuid = description.uuid; })
-            .then(() => Promise.resolve()
-                .then(() => ours.entryPoint.setText(description.textId))
-                .then(() => (description.icon ? ours.entryPoint.setIcon(description.icon) : undefined))
-                .catch((err) => logger.warn(`entry point text/icon: ${err && err.message}`)))
             .then(() => ours.setAvailability('ENABLED'))
             .then(() => logger.info(`entry point ${description.name} ENABLED`));
     }
@@ -1316,9 +1503,7 @@ class Store extends OnlineApp {
             return;
         }
         this._written[key] = value;
-        Promise.resolve(chinese && type === 'Text' && typeof value === 'string'
-            ? (this._unicode || (this._unicode = new HmiText())).set(comp, name, row, cell, value)
-            : comp.setValue(row, cell, value, type))
+        Promise.resolve(comp.setValue(row, cell, value, type))
             .catch((err) => logger.warn(`render ${key} failed: ${err && err.message}`));
     }
 
@@ -1333,7 +1518,18 @@ class Store extends OnlineApp {
             .catch((err) => logger.warn(`visibility ${name} failed: ${err && err.message}`));
     }
 
-    /* A one-line label: shown with its text, hidden when there is none. */
+    _enable(name, on) {
+        const comp = this._components[name];
+        const key = `${name}.enabled`;
+        if (!comp || this._written[key] === on) {
+            return;
+        }
+        this._written[key] = on;
+        Promise.resolve(comp.setProperty('Enabled', on ? 1 : 0, 'UInt'))
+            .catch((err) => logger.warn(`enabled ${name} failed: ${err && err.message}`));
+    }
+
+    /* A label: shown with its text, hidden when there is none. */
     _text(name, text) {
         if (text) {
             this._set(name, 'Text', text, 'Text');
@@ -1353,18 +1549,23 @@ class Store extends OnlineApp {
         const connected = this._connected && !!st;
         this._set(C.status, 'Text', connected ? statusLine(st, true) : statusLine(null, false, !!readSecret()), 'Text');
         this._set(C.check, 'Text', connected && st.catalog.checking ? tr("Checking") : tr("Check for updates"), 'Text');
+        // the first item that takes the focus: the start screen opens on it
+        this._show(C.safeModeOff, connected && !!st.safeMode && !st.busy);
 
         const busy = connected ? st.busy : null;
         const busyRow = busy && st.components.find((c) => c.id === busy.id);
         if (busyRow) {
             const done = busy.phase === 'download' ? percent(busy) / 100 : 1;
-            this._set(C.progress, 'TextLeft', `${PHASE[busy.phase] || tr("Installing")} ${busyRow.title}`, 'Text');
+            this._set(C.progress, 'TextLeft', `${tr(PHASE[busy.phase] || 'Installing')} ${busyRow.title}`, 'Text');
             this._set(C.progress, 'TextRight', busy.phase === 'download' ? `${percent(busy)}%` : '', 'Text');
             this._set(C.progress, 'Progress', done, 'Float');
         }
         this._show(C.progress, !!busyRow);
-        // an updater without the reboot request (before 0.1.4) reports no rebooting
-        this._show(C.restart, connected && !busy && st.rebooting === false);
+        // Restart head unit and its confirm step's Restart: greyed out while an install runs or waits
+        const restart = { connected: this._connected, st };
+        this._show(C.restart, restartShown(restart));
+        this._enable(C.restart, canRestart(restart));
+        this._enable(C.restartConfirm, canRestart(restart));
 
         KINDS.forEach((kind) => {
             const rows = connected ? withSources(st.components.filter(listed), st.sources).filter((c) => c.kind === kind) : [];
@@ -1376,6 +1577,9 @@ class Store extends OnlineApp {
         const removingComponent = this._component(this._removeId);
         // a queued install (iDrive 8) has no installed version
         this._text(C.removeName, removingComponent ? [removingComponent.title, removingComponent.installed].filter(Boolean).join(' ') : '');
+        const removeTools = this._removeTools();
+        this._text(C.removeTools, removeTools.length ? tr("Tools only it uses: {0}", removeTools.map((t) => `${t.title} ${t.installed}`).join(', ')) : '');
+        this._show(C.removeAll, removeTools.length > 0);
 
         // an updater that reports no sources or web hides Sources and Phone access
         const sources = connected && Array.isArray(st.sources) ? st.sources : null;

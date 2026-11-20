@@ -47,9 +47,9 @@ const atlasIds = new Map(), atlasList = [];
 function atlasId(f, family) {
     let id = atlasIds.get(f);
     if (id === undefined) {
-        // stable across runs and apps (the daemon shares atlases by id): family + size
+        // stable across runs and apps (the daemon shares atlases by id): its key, else family + size
         id = 0;
-        const k = family + '@' + f.size + (f.cacheKey ? '@' + f.cacheKey : '');
+        const k = f.key || family + '@' + f.size;
         for (let i = 0; i < k.length; i++) id = (Math.imul(id, 31) + k.charCodeAt(i)) >>> 0;
         id = (id | 1) >>> 0;
         atlasIds.set(f, id); atlasList.push({ id, f });
@@ -57,6 +57,14 @@ function atlasId(f, family) {
     return id;
 }
 function atlasById(id) { const a = atlasList.find((x) => x.id === id); return a ? a.f : null; }
+/** Forgets atlases no longer drawn with (a language font let go); one drawn with again gets its id back. */
+function dropAtlases(fs) {
+    fs.forEach((f) => {
+        atlasIds.delete(f);
+        const i = atlasList.findIndex((x) => x.f === f);
+        if (i >= 0) atlasList.splice(i, 1);
+    });
+}
 
 // cached layers (static parts of widgets): drawn once, used by id
 let layerSeq = 0;
@@ -219,7 +227,7 @@ class Recorder {
     text(str, x, y, size, c, opts) {
         opts = opts || {};
         const family = opts.font || 'label';
-        const f = fonts.get(family, size * this.textScale, String(str));
+        const f = fonts.get(family, size * this.textScale, str);
         if (!f) return 0;
         const s = String(str), sc = size / f.size, sp = opts.spacing || 0;
         const w = fonts.measure(f, s) * sc + sp * Math.max(0, s.length - 1);
@@ -230,7 +238,7 @@ class Recorder {
         const fl = this.f, u = this.u;
         let i = head + 4;
         for (const ch of s) {
-            const g = f.glyphs[ch.codePointAt(0)] || f.glyphs[63];
+            const g = fonts.glyph(f, ch);
             if (!g) continue;
             const gx = g[0], gy = g[1], gw = g[2], gh = g[3];
             if (gw && gh) {
@@ -248,7 +256,7 @@ class Recorder {
         return w;
     }
     textWidth(str, size, opts) {
-        const f = fonts.get((opts && opts.font) || 'label', size * this.textScale, String(str));
+        const f = fonts.get((opts && opts.font) || 'label', size * this.textScale, str);
         const s = String(str);
         return f ? fonts.measure(f, s) * (size / f.size) + ((opts && opts.spacing) || 0) * Math.max(0, s.length - 1) : 0;
     }
@@ -367,5 +375,5 @@ function play(words, real) {
     return real;
 }
 
-module.exports = { Recorder, OP, pack, unpack, rampId, rampList, atlasId, atlasList, atlasById, makeLayer, dropLayer, layerById,
+module.exports = { Recorder, OP, pack, unpack, rampId, rampList, atlasId, atlasList, atlasById, dropAtlases, makeLayer, dropLayer, layerById,
     makeImage, dropImage, imageById, play, softLayer };

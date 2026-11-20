@@ -16,9 +16,9 @@
 #define MAX_FRONT 16
 
 static pid_t pid;
-static int out = -1, in = -1, reported;
-static uint32_t front[MAX_FRONT];
-static int nfront;
+static int out = -1, in = -1, reported, unavailable;
+static uint32_t front[MAX_FRONT], covered[MAX_FRONT];
+static int nfront, ncovered;
 static char line[256];
 static size_t len;
 
@@ -61,32 +61,54 @@ int gate_start(const char *command)
 
 int gate_fd(void) { return out; }
 int gate_reported(void) { return reported; }
+int gate_unavailable(void) { return unavailable; }
 
 int gate_any_front(void) { return nfront > 0; }
 
-int gate_front(uint32_t uid)
+static int listed(const uint32_t *set, int n, uint32_t uid)
 {
-    for (int i = 0; i < nfront; i++)
-        if (front[i] == uid)
+    for (int i = 0; i < n; i++)
+        if (set[i] == uid)
             return 1;
     return 0;
 }
 
+int gate_front(uint32_t uid) { return listed(front, nfront, uid); }
+int gate_covered(uint32_t uid) { return listed(covered, ncovered, uid); }
+
+/* the uids after a line's word, into set */
+static int uids(const char *p, uint32_t *set)
+{
+    int n = 0;
+    char *end;
+    for (; n < MAX_FRONT; p = end) {
+        unsigned long uid = strtoul(p, &end, 10);
+        if (end == p)
+            break;
+        set[n++] = (uint32_t)uid;
+    }
+    return n;
+}
+
 static void report(const char *l)
 {
+    if (!strncmp(l, "covered", 7)) {
+        ncovered = uids(l + 7, covered);
+        log_info("covered by the HMI: %s", ncovered ? l + 8 : "no app");
+        return;
+    }
     nfront = 0;
+    if (!strcmp(l, "unavailable")) {
+        unavailable = 1;
+        log_warn("foreground gate: it cannot tell which app is in front on this unit; it is not started again");
+        return;
+    }
     reported = 1;
     if (strncmp(l, "foreground", 10)) {
         log_warn("foreground gate: unexpected line '%s': no app in front", l);
         return;
     }
-    char *end;
-    for (const char *p = l + 10; nfront < MAX_FRONT; p = end) {
-        unsigned long uid = strtoul(p, &end, 10);
-        if (end == p)
-            break;
-        front[nfront++] = (uint32_t)uid;
-    }
+    nfront = uids(l + 10, front);
     log_info("in front: %s", nfront ? l + 11 : "no app");
 }
 
@@ -100,7 +122,7 @@ int gate_read(void)
         if (n <= 0) {
             log_error("foreground gate ended: %s", n ? strerror(errno) : "end of output");
             gate_stop();
-            nfront = 0;
+            nfront = ncovered = 0;
             reported = 0;
             len = 0;
             return -1;

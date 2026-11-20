@@ -6,8 +6,10 @@
  * no dependencies: Node 18 or newer and the system's OpenSSH client, on
  * Windows, macOS or Linux (deploy/README.md, "mgu-install").
  *
- *   node mgu-install.js first-install [--no-renderer] [--no-uplink] [--token] [<ssh options>]
+ *   node mgu-install.js first-install [--from <folder>] [--no-renderer] [--no-uplink] [--token] [--no-restart-prompt] [<ssh options>]
  *   node mgu-install.js token [--list [--json] | --remove <id>] [<ssh options>]
+ *   node mgu-install.js uninstall [--yes] [--from <folder>] [--no-restart-prompt] [<ssh options>]
+ *   node mgu-install.js status [<ssh options>]
  *   node mgu-install.js usb-repo <stick folder> [<input>...]
  *
  * first-install downloads the newest published mgu-store release (the
@@ -18,7 +20,27 @@
  * catalog's size and sha256, sends them to the unit and installs them with
  * the release's own deploy tool, which builds the Store on the unit. Newer
  * installed components are kept; running it again is safe. --token adds a
- * GitHub token for the updater afterwards.
+ * GitHub token for the updater afterwards. When the head unit needs a
+ * restart to finish, it asks at a terminal whether to restart it now
+ * (not under CI, nor with --no-restart-prompt).
+ *
+ * first-install --from <folder> installs from a folder usb-repo wrote
+ * (<folder>/mgu-repo/mgu-store) instead of GitHub, each file checked
+ * against its catalog the same way: download at home, install at the car
+ * without internet.
+ *
+ * uninstall removes everything the Store setup put on the head unit: the
+ * apps and tools the deploy tool installed, the app manager patch, the
+ * provisioning fallback, the updater's sources and tokens, and last the
+ * deploy tool with its backups. It lists them and asks first (--yes: no
+ * question). What could not be removed is named, and running it again
+ * finishes the job. When the head unit needs a restart to finish, it asks
+ * as first-install does.
+ *
+ * status prints what the deploy tool on the head unit reports: each tool
+ * and app, each app's tile, what waits for a restart. It changes nothing on
+ * the unit; with a deploy tool older than its read-only status, that
+ * status may also repair things, as the updater's does at its start.
  *
  * token adds a GitHub token for the updater (no option), lists the tokens
  * (--list: id, label, account; --json as JSON) or removes one (--remove
@@ -31,14 +53,21 @@
  * stick is in. Inputs: github:<owner>/<repo>, an https:// catalog.json URL,
  * a folder holding catalog.json or mgu-repo.json, or package files (*.tgz,
  * *.mgu: apps, source packages, tool kits; together in mgu-repo/local/).
- * Without inputs: github:robertnisipeanu/mgu-store.
+ * Without inputs: github:robertnisipeanu/mgu-store. Each app icon a
+ * catalog lists is copied beside its catalog.json; one that cannot be
+ * read or does not match its iconSha256 is left out.
  *
  * Without --host or --port it finds the head unit itself: the
  * car's hotspot (172.16.222.97) when its SSH answers, else over ENET (an
  * interface with a 169.254.x.x address) the address the vehicle gateway
  * reports for the head unit (DID 22 17 2A, read without changing any
  * session), or the last ENET address that answered. ssh then binds to
- * that interface's address (ssh -b). --ssh-opt options apply either way.
+ * that interface's address (ssh -b), except on Windows. --ssh-opt options
+ * apply either way.
+ * A head unit found whose SSH does not answer is named as such.
+ *
+ * A step that takes over 30 s prints a line about every 30 s; Ctrl+C
+ * prints how to finish.
  *
  * SSH options: --host <address>, --port <n> (22), --user <name> (root),
  * --identity <key file>, and --ssh-opt <option> (repeatable, passed as
@@ -77,7 +106,10 @@ const LAST_ENET = path.join(os.homedir(), '.cache', 'mgu-store', 'last_hu_enet_i
 const FROM_STDIN = __filename === '[stdin]';
 /* the updater's sources first-install seeds when it has none (deploy/sources.json) */
 const SOURCES = { schema: 1, sources: [{ id: 'mgu-store', type: 'github', repo: STORE_REPO, builtin: true },
-    { id: 'idrive7-apps', type: 'github', repo: 'cauliflowermossgrape/idrive7-apps', channel: 'branch' }] };
+    { id: 'idrive7-apps', type: 'github', repo: 'cauliflowermossgrape/idrive7-apps', channel: 'branch' },
+    { id: 'idrive-apps', type: 'github', repo: 'robertnisipeanu/idrive-apps', channel: 'releases' },
+    { id: 'car-apps', type: 'github', repo: 'IterioDev/car-apps', channel: 'tags' },
+    { id: 'idrive7-system-monitor', type: 'github', repo: 'hexlay/idrive7-system-monitor', channel: 'branch' }] };
 /* the installed deploy tool */
 const DEPLOY = '/var/opt/mgu-deploy/mgu-deploy.sh';
 const UPDATER_JS = '/var/opt/mgu-updater/current/updater.js';
@@ -90,6 +122,9 @@ const MAX_ARTIFACT = 512 << 20;
 const STICK_JSON_MAX = 1 << 20;
 const STICK_REPO_MAX = 200 << 20;
 const STICK_REPO_FILES = 20000;
+/* an app's icon, as the updater reads it (native/mgu-updater/js/sources.js) */
+const ICON_MAX = 128 << 10;
+const PROGRESS_MS = 30000;
 
 class Usage extends Error {}
 
@@ -99,6 +134,25 @@ function sha256(buf) {
 
 function say(line) {
     process.stdout.write(`${line}\n`);
+}
+
+/* A wait's length for its progress line: "30 s", "1 min", "1 min 30 s". */
+function elapsed(ms) {
+    const s = Math.round(ms / 30000) * 30;
+    const m = Math.floor(s / 60);
+    return m ? `${m} min${s % 60 ? ` ${s % 60} s` : ''}` : `${s} s`;
+}
+
+/* fn()'s result; while it runs, about every 30 s one line on stderr:
+ * "<what> (<time so far>)". */
+async function waiting(what, fn) {
+    const start = Date.now();
+    const tick = setInterval(() => process.stderr.write(`${what} (${elapsed(Date.now() - start)})\n`), PROGRESS_MS);
+    try {
+        return await fn();
+    } finally {
+        clearInterval(tick);
+    }
 }
 
 function compareVersions(a, b) {
@@ -401,9 +455,17 @@ async function githubComponents(gh) {
             throw new Error(`${gh.repo}: the catalog release has no catalog.json`);
         }
         const catalog = parseCatalog((await gh.asset(a, 4 << 20)).toString('utf8'), `${gh.repo} catalog.json`);
+        const icon = (ref) => {
+            if (/^https:\/\//.test(ref)) {
+                return get(ref, { max: ICON_MAX });
+            }
+            const x = (release.assets || []).find((y) => y.name === ref);
+            return x ? gh.asset(x, ICON_MAX) : Promise.reject(new Error(`the catalog release has no ${ref}`));
+        };
         return { commit: catalog.commit, components: catalog.components.map((entry) => ({
             entry, fetch: () => gh.asset({ url: entry.artifact.url }, entry.artifact.size)
-                .then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256))
+                .then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256)),
+            icon: () => icon(entry.icon)
         })) };
     }
     const releases = await gh.json('/releases?per_page=100');
@@ -484,6 +546,10 @@ function rsaOpts() {
     return sshVersion >= 8.08 ? ['-o', 'HostKeyAlgorithms=+ssh-rsa', '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa'] : [];
 }
 
+/* The unit's host key is neither asked about nor kept: every car's hotspot
+ * has the same address, and a unit's key can change. */
+const HOST_KEY_OPTS = ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR'];
+
 /* ssh's arguments for one remote command: the owner's -o options first
  * (ssh takes the first value of an option). */
 function sshArgs(o, remote) {
@@ -492,27 +558,47 @@ function sshArgs(o, remote) {
     if (o.identity) {
         args.push('-i', o.identity, '-o', 'IdentitiesOnly=yes');
     }
-    return args.concat(rsaOpts(), [`${o.user}@${o.host}`, remote]);
+    return args.concat(HOST_KEY_OPTS, rsaOpts(), [`${o.user}@${o.host}`, remote]);
 }
 
-/* Runs remote on the unit; input on its stdin; capture: its stdout returned. */
-function ssh(o, remote, { input, capture } = {}) {
-    const r = cp.spawnSync('ssh', sshArgs(o, remote), {
-        input, maxBuffer: 64 << 20, windowsHide: true,
-        stdio: [input !== undefined ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit', 'inherit']
-    });
-    if (r.error) {
-        throw new Error(r.error.code === 'ENOENT' ? 'no ssh command found; install the OpenSSH client' : `ssh: ${r.error.message}`);
-    }
-    if (r.status === 255) {
-        throw new Error(`ssh to ${o.user}@${o.host}:${o.port} failed`);
-    }
-    return { status: r.status === null ? 1 : r.status, stdout: capture ? String(r.stdout) : '' };
+/* The ssh processes running, stopped with this one (stopOn). */
+const sshRunning = new Set();
+
+/* Runs remote on the unit; input on its stdin; capture: its stdout
+ * returned; wait: the progress line's text while it takes long. */
+function ssh(o, remote, { input, capture, wait } = {}) {
+    return waiting(wait || 'still waiting for the head unit', () => new Promise((resolve, reject) => {
+        const child = cp.spawn('ssh', sshArgs(o, remote), {
+            windowsHide: true, stdio: [input !== undefined ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit', 'inherit']
+        });
+        sshRunning.add(child);
+        const out = [];
+        const end = (err, value) => {
+            sshRunning.delete(child);
+            if (err) {
+                reject(err);
+            } else {
+                resolve(value);
+            }
+        };
+        if (capture) {
+            child.stdout.on('data', (d) => out.push(d));
+        }
+        if (input !== undefined) {
+            child.stdin.on('error', () => {});
+            child.stdin.end(input);
+        }
+        child.on('error', (e) => end(new Error(e.code === 'ENOENT' ? 'no ssh command found; install the OpenSSH client' : `ssh: ${e.message}`)));
+        child.on('close', (code) => (code === 255 ? end(new Error(`ssh to ${o.user}@${o.host}:${o.port} failed`)) :
+            end(null, { status: code === null ? 1 : code, stdout: capture ? Buffer.concat(out).toString() : '' })));
+    }));
 }
 
 /* ---- finding the head unit ------------------------------------------------------------- */
 
-/* The SSH banner host:port serves (connecting from local when given), else null. */
+/* The SSH banner host:port serves (connecting from local when given);
+ * false when host answers there without SSH (refuses the connection, or
+ * closes it or greets otherwise); null when nothing answers. */
 function sshBanner(host, port, local, timeout = 4000) {
     return new Promise((resolve) => {
         const s = net.connect(Object.assign({ host, port: Number(port), timeout }, local ? { localAddress: local } : {}));
@@ -526,12 +612,12 @@ function sshBanner(host, port, local, timeout = 4000) {
             const nl = got.indexOf(10);
             if (nl >= 0 || got.length >= 255) {
                 const line = got.slice(0, nl >= 0 ? nl : got.length).toString('latin1').trim();
-                done(line.startsWith('SSH-') ? line : null);
+                done(line.startsWith('SSH-') ? line : false);
             }
         });
         s.on('timeout', () => done(null));
-        s.on('error', () => done(null));
-        s.on('end', () => done(null));
+        s.on('error', (e) => done(e.code === 'ECONNREFUSED' ? false : null));
+        s.on('end', () => done(false));
     });
 }
 
@@ -570,10 +656,17 @@ function hsfzFrames(buf) {
     return { frames, rest: buf.slice(off) };
 }
 
-/* The head unit's address in a response to 22 17 2A (62 17 2A 00 AA BB CC
- * DD), else null. */
+/* The head unit's address in a response to 22 17 2A (62 17 2A 00, then its
+ * address, subnet mask and gateway, 4 bytes each), else null. */
 function didAddress(uds) {
     return uds.length >= 8 && uds[0] === 0x62 && uds[1] === 0x17 && uds[2] === 0x2a ? Array.from(uds.slice(4, 8)).join('.') : null;
+}
+
+/* Whether ip can be a link-local host other than local: 169.254.1.0 to
+ * 169.254.254.255 (RFC 3927; any last byte, .0 and .255 included). */
+function linkLocalHost(ip, local) {
+    const m = /^169\.254\.(\d{1,3})\.(\d{1,3})$/.exec(ip || '');
+    return Boolean(m) && Number(m[1]) >= 1 && Number(m[1]) <= 254 && Number(m[2]) <= 255 && ip !== local;
 }
 
 /* The ENET gateway's address: HSFZ identification (00 00 00 00 00 11)
@@ -678,31 +771,44 @@ const NET = { banner: sshBanner, interfaces: () => enetInterfaces(), gateway: (l
 
 /* Where the head unit's sshd answers: the hotspot; else, on each ENET
  * interface, the address the gateway reports, then the last one that
- * answered. { host, port, bind, via } or null. */
-async function findUnit(d = NET) {
+ * answered. { host, port, bind, via }; else { closed: <address> } when a
+ * head unit was found without SSH (the hotspot's address answered
+ * without it, or the gateway reported an address whose SSH does not
+ * answer); else null. tried collects the ENET addresses asked. */
+async function findUnit(d = NET, tried = []) {
     const [hhost, hport] = HOTSPOT.split(':');
-    if (await d.banner(hhost, hport || '22', null)) {
+    const hotspot = await d.banner(hhost, hport || '22', null);
+    if (hotspot) {
         return { host: hhost, port: hport || '22', bind: null, via: `the car's hotspot (${hhost})` };
     }
+    let closed = hotspot === false ? (hport ? `${hhost}:${hport}` : hhost) : null;
     const last = d.last();
     // one interface at a time: an answer on the gateway's port names the interface asked
     for (const i of d.interfaces()) {
         const gw = await d.gateway(i.address);
-        const ip = gw ? await d.huAddress(gw, i.address) : null;
-        for (const c of [ip, last].filter((x, k, a) => x && a.indexOf(x) === k)) {
+        const reported = gw ? await d.huAddress(gw, i.address) : null;
+        const ip = linkLocalHost(reported, i.address) ? reported : null;
+        for (const c of [ip, last].filter((x, k, a) => linkLocalHost(x, i.address) && a.indexOf(x) === k)) {
+            if (!tried.includes(c)) {
+                tried.push(c);
+            }
             if (await d.banner(c, '22', i.address)) {
                 d.save(c);
                 return { host: c, port: '22', bind: i.address, via: `ENET on ${i.name} (head unit ${c}${c === ip ? '' : ', the last that answered'})` };
             }
         }
+        closed = closed || ip;
     }
-    return null;
+    return closed ? { closed } : null;
 }
 
-/* What to check when no head unit answered. */
-function notFound(d) {
+/* What to check when no head unit answered (tried: the ENET addresses asked). */
+function notFound(d, tried = []) {
     const lines = ['no head unit answered SSH. Join the car\'s Wi-Fi hotspot or connect the ENET cable, with the car awake, ' +
-        'and run it again;', 'for another route, give --host (and --port).'];
+        'and run it again;', 'for another route, give --host <address> (and --port).'];
+    if (tried.length) {
+        lines.push(`Tried over ENET: ${tried.join(', ')}.`);
+    }
     const ifs = d.interfaces();
     if (d.platform === 'linux' && !ifs.length) {
         lines.push('On Linux the ENET adapter needs a link-local address: nmcli con mod <its connection> ipv4.method link-local, then reconnect it.');
@@ -720,36 +826,93 @@ async function reach(o, d = NET) {
         process.stderr.write(`connecting to ${o.host}:${o.port} as given\n`);
         return;
     }
-    const u = await findUnit(d);
+    const tried = [];
+    const u = await waiting('still looking for the head unit', () => findUnit(d, tried));
     if (!u) {
-        throw new Error(notFound(d));
+        throw new Error(notFound(d, tried));
     }
-    Object.assign(o, { host: u.host, port: u.port, bind: u.bind });
+    if (u.closed) {
+        throw new Error(`found the head unit at ${u.closed}, but its SSH is closed: enable root SSH first, then run this again` +
+            (tried.length ? `\nTried over ENET: ${tried.join(', ')}. Another address can be given with --host <address>.` : ''));
+    }
+    // Windows' own OpenSSH (before 9.x) fails every connection made with -b
+    // ("Invalid argument"); there the link-local route picks the adapter.
+    Object.assign(o, { host: u.host, port: u.port, bind: d.platform === 'win32' ? null : u.bind });
     process.stderr.write(`connecting over ${u.via}\n`);
 }
 
 /* ---- first-install ---------------------------------------------------------------------- */
 
-/* The optional components first-install puts on too, unless told not to:
- * each one's flag, the unit that runs it, and its name in the last line. */
-const WITH = [
-    { id: 'mgu-render', skip: 'noRenderer', unit: 'mgu-render.socket', name: 'the renderer' },
-    { id: 'mgu-uplink', skip: 'noUplink', unit: 'mgu-uplink.service', name: 'the uplink' }
-];
+/* The head unit's restart, as the Store's Restart head unit makes it
+ * (native/mgu-updater/updater.conf, reboot): the Node State Manager's
+ * normal restart, this start's boot id in the deploy tool's
+ * restart-requested first, so its safe mode never counts it as a failed
+ * start (deploy/README.md, "Safe mode"). Refused (exit 3) while a deploy
+ * tool run of this boot holds its lock ("<pid> <boot id>"). nsm_control
+ * exits 0 on a refusal too, printing "[Error. <why>]". No double quote or
+ * backslash: Windows passes the remote command through its own quoting. */
+const RESTART = "L=/var/opt/mgu-deploy/lock; B=$(cat /proc/sys/kernel/random/boot_id); if [ -e $L ] && [ $(cut -d ' ' -f 2 $L) = $B ] && " +
+    "kill -0 $(cut -d ' ' -f 1 $L) 2>/dev/null; then exit 3; fi; R=/var/opt/mgu-deploy/restart-requested; " +
+    "[ -d /var/opt/mgu-deploy ] && echo $B > $R.tmp && mv -f $R.tmp $R; /usr/bin/nsm_control --requestRestart 7 --normal 2>&1";
 
-function sayList(names) {
-    return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+/* A line typed at the terminal, which echoes it. */
+function promptLine(question, input) {
+    return new Promise((resolve) => {
+        process.stderr.write(question);
+        const rl = require('readline').createInterface({ input, terminal: false });
+        let answer = '';
+        rl.on('line', (line) => {
+            answer = line;
+            rl.close();
+        });
+        rl.on('close', () => {
+            if (input !== process.stdin) {
+                input.destroy();
+            }
+            resolve(answer);
+        });
+    });
 }
 
+/* Asks whether to restart the head unit now, at a terminal only; on yes
+ * restarts it. Its exit status. */
+async function offerRestart(o, later = 'restart it from the Store') {
+    const term = o.noRestartPrompt || process.env.CI ? null : terminal();
+    if (!term || !/^y(es)?$/i.test((await promptLine('Restart the head unit now? [y/N] ', term)).trim())) {
+        return 0;
+    }
+    const r = await ssh(o, RESTART, { input: Buffer.alloc(0), capture: true });
+    const refused = /\[Error\.\s*([^\]]*)\]/.exec(r.stdout);
+    if (r.status === 3) {
+        say(`An install is running on the head unit: ${later} once it is done.`);
+        return 1;
+    }
+    if (r.status !== 0 || refused) {
+        say(`The head unit did not take the restart${refused ? `: ${refused[1].trim()}` : ''}. ${later[0].toUpperCase()}${later.slice(1)}.`);
+        return 1;
+    }
+    say('Restarting the head unit.');
+    return 0;
+}
+
+/* The optional components first-install puts on too, unless told not to:
+ * each one's flag and the unit that runs it. */
+const WITH = [
+    { id: 'mgu-render', skip: 'noRenderer', unit: 'mgu-render.socket' },
+    { id: 'mgu-uplink', skip: 'noUplink', unit: 'mgu-uplink.service' }
+];
+
 /* On the unit, in the staging folder: the release's deploy tool installs
- * every artifact (itself among them; newer installed ones kept) and seeds
- * the updater's sources when it has none; then each of WITH on its own, so
+ * every artifact (itself among them; newer installed ones kept), leaving
+ * WITH's tools, installed after, to their own install, and seeds the
+ * updater's sources when it has none; then each of WITH on its own, so
  * one it refuses (exit 2) is left out and the
  * rest stays; one that fails fails the run. */
 const RUN_SH = `set -e
 S=$(cd "$(dirname "$0")" && pwd)
 set --
 for f in "$S"/artifacts/*.tgz; do set -- "$@" --artifact "$f"; done
+for f in "$S"/with/*.tgz; do [ -e "$f" ] && set -- "$@" --leave "$(basename "$f" | sed 's/@.*//')"; done
 sh "$S/mgu-deploy.sh" install "$@" --skip-older --yes
 sh "$S/mgu-deploy.sh" updater-sources < "$S/sources.json"
 for f in "$S"/with/*.tgz; do
@@ -757,6 +920,41 @@ for f in "$S"/with/*.tgz; do
     sh "$S/mgu-deploy.sh" install --artifact "$f" --skip-older --yes || { st=$?; [ $st -eq 2 ] || exit $st; echo "first-install: $(basename "$f") left out" >&2; }
 done
 `;
+
+/* Read-only, on the unit: oapcontroller starts no app manager when the
+ * head unit's coding (/dev/shm/rawcodingdata, 0x1030 bytes; status flags in
+ * byte 0x28: 0x08 header valid, 0x02 and 0x04 default values) is not valid
+ * or is the default values. Prints "invalid" or "default" when the coding
+ * says so and no app manager (node running MainApp's src/main.js) runs, else
+ * "ok". One line with no double quote or backslash: Windows passes the
+ * remote command through its own quoting. */
+const CODING_CHECK = '/usr/bin/node -e \'var fs = require(`fs`), b = null, f, why = null, nul = String.fromCharCode(0);' +
+    ' try { b = fs.readFileSync(`/dev/shm/rawcodingdata`); } catch (e) {}' +
+    ' if (b && b.length === 0x1030) { f = b[0x28]; why = !(f & 8) ? `invalid` : f & 6 ? `default` : null; }' +
+    ' var manager = why && fs.readdirSync(`/proc`).some(function (p) {' +
+    ' var a; try { a = fs.readFileSync(`/proc/` + p + `/cmdline`, `utf8`).split(nul); } catch (e) { return false; }' +
+    ' return (a[0] === `node` || a[0].slice(-5) === `/node`) && a.slice(1).some(function (s) {' +
+    ' return [`oap-mainapp/src/main.js`, `oap-mainapp/src/main.bundle.js`, `oap-mainapp21/src/main.js`, `oap-mainapp21/src/main.bundle.js`]' +
+    '.some(function (m) { return s.slice(-m.length - 1) === `/` + m; }); }); });' +
+    ' console.log(why && !manager ? why : `ok`);\'';
+
+const CODING_MISSING = {
+    default: 'it holds default values',
+    invalid: 'it is not valid'
+};
+
+/* Stops (exit 2) before anything reaches the unit when its coding keeps
+ * MainApp from starting; a check that cannot run lets the install go on. */
+async function checkCoding(o) {
+    const r = await ssh(o, CODING_CHECK, { input: Buffer.alloc(0), capture: true });
+    const why = r.status === 0 ? CODING_MISSING[r.stdout.trim()] : null;
+    if (why) {
+        say(`The head unit's coding is missing: ${why}. This often happens after enabling SSH or flashing. ` +
+            'Restore the head unit\'s coding from a backup (BimmerCode, E-Sys or ISTA) or have HU_MGU coded to the car, ' +
+            'restart the head unit, then run the install again.');
+    }
+    return !why;
+}
 
 /* The deploy tool's own files, from its published artifact: component.json
  * (its manifest) and files/<path>, each checked against the manifest. */
@@ -775,24 +973,50 @@ function deployToolFiles(artifact) {
     }).concat([{ name: 'component.json', data: members.get('component.json').data, mode: 0o644 }]);
 }
 
+/* first-install --from: a folder usb-repo wrote (<folder>/mgu-repo/mgu-store). */
+function fromFolder(dir) {
+    const d = path.resolve(dir);
+    if (!fs.existsSync(path.join(d, 'catalog.json'))) {
+        const inner = path.join(d, 'mgu-repo', 'mgu-store');
+        throw new Usage(fs.existsSync(path.join(inner, 'catalog.json')) ? `--from: no catalog.json in ${d}; use --from ${inner}` :
+            `--from: no catalog.json in ${d}; give the folder usb-repo wrote, <folder>/mgu-repo/mgu-store`);
+    }
+    return d;
+}
+
+/* The start of a remote command that unpacks the kit on stdin into the
+ * fresh folder q, root's alone by its mode. umask 022: the hooks the deploy
+ * tool runs write stock files their own users run. */
+function unpackKit(q) {
+    return `rm -rf ${q} && umask 022 && mkdir -m 700 -p ${q} && tar -xzf - -C ${q} && `;
+}
+
 async function firstInstall(o) {
+    // --from: its catalog is read first, so a missing or bad one stops before the token prompt and the unit search
+    const from = o.from ? fromFolder(o.from) : null;
+    const local = from ? dirComponents(from) : null;
+    const label = from || STORE_REPO;
     const token = o.token ? await readToken('GitHub token for the updater (input hidden): ') : null;
     await reach(o);
-    const gh = await githubRepo(STORE_REPO, token);
-    const { components } = await githubComponents(gh);
+    if (!(await checkCoding(o))) {
+        return 2;
+    }
+    const { components } = local || await githubComponents(await githubRepo(STORE_REPO, token));
     const wanted = WITH.filter((w) => !o[w.skip]);
     const chosen = components.filter((c) => !c.entry.optional || wanted.some((w) => w.id === c.entry.id));
     const withs = wanted.filter((w) => chosen.some((c) => c.entry.id === w.id));
-    wanted.filter((w) => withs.indexOf(w) < 0).forEach((w) => say(`${STORE_REPO}: the catalog has no ${w.id}; installing without it`));
+    wanted.filter((w) => withs.indexOf(w) < 0).forEach((w) => say(`${label}: the catalog has no ${w.id}; installing without it`));
     if (!chosen.some((c) => c.entry.id === 'mgu-deploy')) {
-        throw new Error(`${STORE_REPO}: the catalog has no mgu-deploy`);
+        throw new Error(`${label}: the catalog has no mgu-deploy`);
     }
     const artifacts = [];
-    for (const c of chosen) {
-        const data = await c.fetch();
-        say(`  ${sha256(data)}  ${c.entry.artifact.name}`);
-        artifacts.push({ entry: c.entry, data });
-    }
+    await waiting('still downloading', async () => {
+        for (const c of chosen) {
+            const data = await c.fetch();
+            say(`  ${sha256(data)}  ${c.entry.artifact.name}`);
+            artifacts.push({ entry: c.entry, data });
+        }
+    });
     const deploy = artifacts.find((a) => a.entry.id === 'mgu-deploy');
     const entries = deployToolFiles(deploy.data)
         .concat(artifacts.map((a) => ({ name: `${withs.some((w) => w.id === a.entry.id) ? 'with' : 'artifacts'}/${a.entry.artifact.name}`,
@@ -803,35 +1027,85 @@ async function firstInstall(o) {
     const stage = `/var/opt/mgu-deploy-kit-${process.pid}`;
     const q = shQuote(stage);
     say(`installing on ${o.host}:${o.port}`);
-    const run = ssh(o, `rm -rf ${q} && umask 077 && mkdir -p ${q} && tar -xzf - -C ${q} && ` +
-        `{ sh ${q}/run.sh; st=$?; rm -rf ${q}; exit $st; }`, { input: tgz(entries, Math.floor(Date.now() / 1000)) });
+    const run = await ssh(o, unpackKit(q) +
+        `{ sh ${q}/run.sh; st=$?; rm -rf ${q}; exit $st; }`,
+    { input: tgz(entries, Math.floor(Date.now() / 1000)), wait: 'the head unit is still installing' });
     if (run.status !== 0) {
         say(`first-install: the install on the unit ended with status ${run.status}`);
         return run.status === 2 ? 2 : 1;
     }
     if (token) {
-        const t = addToken(o, token);
+        const t = await addToken(o, token);
         if (t !== 0) {
             return t;
         }
     }
-    const services = [{ id: 'mgu-updater', unit: 'mgu-updater.service', name: 'the updater' }].concat(withs);
-    // the status on stderr, shown as it comes; which services run on stdout (absent: not installed)
-    const st = ssh(o, [`sh ${DEPLOY} status >&2`].concat(services.map((s) =>
-        `if [ -e /var/opt/${s.id}/current ]; then systemctl is-active ${s.unit} 2>/dev/null || true; else echo absent; fi`)).join('; '),
-        { capture: true });
-    const down = services.filter((s, i) => ['active', 'absent'].indexOf((st.stdout.split('\n')[i] || '').trim()) < 0).map((s) => s.name);
-    say(down.length ? `Restart the head unit to finish setup (a normal ignition cycle does it): ${sayList(down)} ${down.length > 1 ? 'start' : 'starts'} then.` :
-        'Setup is done: the Store installs and updates everything from here on.');
-    return 0;
+    const services = [{ id: 'mgu-updater', unit: 'mgu-updater.service' }].concat(withs);
+    // the status on stderr, shown as it comes; which services run on stdout (absent: not installed), then the status as JSON
+    const st = await ssh(o, [`sh ${DEPLOY} status >&2`].concat(services.map((s) =>
+        `if [ -e /var/opt/${s.id}/current ]; then systemctl is-active ${s.unit} 2>/dev/null || true; else echo absent; fi`),
+    [`sh ${DEPLOY} status --json 2>/dev/null | tail -n 1`]).join('; '), { capture: true });
+    const lines = st.stdout.split('\n');
+    const tiles = tilesShow(lines[services.length]);
+    const running = services.every((s, i) => ['active', 'absent'].indexOf((lines[i] || '').trim()) >= 0);
+    if (tiles.why) {
+        say(`The Store's tile cannot show: ${tiles.why}`);
+        if (running) {
+            return 1;
+        }
+    } else if (tiles.shown && running) {
+        say('Setup is done: the Store installs and updates everything from here on.');
+        return 0;
+    }
+    say('Restart the head unit to finish setup.');
+    return offerRestart(o);
+}
+
+/* From the deploy tool's status --json, whether our apps' tiles show on an
+ * iDrive 7 unit: they do once the running app manager runs the fallback
+ * copy, and a restart brings that while the fallback is on. why: the
+ * deploy tool's reason it could not turn the fallback on. A status
+ * without manager_runs_copy (an older deploy tool, no status), no app
+ * listed, or the retired installer's leftovers (which list the apps
+ * themselves) count as shown. On iDrive 8 the Store and every app listed
+ * in custom_apps.json show once the status reports their tiles visible
+ * (from the provisioning MainApp-21 gets, or the sections the running
+ * MainApp-21's fallback filled); a Store not yet registered does not.
+ * why: the deploy tool's reason the fallback is off (live_installs). A
+ * status without listed_by_manager (an older deploy tool) counts as
+ * shown. */
+function tilesShow(line) {
+    let s = null;
+    try {
+        s = JSON.parse(line);
+    } catch (e) {
+        return { shown: true };
+    }
+    const fb = s && s.fallback;
+    if (fb && (s.unit || {}).hmi === 'ID8' && 'listed_by_manager' in fb) {
+        const apps = (s.components || []).filter((c) => c.kind === 'app');
+        const ours = ['robertn_store'].concat(fb.apps || []);
+        const shown = ours.every((id, i) => (i > 0 && !apps.some((c) => c.id === id)) ||
+            apps.some((c) => c.id === id && c.tile_visible === true));
+        const off = !shown && !fb.active && /^off: /.test((s.live_installs || {}).reason || '') ? s.live_installs.reason.slice(5) : null;
+        return off ? { shown, why: off } : { shown };
+    }
+    if (!fb || !('manager_runs_copy' in fb) || (s.unit || {}).hmi === 'ID8' || !(fb.apps || []).length ||
+        (s.retired_leftovers || []).length) {
+        return { shown: true };
+    }
+    if (fb.manager_runs_copy === true) {
+        return { shown: true };
+    }
+    return fb.refused ? { shown: false, why: fb.refused } : { shown: false };
 }
 
 /* ---- token -------------------------------------------------------------------------------- */
 
 /* Adds a token through the deploy tool (on stdin); a running updater reads
  * its sources again with it. */
-function addToken(o, token) {
-    const r = ssh(o, `sh ${DEPLOY} updater-token && if systemctl is-active mgu-updater.service >/dev/null 2>&1; then ` +
+async function addToken(o, token) {
+    const r = await ssh(o, `sh ${DEPLOY} updater-token && if systemctl is-active mgu-updater.service >/dev/null 2>&1; then ` +
         `{ /usr/bin/node ${UPDATER_JS} check >/dev/null 2>&1 && echo 'the updater read its sources with it' || ` +
         `echo 'the updater uses it from its next check'; }; else echo 'the updater uses it once it runs'; fi`,
     { input: Buffer.from(`${token}\n`) });
@@ -853,12 +1127,172 @@ async function tokenCommand(o) {
     const token = o.list || o.remove !== null ? null : await readToken('GitHub token for the updater (input hidden): ');
     await reach(o);
     if (o.list) {
-        return ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --list${o.json ? ' --json' : ''}`, { input: Buffer.alloc(0) }).status;
+        return (await ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --list${o.json ? ' --json' : ''}`, { input: Buffer.alloc(0) })).status;
     }
     if (o.remove !== null) {
-        return ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --remove ${shQuote(o.remove)}`, { input: Buffer.alloc(0) }).status;
+        return (await ssh(o, `${TOKENS_DEPLOY}sh ${DEPLOY} updater-token --remove ${shQuote(o.remove)}`, { input: Buffer.alloc(0) })).status;
     }
     return addToken(o, token);
+}
+
+/* ---- uninstall ------------------------------------------------------------------------------ */
+
+/* Which deploy tool removes the setup, read on the unit: "installed" when
+ * the unit's own has remove-all, "old" when it has none, "absent" without
+ * a deploy tool. */
+const DEPLOY_HAS = `if [ ! -e ${DEPLOY} ]; then echo absent; elif sh ${DEPLOY} help 2>/dev/null | grep -q remove-all; then echo installed; ` +
+    'else echo old; fi';
+
+/* Runs the deploy tool's remove-all with args: the unit's own, or kit (the
+ * published deploy tool's files) sent like first-install's and removed
+ * after. The steps' lines show on stderr; stdout is returned. */
+function removeAllRun(o, kit, args) {
+    const wait = args === '--yes' ? 'the head unit is still removing the setup' : undefined;
+    if (!kit) {
+        return ssh(o, `sh ${DEPLOY} remove-all ${args}`, { input: Buffer.alloc(0), capture: true, wait });
+    }
+    // a published deploy tool without remove-all answers the listing with its whole usage
+    const quiet = args === '--json' ? ' 2>/dev/null' : '';
+    const q = shQuote(`/var/opt/mgu-deploy-kit-${process.pid}`);
+    return ssh(o, unpackKit(q) +
+        `{ sh ${q}/mgu-deploy.sh remove-all ${args}${quiet}; st=$?; rm -rf ${q}; exit $st; }`,
+    { input: tgz(kit, Math.floor(Date.now() / 1000)), capture: true, wait });
+}
+
+/* The last line of a remove-all's stdout as JSON, or null. */
+function lastJson(stdout) {
+    try {
+        return JSON.parse(stdout.trim().split('\n').pop());
+    } catch (e) {
+        return null;
+    }
+}
+
+function versioned(list) {
+    return list.map((x) => (x.version ? `${x.id} ${x.version}` : x.id)).join(', ');
+}
+
+function showPlan(plan) {
+    const rest = [];
+    const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`;
+    const updater = [plan.sources && count(plan.sources, 'source'), plan.tokens && count(plan.tokens, 'token')].filter(Boolean);
+    if (updater.length) {
+        rest.push(`the updater's ${updater.join(' and ')}`);
+    }
+    if (plan.fallback) {
+        rest.push('the provisioning fallback');
+    }
+    rest.push(`the deploy tool ${plan.deploy_tool} with its backups`);
+    say('Uninstall removes what the Store setup put on the head unit:');
+    say(`  apps:  ${versioned(plan.apps) || 'none'}`);
+    say(`  tools: ${versioned(plan.tools) || 'none'}`);
+    say(`  and ${rest.join(', ')}`);
+    if ((plan.kept || []).length) {
+        say(`  It keeps what IterioDev's App Manager installed: ${plan.kept.join(', ')}`);
+    }
+}
+
+/* Without the Store there is no Restart head unit to point at. */
+const AFTER_UNINSTALL = 'restart the head unit later';
+
+async function uninstall(o) {
+    const from = o.from ? fromFolder(o.from) : null;
+    await reach(o);
+    const has = await ssh(o, DEPLOY_HAS, { input: Buffer.alloc(0), capture: true });
+    const which = has.status === 0 ? has.stdout.trim() : '';
+    if (which === 'absent') {
+        say('The Store setup is not on this head unit: nothing to remove.');
+        return 0;
+    }
+    let kit = null;
+    if (which !== 'installed') {
+        // the deploy tool on the unit has no remove-all: the published one removes the setup
+        const { components } = from ? dirComponents(from) : await githubComponents(await githubRepo(STORE_REPO, null));
+        const c = components.find((x) => x.entry.id === 'mgu-deploy');
+        if (!c) {
+            throw new Error(`${from || STORE_REPO}: the catalog has no mgu-deploy`);
+        }
+        kit = deployToolFiles(await c.fetch());
+    }
+    const plan = lastJson((await removeAllRun(o, kit, '--json')).stdout);
+    if (!plan || !Array.isArray(plan.apps) || !Array.isArray(plan.tools)) {
+        say(kit ? 'The published deploy tool has no uninstall yet; nothing was removed.' :
+            'The deploy tool on the head unit did not say what is installed; nothing was removed.');
+        return 1;
+    }
+    showPlan(plan);
+    if (!o.yes) {
+        const term = process.env.CI ? null : terminal();
+        if (!term) {
+            say('Nothing was removed: run uninstall at a terminal to answer, or add --yes.');
+            return 2;
+        }
+        if (!/^y(es)?$/i.test((await promptLine('Remove all of it? [y/N] ', term)).trim())) {
+            say('Nothing was removed.');
+            return 0;
+        }
+    }
+    const run = await removeAllRun(o, kit, '--yes');
+    const result = lastJson(run.stdout);
+    if (!result || !Array.isArray(result.left)) {
+        say(`The uninstall on the head unit ended with status ${run.status}. Run uninstall again to finish.`);
+        return 1;
+    }
+    if (result.left.length) {
+        const still = `Not finished: ${result.left.join(', ')} ${result.left.length === 1 ? 'is' : 'are'} still on the head unit. `;
+        if (!result.restart) {
+            say(still + 'Run uninstall again to finish.');
+            return 1;
+        }
+        say(still + 'Restart the head unit, then run uninstall again to finish.');
+        await offerRestart(o, AFTER_UNINSTALL);
+        return 1;
+    }
+    if (result.self === 'next-start') {
+        const going = (result.next_start || []).concat(['the deploy tool']);
+        say(`Restart the head unit to finish: ${going.slice(0, -1).join(', ')} and ${going[going.length - 1]} go at its next start.`);
+        return offerRestart(o, AFTER_UNINSTALL);
+    }
+    if (result.restart) {
+        say('Removed. Restart the head unit to finish.');
+        return offerRestart(o, AFTER_UNINSTALL);
+    }
+    say('Removed: nothing of the Store setup is left on the head unit.');
+    return 0;
+}
+
+/* ---- status --------------------------------------------------------------------------------- */
+
+/* Which status the unit's deploy tool gives: "read-only" when it has
+ * status --read-only, "plain" when not, "absent" without a deploy tool. */
+const STATUS_HAS = `if [ ! -e ${DEPLOY} ]; then echo absent; elif sh ${DEPLOY} help 2>/dev/null | grep -q -e --read-only; then echo read-only; ` +
+    'else echo plain; fi';
+
+/* Text to paste anywhere: printable ASCII, tabs and newlines; anything else a "?". */
+function plainText(s) {
+    return s.replace(/\r\n?/g, '\n').replace(/[^\x20-\x7e\t\n]/g, '?');
+}
+
+/* The deploy tool's status on the unit, its stderr with it, on stdout;
+ * its exit status. */
+async function statusCommand(o) {
+    await reach(o);
+    const has = await ssh(o, STATUS_HAS, { input: Buffer.alloc(0), capture: true });
+    const which = has.status === 0 ? has.stdout.trim() : '';
+    if (which === 'absent') {
+        say('The Store is not installed on this head unit: it has no deploy tool.');
+        return 1;
+    }
+    if (which !== 'read-only' && which !== 'plain') {
+        say(`The head unit did not say which deploy tool it has (exit ${has.status}); nothing was run.`);
+        return 1;
+    }
+    const r = await ssh(o, `sh ${DEPLOY} status${which === 'read-only' ? ' --read-only' : ''} 2>&1`, { input: Buffer.alloc(0), capture: true });
+    process.stdout.write(plainText(r.stdout));
+    if (which !== 'read-only') {
+        say('(This deploy tool has no read-only status: it may have repaired things, as the updater does at its start.)');
+    }
+    return r.status;
 }
 
 /* ---- usb-repo ------------------------------------------------------------------------------ */
@@ -981,20 +1415,53 @@ function writeFolder(dest, files, catalog) {
     fs.rmSync(old, { recursive: true, force: true });
 }
 
-/* A published source (GitHub repo or catalog URL) as a stick folder. */
+/* The icon a component's catalog entry names, for the stick: { name:
+ * <id>.png, data } when it reads and matches its iconSha256, else null
+ * (said, never failing the stick). */
+async function stickIcon(c) {
+    const e = c.entry;
+    if (typeof e.icon !== 'string' || !e.icon) {
+        return null;
+    }
+    try {
+        const data = await c.icon();
+        if (typeof e.iconSha256 === 'string' && sha256(data) !== e.iconSha256.toLowerCase()) {
+            throw new Error('its sha256 does not match the catalog\'s');
+        }
+        return { name: `${e.id}.png`, data };
+    } catch (err) {
+        say(`  ${e.id}: icon left out (${err.message})`);
+        return null;
+    }
+}
+
+/* A published source (GitHub repo or catalog URL) as a stick folder. Each
+ * icon is copied beside catalog.json; one that is not keeps an https URL,
+ * which the updater fetches when it is online, and leaves out any other. */
 async function publishedFolder(components, commit, label) {
     const files = [];
     const entries = [];
-    for (const c of components) {
-        const data = await c.fetch();
-        const file = c.file || c.entry.artifact.name;
-        if (!plainName(file)) {
-            throw new Error(`${label}: unusable artifact name ${file}`);
+    await waiting('still downloading', async () => {
+        for (const c of components) {
+            const data = await c.fetch();
+            const file = c.file || c.entry.artifact.name;
+            if (!plainName(file)) {
+                throw new Error(`${label}: unusable artifact name ${file}`);
+            }
+            files.push({ name: file, data });
+            say(`  ${c.entry.id} ${c.entry.version}  ${file}`);
+            const icon = await stickIcon(c);
+            const entry = Object.assign({}, c.entry);
+            if (icon) {
+                files.push(icon);
+                Object.assign(entry, { icon: icon.name, iconSha256: sha256(icon.data) });
+            } else if (!/^https:\/\//.test(entry.icon || '')) {
+                delete entry.icon;
+                delete entry.iconSha256;
+            }
+            entries.push(stickEntry(entry, file, data));
         }
-        files.push({ name: file, data });
-        entries.push(stickEntry(c.entry, file, data));
-        say(`  ${c.entry.id} ${c.entry.version}  ${file}`);
-    }
+    });
     return { files, catalog: Object.assign({ schema: 2 }, commit ? { commit } : {}, { components: entries }) };
 }
 
@@ -1003,7 +1470,26 @@ async function urlComponents(url) {
     const catalog = parseCatalog((await get(url, { max: 4 << 20 })).toString('utf8'), url);
     return { commit: catalog.commit, components: catalog.components.map((entry) => ({ entry,
         fetch: () => get(new URL(entry.artifact.url || entry.artifact.name, url).toString(), { max: entry.artifact.size })
-            .then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256)) })) };
+            .then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256)),
+        icon: () => get(new URL(entry.icon, url).toString(), { max: ICON_MAX }) })) };
+}
+
+/* An icon a folder's catalog names: an https URL, or a file inside the folder. */
+function dirIcon(dir, ref) {
+    if (/^https:\/\//.test(ref)) {
+        return get(ref, { max: ICON_MAX });
+    }
+    return Promise.resolve().then(() => {
+        const rel = ref.replace(/^\.\//, '');
+        if (!plainName(path.posix.basename(rel)) || rel.split('/').some((x) => !x || x === '..')) {
+            throw new Error(`unusable icon path ${ref}`);
+        }
+        const file = path.join(dir, ...rel.split('/'));
+        if (fs.statSync(file).size > ICON_MAX) {
+            throw new Error(`more than ${ICON_MAX} bytes`);
+        }
+        return fs.readFileSync(file);
+    });
 }
 
 /* A folder with catalog.json (a dir: publish): its artifacts read beside it. */
@@ -1012,13 +1498,14 @@ function dirComponents(dir) {
     return { commit: catalog.commit, components: catalog.components.map((entry) => {
         const rel = (entry.artifact.url || entry.artifact.name).replace(/^\.\//, '');
         if (/^https?:/.test(rel)) {
-            return { entry, fetch: () => get(rel, { max: entry.artifact.size }).then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256)) };
+            return { entry, fetch: () => get(rel, { max: entry.artifact.size }).then((d) => checked(entry.artifact.name, d, entry.artifact.size, entry.artifact.sha256)),
+                icon: () => dirIcon(dir, entry.icon) };
         }
         if (!plainName(path.posix.basename(rel)) || rel.split('/').includes('..')) {
             throw new Error(`${dir}: unusable artifact path ${rel}`);
         }
         const read = () => checked(entry.artifact.name, fs.readFileSync(path.join(dir, ...rel.split('/'))), entry.artifact.size, entry.artifact.sha256);
-        return { entry, file: path.posix.basename(rel), read, fetch: () => Promise.resolve().then(read) };
+        return { entry, file: path.posix.basename(rel), read, fetch: () => Promise.resolve().then(read), icon: () => dirIcon(dir, entry.icon) };
     }) };
 }
 
@@ -1192,34 +1679,66 @@ async function usbRepo(o) {
 
 /* ---- command line ---------------------------------------------------------------------------- */
 
+/* This script's text: the file, the copy a standalone executable carries
+ * (deploy/installer), or null from stdin. */
+function ownSource() {
+    if (FROM_STDIN) {
+        return null;
+    }
+    try {
+        const sea = require('node:sea');
+        if (sea.isSea()) {
+            return sea.getAsset('mgu-install.js', 'utf8');
+        }
+    } catch (e) {
+        // a Node without node:sea runs the file
+    }
+    return fs.readFileSync(__filename, 'utf8');
+}
+
 /* The header comment; from stdin there is no file to read it from. */
-const USAGE = FROM_STDIN ? 'usage: deploy/README.md, "mgu-install"' : fs.readFileSync(__filename, 'utf8').split('*/')[0].split('\n').slice(3)
+const SOURCE = ownSource();
+const USAGE = SOURCE === null ? 'usage: deploy/README.md, "mgu-install"' : SOURCE.split('*/')[0].split('\n').slice(3)
     .map((l) => l.replace(/^ \* ?/, '')).join('\n').trimEnd();
 
 function parse(argv) {
     const o = { command: argv[0], host: null, port: '22', bind: null, given: false, user: 'root', identity: null, sshOpts: [],
-        noRenderer: false, noUplink: false, token: false, list: false, json: false, remove: null, rest: [] };
+        noRenderer: false, noUplink: false, token: false, noRestartPrompt: false, yes: false, list: false, json: false, remove: null, from: null, rest: [], split: null };
     const value = (i, flag) => {
         if (i >= argv.length) {
             throw new Usage(`${flag} needs a value`);
         }
         return argv[i];
     };
+    // a path flag whose value the argument before this one was (or continued)
+    let pathOf = null;
     for (let i = 1; i < argv.length; i += 1) {
         const a = argv[i];
+        const after = pathOf;
+        pathOf = null;
         if (a === '--host') o.host = value(++i, a);
         else if (a === '--port') o.port = value(++i, a);
         else if (a === '--user') o.user = value(++i, a);
-        else if (a === '--identity') o.identity = value(++i, a);
+        else if (a === '--identity') pathOf = { flag: a, words: [o.identity = value(++i, a)] };
         else if (a === '--ssh-opt') o.sshOpts.push(value(++i, a));
         else if (a === '--no-renderer' && o.command === 'first-install') o.noRenderer = true;
         else if (a === '--no-uplink' && o.command === 'first-install') o.noUplink = true;
         else if (a === '--token' && o.command === 'first-install') o.token = true;
+        else if (a === '--no-restart-prompt' && ['first-install', 'uninstall'].includes(o.command)) o.noRestartPrompt = true;
+        else if (a === '--from' && ['first-install', 'uninstall'].includes(o.command)) pathOf = { flag: a, words: [o.from = value(++i, a)] };
+        else if (a === '--yes' && o.command === 'uninstall') o.yes = true;
         else if (a === '--list' && o.command === 'token') o.list = true;
         else if (a === '--json' && o.command === 'token') o.json = true;
         else if (a === '--remove' && o.command === 'token') o.remove = value(++i, a);
         else if (a.startsWith('--')) throw new Usage(`unknown option ${a} for ${o.command}\n${USAGE}`);
-        else o.rest.push(a);
+        else {
+            o.rest.push(a);
+            if (after) {
+                after.words.push(a);
+                pathOf = after;
+                o.split = o.split || after;
+            }
+        }
     }
     // a target named: no detection
     o.given = argv.slice(1).some((a) => ['--host', '--port'].includes(a));
@@ -1238,20 +1757,37 @@ function parse(argv) {
     return o;
 }
 
+/* On Ctrl+C (SIGINT) or SIGTERM: one line saying how to finish, the ssh
+ * processes stopped, then the exit the signal would have made. */
+function stopOn(signal) {
+    process.once(signal, () => {
+        process.stderr.write(`${process.stderr.isTTY ? os.EOL : ''}stopped; run the same command again to finish${os.EOL}`);
+        sshRunning.forEach((c) => c.kill(signal));
+        if (process.platform === 'win32') {
+            // STATUS_CONTROL_C_EXIT, as a console's Ctrl+C ends a program
+            process.exit(-1073741510);
+        }
+        process.kill(process.pid, signal);
+    });
+}
+
 async function main(argv) {
     const o = parse(argv);
     if (!o.command || o.command === 'help' || o.command === '--help') {
         say(USAGE);
         return 0;
     }
+    stopOn('SIGINT');
+    stopOn('SIGTERM');
     if (Number(process.versions.node.split('.')[0]) < 18) {
         throw new Usage(`Node 18 or newer is needed (this is ${process.version})`);
     }
-    if (o.command === 'first-install' || o.command === 'token') {
+    if (['first-install', 'token', 'uninstall', 'status'].includes(o.command)) {
         if (o.rest.length) {
-            throw new Usage(`${o.command} takes no ${o.rest[0]}`);
+            throw new Usage(`${o.command} takes no ${o.rest[0]}` + (o.split && o.split.words[1] === o.rest[0] ?
+                `; the ${o.split.flag} path has a space: put it in quotes, ${o.split.flag} "${o.split.words.join(' ').replace(/\\+$/, '')}"` : ''));
         }
-        return o.command === 'first-install' ? firstInstall(o) : tokenCommand(o);
+        return { 'first-install': firstInstall, token: tokenCommand, uninstall, status: statusCommand }[o.command](o);
     }
     if (o.command === 'usb-repo') {
         if (!o.rest.length) {
@@ -1272,4 +1808,4 @@ if (require.main === module || FROM_STDIN) {
 }
 
 module.exports = { tgz, untgz, sshArgs, folderName, plainName, parse, SOURCES, sshBanner, enetInterfaces, hsfzFrame, hsfzFrames,
-    didAddress, hsfzGateway, hsfzHuAddress, findUnit, reach };
+    didAddress, linkLocalHost, hsfzGateway, hsfzHuAddress, findUnit, reach, tilesShow, STATUS_HAS };

@@ -10,7 +10,8 @@
  * - provisioning, with the fallback active (its copy and unit present):
  *   every app in custom_apps.json without a registry entry gets a fresh
  *   install from its preinstalled package, as the lowest uid in base.json's
- *   range with no registry entry (getFreeUserId): source, acl.json,
+ *   range with no registry entry (getFreeUserId; with $FAKE_MGR_HOMES_HELD
+ *   set, none with a home either, as repquota lists it): source, acl.json,
  *   keychain, a uids.txt line, then the entry; an app listed without a
  *   package is asked of the backend;
  * - update: an entry whose installationSource is null takes a newer
@@ -26,6 +27,17 @@
  * provisioning pass (startupPass) on its own, as MainApp does once
  * provisioning reaches it.
  * With $FAKE_MGR_STAY_DOWN_AT set to n, the n-th kill respawns nothing.
+ * With $FAKE_MGR_CRASH_MS set, the child the first kill respawns (the
+ * $FAKE_MGR_CRASH_AT-th kill, counted from the first, when set) dies that
+ * many ms after its start and oapcontroller starts another (the next pid),
+ * logged as "crash <pid> <time in ms>".
+ * With $FAKE_MGR_REJECT set ("1", or the ids it is for, comma-separated), a
+ * fresh install is rejected (a manifest naming an interface the unit does
+ * not have) and leaves nothing.
+ * With $FAKE_MGR_DROP set to an app id, every update first deletes that
+ * app's registry entry, as MainApp drops an app whose start fails.
+ * With $FAKE_MGR_UID_ONLY set, a fresh install stops after its uids.txt
+ * line, with no registry entry.
  * With $FAKE_MGR_NO_KEYCHAIN set, a fresh install writes no keychain. With
  * $FAKE_MGR_NO_SOURCE set it is MainApp 8.1.1: an install or update records
  * no installationSource. The
@@ -43,7 +55,8 @@
  * its time in ms and the app homes present at that moment.
  *
  * install(id), update(id) and uninstall(id) are the manager's install,
- * update and uninstall of one app, for fake_inplace.js.
+ * update and uninstall of one app, and rejectedUpdate(id) what its
+ * rejected update leaves, for fake_inplace.js.
  */
 const fs = require('fs');
 const path = require('path');
@@ -89,6 +102,15 @@ const fallbackActive = () => fs.existsSync(path.join(env.MGU_DEPLOY_VAR_OPT, 'mg
 const customApps = () => (fallbackActive() ? (readJson(path.join(mgr, 'data', 'custom_apps.json')) || {}) : {});
 const sectionsOf = () => (env.FAKE_MGR_SECTIONS && readJson(env.FAKE_MGR_SECTIONS)) || {};
 
+/* What MainApp does to an app whose start fails, done to $FAKE_MGR_DROP's
+ * app during another app's update. */
+function dropOther() {
+    const f = env.FAKE_MGR_DROP ? path.join(appsDir, `${env.FAKE_MGR_DROP}.json`) : null;
+    if (f && fs.existsSync(f)) {
+        fs.unlinkSync(f);
+        log(`dropped ${env.FAKE_MGR_DROP}`);
+    }
+}
 /* A fresh install of id from its preinstalled package, as the lowest free
  * uid; the uid, or null when there is no package (a backend query). The
  * entry's installationSource is source when given (null: the install has
@@ -102,14 +124,27 @@ function install(id, how, source) {
     const range = readJson(path.join(mainapp, 'config', 'base.json')).usableUidsAndGids;
     const used = new Set(entries().map((e) => e.entry && e.entry.userId));
     let uid = range.min;
-    while (used.has(uid)) uid += 1;
+    // $FAKE_MGR_HOMES_HELD: a uid whose home is there is held (repquota lists it)
+    while (used.has(uid) || (env.FAKE_MGR_HOMES_HELD && fs.existsSync(home(uid)))) uid += 1;
+    if (uid > range.max) {
+        log(`no free uid for ${id}`);
+        return null;
+    }
     const h = home(uid);
+    if (env.FAKE_MGR_REJECT && (env.FAKE_MGR_REJECT === '1' || env.FAKE_MGR_REJECT.split(',').indexOf(id) >= 0)) {
+        log(`rejected install ${id} ${pkg.version}`);
+        return null;
+    }
     unpack(pkg.file, path.join(h, 'source'));
     write(path.join(h, 'someipInterfaces', 'acl.json'), '{}\n');
     if (!env.FAKE_MGR_NO_KEYCHAIN) {
         write(path.join(h, 'security', 'joynrKeyChain.json'), '{"fake":true}\n');
     }
     fs.appendFileSync(path.join(mgr, 'security', 'uids.txt'), `${uid}=${id}\n`);
+    if (env.FAKE_MGR_UID_ONLY) {
+        log(`install ${id} ${pkg.version} stopped before its entry`);
+        return null;
+    }
     const e = { userId: uid, installationSource: source === undefined ? 'PREINSTALLED' : source,
         provisioningCache: sectionsOf()[id] || customApps()[id], configStateQueueIndex: null };
     if (env.FAKE_MGR_NO_SOURCE) delete e.installationSource;
@@ -121,6 +156,7 @@ function install(id, how, source) {
 /* The update of a registered app to a newer preinstalled package, its uid
  * kept; whether it updated. */
 function update(id, how) {
+    dropOther();
     const e = entries().find((x) => x.id === id);
     const pkg = packageOf(id);
     if (!e || !e.entry || !pkg) return false;
@@ -131,6 +167,20 @@ function update(id, how) {
     if (!env.FAKE_MGR_NO_SOURCE) fs.writeFileSync(e.file, JSON.stringify(Object.assign(e.entry, { installationSource: 'PREINSTALLED' })));
     log(`update ${id} ${pkg.version} uid ${e.entry.userId}${how || ''}`);
     return true;
+}
+
+/* What MainApp's update leaves when its installer rejects the new version
+ * at generateSomeipInterfaces: the app unregistered and its entry
+ * deleted, its source/, rhmiData/ and rhmiDataStartWidget/ removed and
+ * someipInterfaces/ made again, empty; its data, keychain and uid stay. */
+function rejectedUpdate(id) {
+    const e = entries().find((x) => x.id === id);
+    if (!e || !e.entry || !e.entry.userId) return;
+    const h = home(e.entry.userId);
+    fs.unlinkSync(e.file);
+    ['source', 'rhmiData', 'rhmiDataStartWidget', 'someipInterfaces'].forEach((n) => fs.rmSync(path.join(h, n), { recursive: true, force: true }));
+    fs.mkdirSync(path.join(h, 'someipInterfaces'));
+    log(`rejected update ${id} uid ${e.entry.userId}`);
 }
 
 /* The uninstall of a registered app: its entry, its home and its
@@ -187,6 +237,11 @@ function bounce() {
     write(path.join(env.MGU_DEPLOY_PROC, String(pid), 'stat'),
         `${pid} (node) S 1 ${pid} ${pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 0 0\n`);
     fs.writeFileSync(env.FAKE_MGR_PIDFILE, String(pid));
+    const crashed = `${env.FAKE_MGR_PIDFILE}.crashed`;
+    if (env.FAKE_MGR_CRASH_MS && !fs.existsSync(crashed) && (!env.FAKE_MGR_CRASH_AT || killsBefore() === Number(env.FAKE_MGR_CRASH_AT))) {
+        fs.writeFileSync(crashed, '');
+        cp.spawn(process.execPath, [__filename, '--crash', String(pid)], { detached: true, stdio: 'ignore' }).unref();
+    }
 
     entries().forEach(({ id, file, entry }) => {
         if (!entry || !entry.userId) return;
@@ -197,9 +252,10 @@ function bounce() {
         }
     });
 
+    // $FAKE_MGR_NO_START_INSTALL: a start that installs no listed app (MainApp 6.5.5)
     const custom = customApps();
     Object.keys(custom).forEach((id) => {
-        if (!entries().some((e) => e.id === id)) install(id);
+        if (!env.FAKE_MGR_NO_START_INSTALL && !entries().some((e) => e.id === id)) install(id);
     });
 
     const retired = env.FAKE_MGR_RETIRED ? readJson(env.FAKE_MGR_RETIRED) : null;
@@ -240,5 +296,21 @@ function bounce() {
     }
 }
 
-module.exports = { install, update, uninstall, startupPass, log };
-if (require.main === module) bounce();
+module.exports = { install, update, uninstall, rejectedUpdate, startupPass, log };
+/* The child pid dies $FAKE_MGR_CRASH_MS after it started; the next pid is respawned. */
+function crash(pid) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(env.FAKE_MGR_CRASH_MS));
+    if (fs.readFileSync(env.FAKE_MGR_PIDFILE, 'utf8') !== String(pid)) {
+        return;
+    }
+    const btime = Number(/btime (\d+)/.exec(fs.readFileSync(env.MGU_DEPLOY_PROC_STAT, 'utf8'))[1]);
+    write(path.join(env.MGU_DEPLOY_PROC, String(pid + 1), 'stat'),
+        `${pid + 1} (node) S 1 ${pid + 1} ${pid + 1} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 ${Math.round((Date.now() / 1000 - btime) * 100)} 0 0\n`);
+    fs.writeFileSync(env.FAKE_MGR_PIDFILE, String(pid + 1));
+    log(`crash ${pid} ${Date.now()}`);
+}
+
+if (require.main === module) {
+    if (process.argv[2] === '--crash') crash(Number(process.argv[3]));
+    else bounce();
+}

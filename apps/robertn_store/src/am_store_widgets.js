@@ -10,6 +10,7 @@
 const { withAlpha, mix } = require('./kit_canvas.js');
 const { vicon } = require('./kit_vicons.js');
 const W = require('./am_widgets.js');
+const { t: tr } = require('./i18n.js');
 
 const GREEN = '#35d07f', BLUE = '#3d9bff', AMBER = '#ffb020';
 const C = (t, c, d) => (c ? t[c] || c : d);
@@ -135,9 +136,13 @@ function appGrid(cv, t, b, o) {
 // ---- list rows with a picture / vector icon and a control on the right ---------------------------------------
 const rowItems = (o) => (Array.isArray(o.items) ? o.items
     : lines(o.items).map((l, i) => ({ id: `row${i}`, title: l[0], sub: l[1] || '', right: l[2] || 'chevron', vicon: l[3] || '' })));
+// (the Store: o.fit, rows that do not all fit at o.rowH share the box, each on one line: its title, then its sub)
 function listView(b, o) {
-    const rh = o.rowH || 120, all = rowItems(o), n = b.h / rh, max = Math.max(0, all.length - n), top = Math.max(0, Math.min(max, +o.top || 0));
-    return { rh, all, n, max, top, first: Math.floor(top), end: Math.min(all.length, Math.ceil(top + n)) };
+    const all = rowItems(o), line = !!o.fit && all.length * (o.rowH || 120) > b.h + 1e-6, rh = line ? b.h / all.length : o.rowH || 120;
+    const n = b.h / rh, max = Math.max(0, all.length - n), top = Math.max(0, Math.min(max, +o.top || 0));
+    // the gap between rows keeps the focus ring (8 px out from a row) off the next one
+    const gap = Math.max(9, Math.round(rh * 0.13));
+    return { rh, gap, all, n, max, top, line, first: Math.floor(top), end: Math.min(all.length, Math.ceil(top + n)) };
 }
 // the right-hand controls of a row ("toggle:on+trash": laid out from the right) -> [{ kind, arg, x, w }]
 const RIGHT_W = { chevron: 60, trash: 80, toggle: 150 };
@@ -154,7 +159,7 @@ function rightBoxes(b, it, cv, c) {
 }
 // (the Store: o.titleSize, o.subSize and o.ctlK size a smaller row's texts and controls; the defaults are the design's)
 function appList(cv, t, b, o) {
-    const v = listView(b, o), gap = Math.round(v.rh * 0.13), q = o.ctlK || 1, ts = o.titleSize || 40, ss = o.subSize || 30;
+    const v = listView(b, o), gap = v.gap, q = o.ctlK || 1, ts = o.titleSize || 40, ss = o.subSize || 30;
     cv.clip(b.x, b.y, b.w, b.h);
     v.all.slice(v.first, v.end).forEach((it, k) => {
         const y = b.y + (v.first + k - v.top) * v.rh, h = v.rh - gap, s = Math.round(h * 0.73);
@@ -166,8 +171,15 @@ function appList(cv, t, b, o) {
             tx = b.x + 22 * q + s + 32 * q;
         }
         const boxes = rightBoxes(b, it, cv, q), room = (boxes.length ? boxes[boxes.length - 1].x : b.x + b.w) - tx - 8;
-        cv.text(W.fit(cv, String(it.title || ''), room, ts, 'bold'), tx, it.sub ? y + h * 0.47 : y + h / 2 + ts * 0.36, ts, t.text, { font: 'bold' });
-        if (it.sub) cv.text(W.fit(cv, String(it.sub), room, ss), tx, y + h * 0.83, ss, C(t, it.subColor, t.dim));
+        if (v.line) {
+            const title = W.fit(cv, String(it.title || ''), room, ts, 'bold'), sx = tx + cv.textWidth(title, ts, { font: 'bold' }) + 24 * q;
+            cv.text(title, tx, y + h / 2 + ts * 0.36, ts, t.text, { font: 'bold' });
+            const sw = tx + room - sx, sz = it.sub ? W.shrink(cv, it.sub, sw, ss, undefined, 0.85) : ss;
+            if (it.sub && sw > 0) cv.text(W.fit(cv, String(it.sub), sw, sz), sx, y + h / 2 + ts * 0.36, sz, C(t, it.subColor, t.dim));
+        } else {
+            cv.text(W.fit(cv, String(it.title || ''), room, ts, 'bold'), tx, it.sub ? y + h * 0.47 : y + h / 2 + ts * 0.36, ts, t.text, { font: 'bold' });
+            if (it.sub) cv.text(W.fit(cv, String(it.sub), room, ss), tx, y + h * 0.83, ss, C(t, it.subColor, t.dim));
+        }
         const cy = y + h / 2;
         for (const rb of boxes) {
             const re = rb.x + rb.w - 24 * q;                // the control's right edge
@@ -199,7 +211,8 @@ function sideNav(cv, t, b, o) {
             cv.roundRect(b.x + 8, y + ih * 0.22, 6, ih * 0.56, 3, t.text);
         }
         vicon(cv, it.vicon, b.x + b.w / 2 - is / 2, iy, is, c);
-        cv.text(String(it.label), b.x + b.w / 2, iy + is + ls * 1.47, ls, c, { align: 'center' });
+        const ts = W.shrink(cv, String(it.label), b.w - 24, ls, 'label', 0.6);
+        cv.text(W.fit(cv, String(it.label), b.w - 24, ts), b.x + b.w / 2, iy + is + ls * 1.47, ts, c, { align: 'center' });
         if (it.badge && String(it.badge) !== '0') {
             const bx = b.x + b.w / 2 + is * 0.97, by = iy + 6;
             cv.circle(bx, by, 30, t.bg); cv.circle(bx, by, 26, BLUE);
@@ -221,9 +234,11 @@ function vbutton(cv, t, b, o) {
     if (o.style === 'primary') cv.card(b.x, b.y, b.w, b.h, r, off ? [[0, '#2a3341'], [1, '#232a35']] : [[0, c], [1, withAlpha(c, 0.78)]]);
     else cv.strokeRoundRect(b.x, b.y, b.w, b.h, r, 3, off ? t.panelEdge : o.style === 'outline' ? withAlpha(t.text, 0.6) : withAlpha(c, 0.6));
     const fg = off ? t.dim : o.style === 'primary' ? '#ffffff' : o.style === 'outline' ? t.text : c;
-    const hasIcon = !!o.vicon, tw = cv.textWidth(String(o.text || ''), s, { font: 'bold' }) + (hasIcon ? is + 18 : 0), x1 = b.x + (b.w - tw) / 2;
+    const hasIcon = !!o.vicon, room = b.w - 2 * r - (hasIcon ? is + 18 : 0);
+    const ts = W.shrink(cv, String(o.text || ''), room, s, 'bold'), text = W.fit(cv, String(o.text || ''), room, ts, 'bold');
+    const tw = cv.textWidth(text, ts, { font: 'bold' }) + (hasIcon ? is + 18 : 0), x1 = b.x + (b.w - tw) / 2;
     if (hasIcon) vicon(cv, o.vicon, x1, b.y + (b.h - is) / 2, is, fg);
-    cv.text(String(o.text || ''), x1 + (hasIcon ? is + 18 : 0), b.y + b.h / 2 + s * 0.36, s, fg, { font: 'bold' });
+    cv.text(text, x1 + (hasIcon ? is + 18 : 0), b.y + b.h / 2 + ts * 0.36, ts, fg, { font: 'bold' });
 }
 
 // ---- on-screen keyboard: URLs and tokens (layout 'url'), or words (layout 'text': a space bar) ----------------
@@ -260,14 +275,17 @@ function keyBoxes(b, o) {
 }
 // the Enter key says o.go (e.g. 'Search') and types that; default 'Next'
 const shown = (k, o) => (k.kind === 'go' ? o.go || k.text : o.shift && !k.kind && /^[a-z]$/.test(k.text) ? k.text.toUpperCase() : k.text);
+// what a key says: Space, Delete and Shift in the display language (the key itself stays the English name)
+const keyLabel = (s) => ({ Space: tr("Space"), Delete: tr("Delete"), Shift: tr("Shift") })[s] || s;
 function keyboard(cv, t, b, o) {
     keyBoxes(b, o).forEach((k, i) => {
         const press = i === o.pressed;
         const fill = k.kind === 'go' ? [[0, '#5fb4ff'], [1, '#1f5fd0']] : press ? [[0, '#4a5568'], [1, '#3a4352']]
             : k.kind === 'mod' ? (k.text === 'Shift' && o.shift ? [[0, '#3d4a5e'], [1, '#2e3949']] : [[0, '#232b38'], [1, '#18202b']]) : [[0, '#2a3341'], [1, '#1d2430']];
         cv.card(k.x, k.y, k.w, k.h, 18, fill);
-        const label = shown(k, o);
-        cv.text(label, k.x + k.w / 2, k.y + k.h / 2 + 17, label.length > 2 ? 38 : 48, '#ffffff', { align: 'center', font: k.kind ? 'bold' : 'label' });
+        const label = keyLabel(shown(k, o));
+        const font = k.kind ? 'bold' : 'label', size = W.shrink(cv, label, k.w - 16, label.length > 2 ? 38 : 48, font);
+        cv.text(W.fit(cv, label, k.w - 16, size, font), k.x + k.w / 2, k.y + k.h / 2 + 17, size, '#ffffff', { align: 'center', font });
     });
 }
 

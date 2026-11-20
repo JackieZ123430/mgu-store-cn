@@ -27,6 +27,7 @@ struct cfg {
     int embed_finish;           /* embed zero-copy: a frame waits for the GPU (glFinish) before it is committed */
     char embed_marker[128];     /* written by mgu-render-hmi.sh once the template is mounted */
     char hmi_process[32];       /* the HMI's process name: the template is loaded if it started after the marker */
+    char local_conf[256];       /* this unit's own settings, outside the version folder: read last, kept across updates */
     char foreground_gate[256];  /* command reporting "foreground [uid ...]" on fd 3; empty: none */
     int gate_legacy;            /* upstream / iterio apps (layer) hidden while another app is in front */
     uint32_t yield_surfaces[CFG_MAX_YIELD]; /* layer mode hides while one of these is visible */
@@ -35,6 +36,7 @@ struct cfg {
     char touch_iface[32];       /* "auto": vlan73 when it exists, else lo */
     char touch_saddr[32];       /* the display's address (not for lo) */
     int touch_area[4];          /* where apps may claim; w 0: by screen size */
+    char overlay_apps[256];     /* root clients with one of these app ids are overlays (always shown, first for touch) */
     char controller_gate[128];  /* the HMI controller gate's file (upstream inputgate) */
     char controller_lib[64];    /* its library name, looked for in the HMI's maps */
     char record_dir[128];       /* debug: each connection's incoming bytes to <dir>/<app>-<pid>-<n>.bin */
@@ -48,6 +50,7 @@ void cfg_defaults(struct cfg *c);
 int cfg_set(struct cfg *c, const char *key, const char *value);   /* 0, or -1 (logged) */
 int cfg_load(struct cfg *c, const char *path);
 int cfg_set_pair(struct cfg *c, const char *pair);
+int cfg_load_local(struct cfg *c);
 int cfg_fps(const struct cfg *c, const char *app);   /* app's fps setting, else the global one */
 
 #endif

@@ -43,6 +43,14 @@ const PACKAGE = /^([a-z0-9][a-z0-9_-]{0,63})@((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?
 const CHANNEL = /^(releases|tags|branch|branch:[A-Za-z0-9._][A-Za-z0-9._\/-]{0,199})$/;
 const SMALL = 1 << 20; // a JSON file of a source: catalog part, mgu-repo.json, component.json
 const ICON_BYTES = 128 << 10; // a component's icon (PNG)
+// a GitHub component read file by file (githubReader partFiles): at most this many files, this many at a time (fetch.js)
+const PART_FILES = 400;
+const PART_PARALLEL = 6;
+// what one queue's installs keep (batchCache): repo files by git id, and the last whole repo read
+const BATCH_BYTES = 64 << 20;
+const WHOLE_BYTES = 96 << 20;
+const DISK_BLOB_BYTES = 160 << 20;
+const GIT_ID = /^[0-9a-f]{40}$/;
 // a root-service package's mguService: the capability the tool made of it provides
 const SERVICE_KINDS = ['renderer', 'tether'];
 // Packed components carry one fixed mtime: the same tree gives the same bytes.
@@ -61,6 +69,11 @@ function readJsonFile(file) {
 
 /* Writes a root-only file by rename: no reader sees it half written. */
 function writePrivate(file, text) {
+    try {
+        if (fs.readFileSync(file).equals(Buffer.isBuffer(text) ? text : Buffer.from(text))) {
+            return;
+        }
+    } catch (e) { /* not there yet */ }
     const tmp = `${file}.tmp`;
     try {
         fs.unlinkSync(tmp);
@@ -187,8 +200,10 @@ function isFileInside(root, rel) {
 
 const SKIP = (name) => name === '.git' || name === '.DS_Store' || name.indexOf('._') === 0;
 
+const WALK_FILES = 20000;
+
 /* The regular files under root/rel, { name (relative to rel), data, mode };
- * links are left out, at most maxBytes in all. */
+ * links are left out, at most maxBytes and WALK_FILES files in all. */
 function walkInside(root, rel, maxBytes) {
     const out = [];
     let total = 0;
@@ -207,8 +222,10 @@ function walkInside(root, rel, maxBytes) {
                 walk(path.join(dir, name), relName);
             } else if (st.isFile()) {
                 total += st.size;
-                if (total > maxBytes || out.length >= 20000) {
-                    throw new Error(`${rel}: more than ${maxBytes} bytes`);
+                if (total > maxBytes || out.length >= WALK_FILES) {
+                    const files = total <= maxBytes;
+                    const what = files ? `${WALK_FILES} files` : `${maxBytes} bytes`;
+                    throw Object.assign(new Error(`${rel ? `the folder ${rel}` : 'the source folder'} holds more than ${what}`), { tooBig: true, files });
                 }
                 out.push({ name: relName, data: readInside(root, path.posix.join(rel, relName), st.size), mode: st.mode & 0o777 });
             }
@@ -401,6 +418,10 @@ function repoEntries(doc, listDir) {
                 entries.push(Object.assign({}, pat, { id: name, kind: 'app', path: `${m[1]}${name}`, pattern: true }));
             }
         }), (err) => {
+            // a rate limit says nothing of the folder: the read fails, and the source keeps its listing
+            if (err.rateLimited) {
+                throw err;
+            }
             skipped.push(`apps ${pat.path}: ${err.missing ? 'no such folder' : err.message}`);
         });
     }), Promise.resolve()).then(() => ({ entries, skipped }));
@@ -415,8 +436,10 @@ function repoEntries(doc, listDir) {
  * package.json, in its folder). A tool is its folder's component.json, or a
  * service the entry describes; neither has a build step.
  * revision: the short commit shown for a component (a branch channel).
+ * On a branch channel each component has its content (contentOf) at the
+ * commit from treeOf() (resolves with the commit's tree, null when unknown).
  * Components that cannot be used are left out, each reason in `skipped`. */
-function repoCatalog(readFile, commit, revision, listDir) {
+function repoCatalog(readFile, commit, revision, listDir, treeOf) {
     return readFile('mgu-repo.json').then((buf) => {
         const doc = parseJson(buf, 'mgu-repo.json');
         if (!doc || doc.schema !== 1 || !(Array.isArray(doc.components) || doc.apps !== undefined || Array.isArray(doc.tools))) {
@@ -489,6 +512,7 @@ function repoCatalog(readFile, commit, revision, listDir) {
                         : rhmi ? `${rhmi}application.json` : null;
                     return list.concat([Object.assign(catalogLib.checkExtras({
                         id: rc.id, kind: rc.kind, version: c.version, title: pick('title'), description: pick('description'),
+                        texts: pick('texts'),
                         build: rc.kind === 'app' ? 'unit' : null, requires: Object.keys(requires).length ? requires : undefined,
                         optional: pick('optional') !== undefined ? pick('optional') : service || undefined,
                         uninstallable: pick('uninstallable') !== undefined ? pick('uninstallable') : service || undefined,
@@ -500,18 +524,113 @@ function repoCatalog(readFile, commit, revision, listDir) {
                         preload: rc.kind === 'tool' && rc.preload !== undefined ? checkPreload(rc.preload) : null,
                         mguNeeds: pick('needs') !== undefined ? pick('needs') : pick('mguNeeds'),
                         icon: iconRef || undefined,
-                        commit: commit || null, revision: revision || null
+                        commit: commit || null, revision: revision || null,
+                        contentSpec: revision ? contentSpec(rc, script) : null
                     }), rhmi ? { icon: { ref: iconRef, sha256: null, entryPoint: true } } : {})]);
                 })
                 .catch((err) => {
+                    if (err.rateLimited) {
+                        throw err;
+                    }
                     // a folder a pattern matched that is not an app (no manifest) is no component
                     if (!(rc.pattern && err.missing)) {
                         skipped.push(`${rc.id}: ${err.missing ? `${names.map((n) => `${rc.path}/${n}`).join(' or ')} is missing` : err.message}`);
                     }
                     return list;
                 });
-        }), Promise.resolve([])).then((components) => ({ mode: 'repo', commit, components, skipped }));
+        }), Promise.resolve([])).then((components) => {
+            // a folder leaves out what other components inside it are made of; a build script that names
+            // no shared files reads the whole repo but the other apps' folders
+            const specs = components.filter((c) => c.contentSpec);
+            specs.forEach((c) => {
+                const own = c.contentSpec.paths[0];
+                c.contentSpec.skip = own === '' ? specs.filter((o) => o !== c && o.kind === 'app').map((o) => o.path)
+                    : specs.filter((o) => o !== c && o.contentSpec.paths[0].indexOf(`${own}/`) === 0).map((o) => o.contentSpec.paths[0]);
+            });
+            return (treeOf && revision ? treeOf() : Promise.resolve(null)).then((tree) => {
+                specs.forEach((c) => {
+                    c.content = tree ? contentOf(tree, c.contentSpec) : null;
+                    c.contentSpec.repoId = tree ? repoId(tree) : null;
+                });
+                return { mode: 'repo', commit, components, skipped };
+            });
+        });
     });
+}
+
+/* Where a repo-tree component's content (contentOf) is read from: its
+ * folder (a service or preload tool: the one file of it that it packs); for
+ * an app a build script makes, also the files its build.shared names and
+ * the script, or, when it names none, the whole repo. listing: its
+ * mgu-repo.json entry, a change of which is a change of it too. */
+function contentSpec(rc, script) {
+    const listing = crypto.createHash('sha256').update(JSON.stringify(rc)).digest('hex');
+    // a file name checkService / checkPreload checked
+    const one = rc.kind === 'tool' && ((rc.service && rc.service.exec) || (rc.preload && rc.preload.library));
+    if (one) {
+        return { paths: [`${rc.path}/${one}`], skip: [], listing };
+    }
+    if (!script) {
+        return { paths: [rc.path], skip: [], listing };
+    }
+    const shared = rc.build && Array.isArray(rc.build.shared) && rc.build.shared.length && rc.build.shared.every((p) => typeof p === 'string' && safeRel(p))
+        ? rc.build.shared : null;
+    const run = [rc.build.python, rc.build.node].filter((p) => typeof p === 'string' && safeRel(p));
+    return shared ? { paths: [rc.path].concat(shared, run), skip: [], listing } : { paths: [''], skip: [], listing };
+}
+
+/* What a repo-tree component is made of at a commit, from the commit's
+ * tree ({ sha: the root tree's id, entries: [{ path, sha }] }, git's
+ * recursive listing): the git ids of everything under spec.paths ('' the
+ * whole repo; one not there counts as missing), leaving out the folders in
+ * spec.skip, together with spec.listing. Two commits give the same content
+ * exactly when none of that differs. null when the first path, the
+ * component's own, is not there. */
+function contentOf(tree, spec) {
+    // one walk per tree: its paths' ids and each folder's entries
+    if (!tree.index) {
+        const children = new Map();
+        tree.entries.forEach((e) => {
+            const parent = e.path.indexOf('/') < 0 ? '' : e.path.slice(0, e.path.lastIndexOf('/'));
+            children.set(parent, (children.get(parent) || []).concat([e.path]));
+        });
+        Object.defineProperty(tree, 'index', { value: { sha: new Map(tree.entries.map((e) => [e.path, e.sha])), children } });
+    }
+    const { sha, children } = tree.index;
+    const holds = (p) => spec.skip.some((s) => p === '' || s.indexOf(`${p}/`) === 0);
+    const ids = [];
+    const walk = (p) => {
+        if (spec.skip.indexOf(p) >= 0) {
+            return;
+        }
+        if (p !== '' && !sha.has(p)) {
+            ids.push(`${p} -`);
+        } else if (holds(p)) {
+            (children.get(p) || []).sort().forEach(walk);
+        } else {
+            ids.push(`${p} ${p === '' ? tree.sha : sha.get(p)}`);
+        }
+    };
+    if (spec.paths[0] !== '' && !sha.has(spec.paths[0])) {
+        return null;
+    }
+    spec.paths.forEach(walk);
+    return crypto.createHash('sha256').update(`${spec.listing}\n${ids.join('\n')}`).digest('hex');
+}
+
+/* The git id of a tree's mgu-repo.json, which holds every component's listing. */
+function repoId(tree) {
+    const e = tree.entries.find((x) => x.path === 'mgu-repo.json');
+    return e ? e.sha : null;
+}
+
+/* A component's content at another commit (its tree), for an install
+ * recorded with that commit alone: spec's listing is the newer commit's, so
+ * it stands for that commit's only while mgu-repo.json is the same file
+ * (spec.repoId); otherwise, or when its folder is not there, '-', which
+ * matches no content. */
+function contentThen(tree, spec) {
+    return (spec.repoId && repoId(tree) === spec.repoId && contentOf(tree, spec)) || '-';
 }
 
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -564,7 +683,7 @@ function packComponent(entry, files) {
                 throw new Error(`${entry.id}: bad unit name ${u.name}`);
             }
             entries.push({ name: `units/${u.name}`, data: take(u.from || u.name, 'unit'), mode: 0o644 });
-            return { name: u.name };
+            return u.runsInSafeMode === true ? { name: u.name, runsInSafeMode: true } : { name: u.name };
         })
     });
     if (c.dropins !== undefined) {
@@ -892,10 +1011,16 @@ function ua(version) {
     return { 'User-Agent': `mgu-updater/${version}` };
 }
 
-/* A repo's answer that another token (or none) may get past: 401, 404, or a
- * 403 that is no rate limit (an organisation's SSO, a permission). */
+/* GitHub refusing a token: 401, or a 403 that is no rate limit (an
+ * organisation's SSO, a permission, a GitHub App not installed there). */
+function tokenRefused(err) {
+    return err.status === 401 || (err.status === 403 && !err.rateLimited);
+}
+
+/* A repo's answer that another token (or none) may get past: a refused
+ * token, or 404. */
 function refused(err) {
-    return err.status === 401 || err.status === 404 || (err.status === 403 && !err.rateLimited);
+    return err.status === 404 || tokenRefused(err);
 }
 
 function missing(err) {
@@ -905,9 +1030,169 @@ function missing(err) {
 /* Every reader has: network (it needs the internet); catalog() -> { mode,
  * channel, commit, components, skipped }; artifact(entry, onProgress) -> a
  * catalog or releases entry's bytes; icon(entry) -> its icon's bytes (at most
- * ICON_BYTES; readers whose entries can name one); files(commit, onProgress, under) -> the
+ * ICON_BYTES; readers whose entries can name one); files(commit, onProgress, under, paths) -> the
  * repo's files ({ name relative to the repo root, data, mode }) for a
- * repo-tree entry, those under the folder `under` when it is given. */
+ * repo-tree entry, those under the folder `under` when it is given; paths
+ * (partPaths), when given, lets a reader read only the files under them
+ * (a GitHub reader marks them `partial`: a build that fails with only
+ * those runs again with the whole repo). */
+
+/* The paths a repo-tree entry is made from, for a reader to read only
+ * those: a component's folder (a service or preload tool: the one file of
+ * it that it packs), or for an app a build script makes, its folder, the
+ * files its build.shared names and the script. null when the build names
+ * no shared files (it reads the whole repo). */
+function partPaths(entry) {
+    if (!entry.path) {
+        return null;
+    }
+    const one = (entry.daemon && entry.daemon.exec) || (entry.preload && entry.preload.library);
+    if (one) {
+        return [`${entry.path}/${one}`];
+    }
+    if (!entry.script) {
+        return [entry.path];
+    }
+    const spec = contentSpec({ kind: 'app', path: entry.path, build: entry.buildSpec }, entry.script);
+    return spec.paths[0] === '' ? null : spec.paths;
+}
+
+/* The paths an app a build script makes is built from when its repo is
+ * too big to hand the build whole: its folder, the files its build.shared
+ * names and the script. */
+function buildPaths(entry) {
+    const b = entry.buildSpec || {};
+    return [entry.path].concat(Array.isArray(b.shared) ? b.shared : [], [b.python, b.node])
+        .filter((p) => typeof p === 'string' && safeRel(p));
+}
+
+/* What the installs of one run of the updater's queue keep for each other
+ * (Updater.next clears it when the queue is empty): commits' trees (by
+ * repo and commit), repo files by their git id, at most BATCH_BYTES, and
+ * the last whole repo read, when it unpacked to at most WHOLE_BYTES. With
+ * dir, the repo files also stay there by their git id for the next runs (a
+ * repo's shared build files are not read again for each app installed on
+ * its own), at most maxDisk bytes: before a file is written, the least
+ * recently used ones the current install does not use go first, and a file
+ * that still does not fit is kept for this run only. drop() empties dir. */
+function batchCache(dir, maxDisk) {
+    const cap = maxDisk || DISK_BLOB_BYTES;
+    const file = (id) => (dir && GIT_ID.test(id) ? path.join(dir, id) : null);
+    // dir as this run sees it: name -> { size, t } (last used), and their bytes
+    let disk = null;
+    let diskBytes = 0;
+    const onDisk = () => {
+        if (!disk) {
+            disk = new Map();
+            diskBytes = 0;
+            try {
+                fs.readdirSync(dir).forEach((n) => {
+                    const st = fs.statSync(path.join(dir, n));
+                    disk.set(n, { size: st.size, t: st.mtime.getTime() });
+                    diskBytes += st.size;
+                });
+            } catch (e) { /* none kept */ }
+        }
+        return disk;
+    };
+    const forget = (n) => {
+        rmQuiet(path.join(dir, n));
+        diskBytes -= disk.get(n).size;
+        disk.delete(n);
+    };
+    // makes room for n more bytes, sparing the files in inUse; whether they fit
+    const room = (n, inUse) => {
+        const kept = onDisk();
+        if (diskBytes + n <= cap) {
+            return true;
+        }
+        const spare = Array.from(kept.keys()).filter((k) => !inUse.has(k)).sort((a, b) => kept.get(a).t - kept.get(b).t);
+        if (diskBytes - spare.reduce((b, k) => b + kept.get(k).size, 0) + n > cap) {
+            return false;
+        }
+        while (diskBytes + n > cap) {
+            forget(spare.shift());
+        }
+        return true;
+    };
+    return {
+        trees: new Map(),
+        blobs: new Map(),
+        bytes: 0,
+        whole: null,
+        // inUse: the git ids of the files the current install reads
+        keep(id, data, inUse) {
+            if (!this.blobs.has(id) && this.bytes + data.length <= BATCH_BYTES) {
+                this.blobs.set(id, data);
+                this.bytes += data.length;
+            }
+            const f = file(id);
+            if (f && !onDisk().has(id) && room(data.length, inUse)) {
+                try {
+                    mkdirPrivate(dir);
+                    writePrivate(f, data);
+                    disk.set(id, { size: data.length, t: Date.now() });
+                    diskBytes += data.length;
+                } catch (e) { /* kept for this run only */ }
+            }
+        },
+        // a file by its git id: this run's, else the one kept in dir when it still is that file
+        blob(id) {
+            if (this.blobs.has(id)) {
+                return this.blobs.get(id);
+            }
+            const f = file(id);
+            let data = null;
+            try {
+                data = f ? fs.readFileSync(f) : null;
+            } catch (e) { /* not kept */ }
+            if (!data) {
+                return null;
+            }
+            const kept = onDisk().get(id);
+            if (gitBlobId(data) !== id) {
+                if (kept) {
+                    forget(id);
+                } else {
+                    rmQuiet(f);
+                }
+                return null;
+            }
+            const now = new Date();
+            try {
+                fs.utimesSync(f, now, now);
+            } catch (e) { /* its age stays */ }
+            if (kept) {
+                kept.t = now.getTime();
+            }
+            return data;
+        },
+        clear() {
+            this.trees.clear();
+            this.blobs.clear();
+            this.bytes = 0;
+            this.whole = null;
+            disk = null;
+        },
+        drop() {
+            try {
+                fs.readdirSync(dir).forEach((n) => rmQuiet(path.join(dir, n)));
+            } catch (e) { /* none kept */ }
+            disk = null;
+        }
+    };
+}
+
+function rmQuiet(file) {
+    try {
+        fs.unlinkSync(file);
+    } catch (e) { /* gone */ }
+}
+
+/* A file's git id (a tree entry's sha). */
+function gitBlobId(data) {
+    return crypto.createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
+}
 
 /* A folder source: catalog.json or mgu-repo.json at root. */
 function folderReader(root, ctx) {
@@ -950,8 +1235,37 @@ function folderReader(root, ctx) {
             }
             return Promise.resolve().then(() => readInside(root, url.replace(/^\.\//, ''), entry.artifact.size));
         },
-        files: (commit, onProgress, under) => Promise.resolve().then(() => walkInside(root, under || '', ctx.maxBuildBytes)
-            .map((f) => (under ? Object.assign(f, { name: `${under}/${f.name}` }) : f))),
+        // with paths, the files under each (one not there left out, but the first), at most maxBuildBytes in all
+        files: (commit, onProgress, under, paths) => Promise.resolve().then(() => {
+            if (!paths) {
+                return walkInside(root, under || '', ctx.maxBuildBytes).map((f) => (under ? Object.assign(f, { name: `${under}/${f.name}` }) : f));
+            }
+            const max = ctx.maxBuildBytes;
+            const seen = new Set();
+            let total = 0;
+            return paths.reduce((out, p, i) => {
+                let st;
+                try {
+                    st = fs.lstatSync(safePath(root, p));
+                } catch (e) {
+                    if (i && e.code === 'ENOENT') {
+                        return out;
+                    }
+                    throw e;
+                }
+                let got;
+                try {
+                    got = (st.isDirectory() ? walkInside(root, p, max - total).map((f) => Object.assign(f, { name: `${p}/${f.name}` }))
+                        : st.isFile() ? [{ name: p, data: readInside(root, p, max - total), mode: st.mode & 0o777 }] : [])
+                        .filter((f) => !seen.has(f.name) && seen.add(f.name));
+                } catch (e) {
+                    // past the first path, the limit is what is left of it
+                    throw i && e.tooBig && !e.files ? Object.assign(new Error(`${paths.join(', ')} hold more than ${max} bytes`), { tooBig: true }) : e;
+                }
+                total += got.reduce((n, f) => n + f.data.length, 0);
+                return out.concat(got);
+            }, []);
+        }),
         icon: (entry) => (/^https:\/\//.test(entry.icon.ref) ? ctx.net.get(entry.icon.ref, ua(ctx.version), 'icon.png', ICON_BYTES)
             : iconOf(entry, (rel, max) => Promise.resolve().then(() => {
                 if (!safeRel(rel)) {
@@ -966,6 +1280,8 @@ function folderReader(root, ctx) {
 
 const INDEX_PACKAGES = 50;
 const INDEX_PACKAGE_BYTES = 32 << 20;
+// the most the packages kept under cacheDir come to, every index source's
+const INDEX_CACHE_BYTES = 128 << 20;
 // an index version 2 kind: an app, or a root-service package (packageEntry)
 const INDEX_KINDS = ['app'].concat(SERVICE_KINDS);
 const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
@@ -996,21 +1312,54 @@ function indexEntry(item, url) {
     });
 }
 
+function keptBytes(dir) {
+    let n = 0;
+    try {
+        fs.readdirSync(dir).forEach((d) => fs.readdirSync(path.join(dir, d)).forEach((f) => {
+            n += fs.statSync(path.join(dir, d, f)).size;
+        }));
+    } catch (e) { /* none yet */ }
+    return n;
+}
+
 /* An https source: catalog.json at a URL, artifacts absolute or relative
  * to it; or an App Manager index there (index mode), packages https,
- * absolute or relative to the index, each kept in
- * <cacheDir>/<source id>/<sha256>.tgz (root's, 0600; the ones the index no
- * longer lists go) once downloaded and checked against its sha256. Version
- * 2 lists its entries as they stand, a package downloaded on install and
- * checked to be the one its entry names; version 1, {"packages": [{url,
- * sha256}]}, has each package downloaded and read for what it is
- * (packageEntry). */
+ * absolute or relative to the index. A package downloaded and checked
+ * against its sha256 is kept in <cacheDir>/<source id>/<sha256>.tgz (root's,
+ * 0600) while it is the newest the index lists of its id, and while every
+ * source's kept packages come to at most INDEX_CACHE_BYTES; one not kept is
+ * downloaded again when needed. Version 2 lists its entries as they stand, a
+ * package downloaded on install and checked to be the one its entry names;
+ * version 1, {"packages": [{url, sha256}]}, has each package downloaded once
+ * and read for what it is (packageEntry), which <cacheDir>/<source
+ * id>/index.json keeps by its sha256. */
 function httpsReader(s, ctx) {
     const cache = ctx.cacheDir ? path.join(ctx.cacheDir, s.id) : null;
     const cached = (sha) => (cache ? path.join(cache, `${sha}.tgz`) : null);
+    const memoFile = cache ? path.join(cache, 'index.json') : null;
     const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
-    // a version 2 index: one entry per package from the index itself; the
-    // packages kept from an earlier read that it still lists stay
+    const keep = (sha, b) => {
+        if (cache && keptBytes(ctx.cacheDir) + b.length <= INDEX_CACHE_BYTES) {
+            try {
+                mkdirPrivate(cache);
+                writePrivate(cached(sha), b);
+            } catch (e) {
+                console.log(`source ${s.id}: ${sha}.tgz not kept: ${e.message}`);
+            }
+        }
+    };
+    const drop = (sha) => {
+        try {
+            fs.unlinkSync(cached(sha));
+        } catch (e) { /* not kept */ }
+    };
+    const prune = (newest, names) => {
+        const stay = Array.from(newest.values()).map((e) => `${e.artifact.sha256}.tgz`).concat(names);
+        if (cache && fs.existsSync(cache)) {
+            fs.readdirSync(cache).filter((n) => stay.indexOf(n) < 0).forEach((n) => fs.unlinkSync(path.join(cache, n)));
+        }
+    };
+    // a version 2 index: one entry per package from the index itself
     const fromIndex2 = (doc) => {
         const skipped = [];
         const newest = new Map();
@@ -1030,16 +1379,20 @@ function httpsReader(s, ctx) {
                 skipped.push(`${name}: ${err.message}`);
             }
         });
-        const keep = Array.from(newest.values()).map((e) => `${e.artifact.sha256}.tgz`);
-        if (cache && fs.existsSync(cache)) {
-            fs.readdirSync(cache).filter((n) => keep.indexOf(n) < 0).forEach((n) => fs.unlinkSync(path.join(cache, n)));
-        }
+        prune(newest, []);
         return { mode: 'index', commit: null, skipped, components: Array.from(newest.values()).sort((a, b) => (a.id < b.id ? -1 : 1)) };
     };
+    // a version 1 index: what a package is comes from index.json, written by
+    // this version of the updater or, while the package is not kept, an
+    // earlier one; else from the package
     const fromIndex = (doc) => {
         const skipped = [];
         const newest = new Map();
-        const keep = [];
+        let seen = {};
+        try {
+            seen = JSON.parse(fs.readFileSync(memoFile, 'utf8'));
+        } catch (e) { /* none yet */ }
+        const memo = {};
         return doc.packages.slice(0, INDEX_PACKAGES).reduce((p, item) => p.then(() => {
             const sha = String((item && item.sha256) || '').toLowerCase();
             let url = null;
@@ -1053,39 +1406,91 @@ function httpsReader(s, ctx) {
                     if (!/^[0-9a-f]{64}$/.test(sha) || !url || !/^https:\/\//.test(url)) {
                         throw new Error('needs an https url and a sha256');
                     }
-                    const file = cached(sha);
-                    if (file && fs.existsSync(file)) {
-                        return fs.readFileSync(file);
+                    const was = seen[sha];
+                    const kept = fs.existsSync(cached(sha) || '');
+                    if (was && (was.updater === ctx.version || (!kept && was.entry))) {
+                        return { m: was };
                     }
-                    return ctx.net.get(url, ua(ctx.version), name, INDEX_PACKAGE_BYTES).then((b) => {
-                        if (sha256(b) !== sha) {
-                            throw new Error('does not match the sha256 in the index');
-                        }
-                        if (file) {
-                            mkdirPrivate(cache);
-                            writePrivate(file, b);
-                        }
-                        return b;
-                    });
+                    // fresh: the bytes downloaded now, kept only while the newest of their id
+                    const got = kept ? Promise.resolve({ data: fs.readFileSync(cached(sha)) }) :
+                        ctx.net.get(url, ua(ctx.version), name, INDEX_PACKAGE_BYTES).then((b) => {
+                            if (sha256(b) !== sha) {
+                                throw new Error('does not match the sha256 in the index');
+                            }
+                            return { data: b, fresh: b };
+                        });
+                    // a package that does not read is not read again by this version
+                    return got.then(({ data, fresh }) => tar.untgz(data, ctx.maxBuildBytes)
+                        .then((members) => ({ updater: ctx.version, entry: packageEntry(members, data, { url, index: 1 }, 'tgz') }))
+                        .catch((err) => ({ updater: ctx.version, error: err.message }))
+                        .then((m) => ({ m, fresh })));
                 })
-                .then((data) => {
-                    keep.push(`${sha}.tgz`);
-                    return tar.untgz(data, ctx.maxBuildBytes).then((members) => {
-                        const entry = packageEntry(members, data, { url }, 'tgz');
-                        const have = newest.get(entry.id);
-                        if (!have || catalogLib.compareVersions(entry.version, have.version) > 0) {
-                            newest.set(entry.id, entry);
+                .then(({ m, fresh }) => {
+                    memo[sha] = m;
+                    if (m.error) {
+                        throw new Error(m.error);
+                    }
+                    const entry = Object.assign({}, m.entry, { artifact: Object.assign({}, m.entry.artifact, { url }) });
+                    const have = newest.get(entry.id);
+                    if (!have || catalogLib.compareVersions(entry.version, have.version) > 0) {
+                        newest.set(entry.id, entry);
+                        if (have) {
+                            drop(have.artifact.sha256);
                         }
-                    });
+                        if (fresh) {
+                            keep(sha, fresh);
+                        }
+                    } else if (!fresh && !Array.from(newest.values()).some((e) => e.artifact.sha256 === sha)) {
+                        drop(sha);
+                    }
                 })
                 .catch((err) => {
                     skipped.push(`${name}: ${err.message}`);
                 });
         }), Promise.resolve()).then(() => {
-            if (cache && fs.existsSync(cache)) {
-                fs.readdirSync(cache).filter((n) => keep.indexOf(n) < 0).forEach((n) => fs.unlinkSync(path.join(cache, n)));
+            prune(newest, ['index.json']);
+            if (cache) {
+                try {
+                    mkdirPrivate(cache);
+                    writePrivate(memoFile, JSON.stringify(memo));
+                } catch (e) {
+                    console.log(`source ${s.id}: index.json not written: ${e.message}`);
+                }
             }
             return { mode: 'index', commit: null, skipped, components: Array.from(newest.values()).sort((a, b) => (a.id < b.id ? -1 : 1)) };
+        });
+    };
+    /* An artifact's bytes; an index's package is checked against its sha256 and kept (keep). */
+    const artifact = (entry, onProgress) => {
+        const index = entry.artifact.index;
+        const file = index && cached(entry.artifact.sha256);
+        // what a version 2 index says of a package is the package's own word
+        const own = (b) => (index !== 2 ? Promise.resolve(b) : tar.untgz(b, ctx.maxBuildBytes).then((members) => {
+            const p = packageEntry(members, b, {}, 'tgz');
+            if (p.id !== entry.id || p.version !== entry.version || p.service !== entry.service) {
+                throw new Error(`the package is ${p.id}@${p.version}${p.service ? ` (${p.service})` : ''}, not what the index says`);
+            }
+            return b;
+        }));
+        if (file && fs.existsSync(file)) {
+            const b = fs.readFileSync(file);
+            if (sha256(b) === entry.artifact.sha256) {
+                return own(b);
+            }
+        }
+        const url = new URL(entry.artifact.url || entry.artifact.name, s.url).toString();
+        const got = ctx.net.get(url, ua(ctx.version), entry.artifact.name, entry.artifact.size, onProgress);
+        if (!index) {
+            return got;
+        }
+        return got.then((b) => {
+            if (sha256(b) !== entry.artifact.sha256) {
+                throw new Error('download does not match the catalog (size or sha256)');
+            }
+            return own(b).then(() => {
+                keep(entry.artifact.sha256, b);
+                return b;
+            });
         });
     };
     return {
@@ -1101,46 +1506,11 @@ function httpsReader(s, ctx) {
             }
             return Object.assign({ mode: 'catalog' }, catalogLib.parse(text));
         }),
-        artifact: (entry, onProgress) => {
-            const file = entry.artifact.sha256 && cached(entry.artifact.sha256);
-            // what a version 2 index says of a package is the package's own word
-            const own = (b) => (entry.artifact.index !== 2 ? Promise.resolve(b) : tar.untgz(b, ctx.maxBuildBytes).then((members) => {
-                const p = packageEntry(members, b, {}, 'tgz');
-                if (p.id !== entry.id || p.version !== entry.version || p.service !== entry.service) {
-                    throw new Error(`the package is ${p.id}@${p.version}${p.service ? ` (${p.service})` : ''}, not what the index says`);
-                }
-                return b;
-            }));
-            if (file && fs.existsSync(file)) {
-                const b = fs.readFileSync(file);
-                if (sha256(b) === entry.artifact.sha256) {
-                    return own(b);
-                }
-            }
-            const url = new URL(entry.artifact.url || entry.artifact.name, s.url).toString();
-            const got = ctx.net.get(url, ua(ctx.version), entry.artifact.name, entry.artifact.size, onProgress);
-            if (entry.artifact.index !== 2) {
-                return got;
-            }
-            return got.then((b) => {
-                if (sha256(b) !== entry.artifact.sha256) {
-                    throw new Error('download does not match the catalog (size or sha256)');
-                }
-                return own(b).then(() => {
-                    if (file) {
-                        mkdirPrivate(cache);
-                        writePrivate(file, b);
-                    }
-                    return b;
-                });
-            });
-        },
+        artifact,
         icon: (entry) => {
             if (entry.icon.packaged) {
-                // a version 1 index's package, kept by its sha256
-                const file = cached(entry.artifact.sha256);
-                return file && fs.existsSync(file) ? packagedIcon(fs.readFileSync(file), entry, ctx.maxBuildBytes)
-                    : Promise.reject(new Error('the package is not kept'));
+                // a version 1 index's package
+                return artifact(entry).then((b) => packagedIcon(b, entry, ctx.maxBuildBytes));
             }
             const url = new URL(entry.icon.ref, s.url).toString();
             if (!/^https:\/\//.test(url)) {
@@ -1166,35 +1536,127 @@ function orderBranches(names, defaultBranch) {
 
 const SEMVER_TAG = /^(?:v|[a-z0-9][a-z0-9_-]{0,63}@)?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 
-/* A GitHub repo through the REST API at conf github_api, on its channel:
+// what a request GitHub's rate limit refused fails with
+const RATE_LIMIT = 'GitHub limit reached. Try later or sign in.';
+
+/* The refs a repo's smart HTTP advertisement (info/refs?service=git-upload-pack)
+ * lists: { refs: { "<ref name>": "<sha>" }, head: the ref HEAD points to, or
+ * null }. An annotated tag's commit is its "<tag>^{}" ref. */
+function parseRefs(buf) {
+    if (buf.slice(0, 30).toString('latin1') !== '001e# service=git-upload-pack\n') {
+        throw new Error('not a git ref advertisement');
+    }
+    const refs = {};
+    let head = null;
+    let i = 0;
+    while (i < buf.length) {
+        const len = /^[0-9a-f]{4}$/.test(buf.slice(i, i + 4).toString('latin1')) ? parseInt(buf.slice(i, i + 4).toString('latin1'), 16) : -1;
+        if (len === 0) {
+            i += 4;
+            continue;
+        }
+        if (len < 4 || i + len > buf.length) {
+            throw new Error('not a git ref advertisement');
+        }
+        let line = buf.slice(i + 4, i + len).toString('utf8').replace(/\n$/, '');
+        i += len;
+        const nul = line.indexOf('\0');
+        if (nul >= 0) {
+            const m = /(?:^| )symref=HEAD:(\S+)/.exec(line.slice(nul + 1));
+            head = m ? m[1] : head;
+            line = line.slice(0, nul);
+        }
+        const m = /^([0-9a-f]{40}) (\S+)$/.exec(line);
+        if (m) {
+            refs[m[2]] = m[1];
+        }
+    }
+    return { refs, head };
+}
+
+/* A GitHub repo on its channel:
  *  releases       the `catalog` release's catalog.json, else the packages
  *                 attached to its releases (releases layout);
  *  branch:<name>  mgu-repo.json at the branch's head commit;
  *  branch         the same, on the repo's default branch;
  *  tags           mgu-repo.json at the highest x.y.z tag (v1.2.3, 1.2.3, <id>@1.2.3).
  * No channel: releases when the repo has a release, else its default branch.
- * catalog()'s `public` is the repo's own word (`private: false`). */
+ *
+ * With a token it is read through the REST API at conf github_api. Without
+ * one it is read from GitHub's web hosts, which the API's rate limit for an
+ * address without a token (60 requests an hour) does not count: the catalog
+ * release's catalog.json from github.com's release download (conf
+ * github_web), a branch's or tag's commit from the refs github.com
+ * advertises to git, files from raw.githubusercontent.com (github_raw) and
+ * the commit's tarball from codeload.github.com (github_codeload). A repo
+ * those do not reach (not there, or private) is read through the API.
+ * catalog()'s `public` is the repo's own word (`private: false`), or that it
+ * was read without a token. apiRequests(): the API requests this reader
+ * made. */
 function githubReader(s, ctx) {
     const api = ctx.githubApi.replace(/\/+$/, '');
     const repoUrl = `${api}/repos/${s.repo}`;
-    const headers = (url, accept) => {
-        const token = ctx.tokenFor(s.id);
+    const apiHost = new URL(api).host;
+    const web = (ctx.githubWeb || 'https://github.com').replace(/\/+$/, '');
+    const rawHost = (ctx.githubRaw || 'https://raw.githubusercontent.com').replace(/\/+$/, '');
+    const codeload = (ctx.githubCodeload || 'https://codeload.github.com').replace(/\/+$/, '');
+    let apiRequests = 0;
+    const anonymous = () => !ctx.tokenFor(s.id);
+    // anon: without the token
+    const headers = (url, accept, anon) => {
+        const token = anon ? '' : ctx.tokenFor(s.id);
         // the token goes to the API host only
         const auth = token && new URL(url).hostname === 'api.github.com' ? { Authorization: `Bearer ${token}` } : {};
         return Object.assign({ Accept: accept }, auth, ua(ctx.version));
     };
+    // every request: the API host's counted, a rate limit's refusal said as such
+    const counted = (url, run) => {
+        if (new URL(url).host === apiHost) {
+            apiRequests += 1;
+        }
+        return run().catch((err) => {
+            throw err.rateLimited ? Object.assign(new Error(RATE_LIMIT), { status: err.status, rateLimited: true }) : err;
+        });
+    };
     // asked for again with their ETag: an unchanged answer is a 304 and the body kept from before
-    const json = (url, name) => ctx.net.cached(url, headers(url, 'application/vnd.github+json'), name, 4 << 20)
+    const json = (url, name) => counted(url, () => ctx.net.cached(url, headers(url, 'application/vnd.github+json'), name, 4 << 20))
         .then((b) => parseJson(b, url));
     // a listing read before from the same commit or the same catalog.json (its memoKey): the updater's copy
     const reuse = (key) => (ctx.reuse ? ctx.reuse(key) : null);
-    const raw = (url, name, max, onProgress) => ctx.net.get(url, headers(url, 'application/octet-stream'), name, max, onProgress);
-    // the tarball endpoint redirects to codeload for its JSON media type; octet-stream is refused (415)
-    const tarball = (commit, onProgress) => ctx.net.get(`${repoUrl}/tarball/${commit}`, headers(repoUrl, 'application/vnd.github+json'),
-        `${s.repo.replace('/', '-')}.tgz`, ctx.maxRepoBytes, onProgress);
+    const raw = (url, name, max, onProgress, anon) => counted(url, () => ctx.net.get(url, headers(url, 'application/octet-stream', anon),
+        name, max, onProgress));
+    // the tarball endpoint redirects to codeload for its JSON media type; octet-stream is refused (415).
+    // Without a token, codeload itself.
+    const tarball = (commit, onProgress, anon) => {
+        const url = anon || anonymous() ? `${codeload}/${s.repo}/tar.gz/${commit}` : `${repoUrl}/tarball/${commit}`;
+        return counted(url, () => ctx.net.get(url, headers(url, 'application/vnd.github+json', anon),
+            `${s.repo.replace('/', '-')}.tgz`, ctx.maxRepoBytes, onProgress));
+    };
+    /* A download, run(anon) with the token and, when GitHub refuses the
+     * token there (a 401, or a 403 that is no rate limit: a GitHub App's
+     * sign-in that a public repo the App is not installed on refuses), again
+     * without it. Of two failures, a rate limit's is said, else the first. */
+    const tokenOrNone = (run) => run(false).catch((err) => {
+        if (anonymous() || !tokenRefused(err)) {
+            throw err;
+        }
+        return run(true).catch((again) => {
+            throw again.rateLimited ? again : err;
+        });
+    });
     // a file's own bytes from the contents API (else it answers with JSON around them)
-    const content = (url, name, max) => ctx.net.get(url, headers(url, 'application/vnd.github.raw+json'), name, max);
+    const content = (url, name, max) => counted(url, () => ctx.net.get(url, headers(url, 'application/vnd.github.raw+json'), name, max));
     const encode = (rel) => rel.split('/').map(encodeURIComponent).join('/');
+    // a file of the repo at a commit: raw.githubusercontent.com without a token, else the contents API
+    const fileAt = (sha, rel, max, anon) => (anon || anonymous() ? raw(`${rawHost}/${s.repo}/${sha}/${encode(rel)}`, path.posix.basename(rel), max)
+        : content(`${repoUrl}/contents/${encode(rel)}?ref=${sha}`, path.posix.basename(rel), max));
+    // a release asset's download from github.com, which redirects to its storage
+    const download = (tag, name) => `${web}/${s.repo}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
+    // the refs github.com advertises to git (parseRefs)
+    const refs = () => {
+        const url = `${web}/${s.repo}.git/info/refs?service=git-upload-pack`;
+        return counted(url, () => ctx.net.get(url, ua(ctx.version), 'refs', 4 << 20)).then(parseRefs);
+    };
     // an icon named by a release asset's name is that asset; an https URL stays
     const assetIcon = (c, assets) => {
         if (c.icon && !/^https:\/\//.test(c.icon.ref)) {
@@ -1224,12 +1686,43 @@ function githubReader(s, ctx) {
         });
     };
 
+    /* The catalog release's catalog.json from github.com, asked for again
+     * with the ETag of its download (an unchanged one is a 304 and the copy
+     * from before); its icons, the release's assets by name, from there too.
+     * null when it is not there or no catalog. */
+    const webCatalog = () => {
+        const url = download('catalog', 'catalog.json');
+        return counted(url, () => ctx.net.cached(url, headers(url, 'application/octet-stream'), 'catalog.json', 4 << 20)).then((b) => {
+            let cat;
+            try {
+                cat = Object.assign({ mode: 'catalog' }, catalogLib.parse(b.toString('utf8')));
+            } catch (e) {
+                return null;
+            }
+            cat.components.forEach((c) => {
+                if (c.icon && !/^https:\/\//.test(c.icon.ref)) {
+                    c.icon.ref = download('catalog', c.icon.ref);
+                }
+            });
+            return cat;
+        }, (err) => {
+            if (err.status === 404) {
+                return null;
+            }
+            throw err;
+        });
+    };
+
     const fromReleases = (releases) => {
         const newest = new Map();
         let meta = null;
         const assets = [];
+        // without a token, each asset from its release's download on github.com
+        const anon = anonymous();
         releases.filter((r) => r && !r.draft && !r.prerelease).forEach((r) => {
-            (r.assets || []).forEach((a) => {
+            (r.assets || []).forEach((listed) => {
+                const a = anon && typeof r.tag_name === 'string' && listed && typeof listed.name === 'string'
+                    ? Object.assign({}, listed, { url: download(r.tag_name, listed.name) }) : listed;
                 assets.push(a);
                 if (a.name === 'mgu-store.json' && !meta) {
                     meta = a;
@@ -1268,6 +1761,7 @@ function githubReader(s, ctx) {
                     id: n.id, kind: 'app', version: n.version,
                     title: typeof t.title === 'string' ? t.title : undefined,
                     description: typeof t.description === 'string' ? t.description : undefined,
+                    texts: t.texts,
                     author: t.author, icon: t.icon, iconSha256: t.iconSha256,
                     artifact: { name: n.asset.name, size: n.asset.size, sha256: null, url: n.asset.url },
                     // nothing in this layout can say so: the owner removes what it installed
@@ -1278,6 +1772,16 @@ function githubReader(s, ctx) {
     };
 
     const releasesList = (n) => json(`${repoUrl}/releases?per_page=${n}`, 'releases.json').then((r) => (Array.isArray(r) ? r : []));
+
+    // a commit's tree for contentOf, through the API with or without a token (GitHub's web hosts give none)
+    const treeAt = (sha) => json(`${repoUrl}/git/trees/${sha}?recursive=1`, 'tree.json').then((t) => {
+        if (!t || t.truncated || typeof t.sha !== 'string' || !Array.isArray(t.tree)) {
+            // asked again it is the same
+            throw Object.assign(new Error(t && t.truncated ? 'the tree is too large to list' : 'not a tree'), { permanent: true });
+        }
+        return { sha: t.sha, entries: t.tree.filter((e) => e && typeof e.path === 'string' && typeof e.sha === 'string')
+            .map((e) => ({ path: e.path, sha: e.sha, type: e.type, mode: e.mode, size: e.size })) };
+    });
 
     const atCommit = (sha, revision) => {
         if (!/^[0-9a-f]{40}$/.test(sha || '')) {
@@ -1295,16 +1799,49 @@ function githubReader(s, ctx) {
             unsure = unsure || e.status !== 404;
             throw Object.assign(e, { missing: e.status === 404 });
         };
-        const readFile = (rel) => content(`${repoUrl}/contents/${encode(rel)}?ref=${sha}`, path.posix.basename(rel), SMALL).catch(failed);
+        const readFile = (rel) => fileAt(sha, rel, SMALL).catch(failed);
+        // through the API with or without a token: GitHub's web hosts list no folder
         const listDir = (rel) => json(`${repoUrl}/contents/${encode(rel)}?ref=${sha}`, 'contents.json').then((items) => {
             if (!Array.isArray(items)) {
                 throw new Error(`${rel}: not a folder`);
             }
             return items.filter((i) => i && i.type === 'dir' && typeof i.name === 'string').map((i) => i.name);
         }, failed);
-        return repoCatalog(readFile, sha, revision ? sha.slice(0, 7) : null, listDir).then((cat) => Object.assign(cat, { memoKey: unsure ? null : key }), (e) => {
+        // read (an API request) only while something is installed from this source's branch; a tree that
+        // cannot be read leaves the content unknown, and the listing is read again next time
+        const treeOf = () => (!(ctx.needContent && ctx.needContent()) ? Promise.resolve(null) : treeAt(sha).catch((e) => {
+            unsure = unsure || !e.permanent;
+            console.log(`source ${s.id}: no tree at ${sha.slice(0, 7)}: ${e.message}`);
+            return null;
+        }));
+        return repoCatalog(readFile, sha, revision ? sha.slice(0, 7) : null, listDir, treeOf).then((cat) => Object.assign(cat, { memoKey: unsure ? null : key }), (e) => {
             throw e.missing ? new Error(`no mgu-repo.json at ${sha.slice(0, 7)}`) : e;
         });
+    };
+
+    /* A branch or tags channel at the commit the advertised refs give it. */
+    const fromRefs = (channel, r) => {
+        if (channel === 'tags') {
+            let best = null;
+            Object.keys(r.refs).forEach((name) => {
+                const m = /^refs\/tags\/([^^]+)$/.exec(name);
+                const v = m && SEMVER_TAG.exec(m[1]);
+                if (v && (!best || catalogLib.compareVersions(v[1], best.version) > 0)) {
+                    // an annotated tag's commit is its peeled ref
+                    best = { version: v[1], sha: r.refs[`${name}^{}`] || r.refs[name] };
+                }
+            });
+            if (!best) {
+                throw new Error('no x.y.z tag');
+            }
+            return atCommit(best.sha, false);
+        }
+        const branch = channel.slice('branch:'.length);
+        const sha = r.refs[`refs/heads/${branch}`];
+        if (!sha) {
+            throw new Error(`no branch ${branch}`);
+        }
+        return atCommit(sha, true);
     };
 
     const onChannel = (channel) => {
@@ -1315,6 +1852,9 @@ function githubReader(s, ctx) {
                 }
                 return releasesList(100).then(fromReleases);
             });
+        }
+        if (anonymous()) {
+            return refs().then((r) => fromRefs(channel, r));
         }
         if (channel === 'tags') {
             return json(`${repoUrl}/tags?per_page=100`, 'tags.json').then((tags) => {
@@ -1334,7 +1874,7 @@ function githubReader(s, ctx) {
         const branch = channel.slice('branch:'.length);
         // the head commit's sha alone (its media type): the commit's files are read only when it moved
         const url = `${repoUrl}/commits/${encodeURIComponent(branch)}`;
-        return ctx.net.cached(url, headers(url, 'application/vnd.github.sha'), 'commit.sha', 1024)
+        return counted(url, () => ctx.net.cached(url, headers(url, 'application/vnd.github.sha'), 'commit.sha', 1024))
             .then((b) => atCommit(b.toString('utf8').trim(), true), (err) => {
                 throw err.status === 404 || err.status === 422 ? new Error(`no branch ${branch}`) : err;
             });
@@ -1346,8 +1886,109 @@ function githubReader(s, ctx) {
         return got.length === 100 && page < PROBE_PAGES ? branchList(page + 1, all) : { names: all, more: got.length === 100 };
     });
 
+    /* The repo's files at commit from its tarball, the top folder
+     * (<owner>-<repo>-<sha>/) left off; the batch keeps the last one. */
+    const wholeRepo = (commit, onProgress) => {
+        const batch = ctx.batch;
+        const key = `${s.repo} ${commit}`;
+        if (batch && batch.whole && batch.whole.key === key) {
+            return Promise.resolve(batch.whole.files);
+        }
+        return tokenOrNone((anon) => tarball(commit, onProgress, anon))
+            .then((buf) => tar.untgz(buf, ctx.maxBuildBytes))
+            .then((members) => {
+                const files = members.map((m) => ({ name: m.name.slice(m.name.indexOf('/') + 1), data: m.data, mode: m.mode }))
+                    .filter((m) => m.name && !m.name.split('/').some(SKIP));
+                if (batch && files.reduce((n, f) => n + f.data.length, 0) <= WHOLE_BYTES) {
+                    batch.whole = { key, files };
+                }
+                return files;
+            });
+    };
+
+    /* The files under paths at commit, by the commit's tree (one API
+     * request, kept for the batch), from raw.githubusercontent.com without
+     * a token in one download child (PART_PARALLEL at a time, the largest
+     * first, over connections it keeps open), gzipped on the way, and
+     * checked against their git ids; a file the batch holds by that id is
+     * not read again. onProgress(bytes, total) in the files' own sizes, each
+     * file's share growing as its gzipped bytes come. Links and submodules
+     * are left out, as a tarball leaves them. Rejects when the first path is
+     * not there, or for more than PART_FILES files. */
+    const partFiles = (commit, paths, onProgress) => {
+        const batch = ctx.batch;
+        const key = `${s.repo} ${commit}`;
+        const tree = batch && batch.trees.has(key) ? batch.trees.get(key) : treeAt(commit);
+        if (batch) {
+            batch.trees.set(key, tree);
+        }
+        const inside = (rel, p) => rel === p || rel.indexOf(`${p}/`) === 0;
+        const sizeOf = (e) => Number(e.size) || 0;
+        return tree.then((t) => {
+            const want = t.entries.filter((e) => e.type === 'blob' && e.mode !== '120000' && !e.path.split('/').some(SKIP) &&
+                paths.some((p) => inside(e.path, p)));
+            if (!want.some((e) => inside(e.path, paths[0]))) {
+                throw new Error(`no ${paths[0]}`);
+            }
+            if (want.length > PART_FILES) {
+                throw new Error(`${want.length} files`);
+            }
+            const total = want.reduce((n, e) => n + sizeOf(e), 0);
+            const got = new Map(want.map((e) => [e, batch ? batch.blob(e.sha) : null]).filter((x) => x[1]));
+            const share = new Map(Array.from(got.keys()).map((e) => [e, sizeOf(e)]));
+            const show = () => {
+                if (onProgress) {
+                    onProgress(Array.from(share.values()).reduce((n, b) => n + b, 0), total);
+                }
+            };
+            show();
+            // a file at a commit never changes, and is checked: a cut download goes on from where it
+            // stopped; one pieced together from cut tries that is not the file is read once more, whole
+            const read = (list, fresh) => {
+                const urls = list.map((e) => `${rawHost}/${s.repo}/${commit}/${encode(e.path)}`);
+                return counted(urls[0], () => ctx.net.getAll(urls.map((url, k) => ({ url, name: path.posix.basename(list[k].path),
+                    maxBytes: sizeOf(list[k]) + 65536 + (sizeOf(list[k]) >> 3) })),
+                Object.assign({ Accept: 'application/octet-stream', 'Accept-Encoding': 'gzip' }, ua(ctx.version)),
+                { immutable: true, fresh, parallel: PART_PARALLEL }, (k, bytes, wire) => {
+                    if (wire) {
+                        share.set(list[k], Math.max(share.get(list[k]) || 0, Math.floor(sizeOf(list[k]) * Math.min(1, bytes / wire))));
+                        show();
+                    }
+                }, ['content-encoding']))
+                    .then((bufs) => Promise.all(bufs.map((b, k) => (/^gzip$/i.test(b.headers['content-encoding'] || '')
+                        ? tar.gunzipBounded(b, sizeOf(list[k])) : Promise.resolve(b))
+                        .then((data) => (gitBlobId(data) === list[k].sha ? data : null), () => null)
+                        .then((data) => {
+                            if (data) {
+                                got.set(list[k], data);
+                                share.set(list[k], sizeOf(list[k]));
+                                return null;
+                            }
+                            if (b.resumed && !fresh) {
+                                return list[k];
+                            }
+                            throw new Error(`${list[k].path} is not the file the tree lists`);
+                        }))))
+                    .then((again) => {
+                        show();
+                        again = again.filter(Boolean);
+                        return again.length ? read(again, true) : null;
+                    });
+            };
+            const missing = want.filter((e) => !got.has(e)).sort((a, b) => sizeOf(b) - sizeOf(a));
+            const inUse = new Set(want.map((e) => e.sha));
+            return (missing.length ? read(missing, false) : Promise.resolve()).then(() => want.map((e) => {
+                if (batch) {
+                    batch.keep(e.sha, got.get(e), inUse);
+                }
+                return { name: e.path, data: got.get(e), mode: e.mode === '100755' ? 0o755 : 0o644 };
+            }));
+        });
+    };
+
     return {
         network: true,
+        apiRequests: () => apiRequests,
         /* What the repo can be added on: its name as GitHub spells it,
          * whether it has a release and an x.y.z tag, its default branch and
          * its branches (orderBranches). */
@@ -1368,39 +2009,64 @@ function githubReader(s, ctx) {
                         more: branches.more
                     };
                 })),
-        catalog: () => json(repoUrl, 'repo.json')
-            .catch((err) => {
-                throw refused(err) ? authError(err.message) : err;
-            })
-            .then((repo) => {
-                const branch = `branch:${repo.default_branch || 'main'}`;
-                const done = (channel) => (c) => Object.assign(c, { channel, public: repo.private === false });
-                if (s.channel) {
-                    const channel = s.channel === 'branch' ? branch : s.channel;
-                    return onChannel(channel).then(done(channel));
-                }
-                return json(`${repoUrl}/releases/tags/catalog`, 'release.json').then((r) => fromCatalog(r).then(done('releases')), (err) => {
-                    if (!missing(err)) {
-                        throw err;
+        catalog: () => {
+            const viaApi = () => json(repoUrl, 'repo.json')
+                .catch((err) => {
+                    throw refused(err) ? authError(err.message) : err;
+                })
+                .then((repo) => {
+                    const branch = `branch:${repo.default_branch || 'main'}`;
+                    const done = (channel) => (c) => Object.assign(c, { channel, public: repo.private === false });
+                    if (s.channel) {
+                        const channel = s.channel === 'branch' ? branch : s.channel;
+                        return onChannel(channel).then(done(channel));
                     }
-                    return releasesList(100).then((r) => (r.length ? fromReleases(r).then(done('releases')) : onChannel(branch).then(done(branch))));
+                    return json(`${repoUrl}/releases/tags/catalog`, 'release.json').then((r) => fromCatalog(r).then(done('releases')), (err) => {
+                        if (!missing(err)) {
+                            throw err;
+                        }
+                        return releasesList(100).then((r) => (r.length ? fromReleases(r).then(done('releases')) : onChannel(branch).then(done(branch))));
+                    });
                 });
-            })
-            .catch((err) => {
-                throw err.rateLimited ? Object.assign(new Error('GitHub rate limit reached'), { status: err.status, rateLimited: true }) : err;
-            }),
-        artifact: (entry, onProgress) => raw(entry.artifact.url, entry.artifact.name, entry.artifact.size, onProgress),
+            if (!anonymous()) {
+                // a token GitHub refuses anywhere in the read leaves the repo to another token, or none
+                return viaApi().catch((err) => {
+                    throw !err.auth && tokenRefused(err) ? authError(err.message) : err;
+                });
+            }
+            // read without a token: the repo is public
+            if (!s.channel || s.channel === 'releases') {
+                return webCatalog().then((cat) => (cat ? Object.assign(cat, { channel: 'releases', public: true }) : viaApi()));
+            }
+            return refs().then((r) => {
+                const channel = s.channel === 'branch' ? `branch:${/^refs\/heads\//.test(r.head || '') ? r.head.slice('refs/heads/'.length) : 'main'}`
+                    : s.channel;
+                return fromRefs(channel, r).then((c) => Object.assign(c, { channel, public: true }));
+            }, (err) => {
+                if (refused(err)) {
+                    return viaApi();
+                }
+                throw err;
+            });
+        },
+        artifact: (entry, onProgress) => tokenOrNone((anon) => raw(entry.artifact.url, entry.artifact.name, entry.artifact.size, onProgress, anon)),
         // a repo tree's icon is its file at the listed commit
-        icon: (entry) => (/^https:\/\//.test(entry.icon.ref) ? raw(entry.icon.ref, 'icon.png', ICON_BYTES)
+        icon: (entry) => (/^https:\/\//.test(entry.icon.ref) ? tokenOrNone((anon) => raw(entry.icon.ref, 'icon.png', ICON_BYTES, null, anon))
             : entry.commit && safeRel(entry.icon.ref) ? iconOf(entry, (rel, max) => (safeRel(rel)
-                ? content(`${repoUrl}/contents/${encode(rel)}?ref=${entry.commit}`, path.posix.basename(rel), max)
+                ? tokenOrNone((anon) => fileAt(entry.commit, rel, max, anon))
                 : Promise.reject(new Error('an icon path stays inside the repo'))))
                 : Promise.reject(new Error('an icon is a release asset, an https url or a file of the repo tree'))),
-        files: (commit, onProgress, under) => tarball(commit, onProgress)
-            .then((buf) => tar.untgz(buf, ctx.maxBuildBytes))
-            // the tarball's one top folder (<owner>-<repo>-<sha>/) is left off
-            .then((members) => members.map((m) => ({ name: m.name.slice(m.name.indexOf('/') + 1), data: m.data, mode: m.mode }))
-                .filter((m) => m.name && !m.name.split('/').some(SKIP) && (!under || m.name.indexOf(`${under}/`) === 0)))
+        treeAt,
+        files: (commit, onProgress, under, paths) => {
+            const whole = () => wholeRepo(commit, onProgress).then((files) => files.filter((m) => !under || m.name.indexOf(`${under}/`) === 0));
+            if (!paths) {
+                return whole();
+            }
+            return partFiles(commit, paths, onProgress).then((files) => Object.assign(files, { partial: true }), (err) => {
+                console.log(`source ${s.id}: ${paths[0]} at ${commit.slice(0, 7)}: the whole repo (${err.message})`);
+                return whole();
+            });
+        }
     };
 }
 
@@ -1616,8 +2282,9 @@ function looseReader(root, ctx) {
 /* ---- one source --------------------------------------------------------------------- */
 
 /* A reader for a stored source or a USB folder. ctx: { net, tokenFor(source
- * id) -> the token text for it or '', version, githubApi, maxRepoBytes (a tarball download), maxBuildBytes (a
- * repo's files) }. */
+ * id) -> the token text for it or '', version, githubApi, githubWeb,
+ * githubRaw, githubCodeload, maxRepoBytes (a tarball download),
+ * maxBuildBytes (a repo's files) }. */
 function reader(s, ctx) {
     if (s.type === 'github') {
         return githubReader(s, ctx);
@@ -1637,6 +2304,7 @@ function label(s) {
 
 module.exports = {
     load, save, checkStored, writePrivate, mkdirPrivate, reader, label, usbSources, mountPoints,
-    repoCatalog, packComponent, serviceUnit, preloadFiles, subtree, packageInfo, packageEntry, readInside, walkInside, authError,
-    renameable, renameApp, packageId, uuid5, orderBranches, entryIcons, isIcon, safePath, REPO, CHANNEL, PACKAGE, ICON_BYTES
+    repoCatalog, contentSpec, contentOf, partPaths, buildPaths, batchCache, contentThen, packComponent, serviceUnit, preloadFiles, subtree, packageInfo, packageEntry, readInside, walkInside, authError,
+    renameable, renameApp, packageId, uuid5, orderBranches, entryIcons, isIcon, safePath, parseRefs, REPO, CHANNEL, PACKAGE, ICON_BYTES,
+    RATE_LIMIT
 };

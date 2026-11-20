@@ -1,0 +1,8 @@
+{
+  "upstreamCommit": "3ecfafd4b6b2492c1776f53e3b74add5653c5c61",
+  "previousOwnerHead": "3d703aefede278f437b8b34f26349e9ca173b95d",
+  "upstreamVersion": "0.9.41",
+  "language": "Simplified Chinese via vehicle language; upstream 32-locale implementation",
+  "validation": "76070 i18n checks passed; vehicle UI pending",
+  "retired": "Older forced-Chinese renderer/font hooks replaced by upstream localization."
+}
