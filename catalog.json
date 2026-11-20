@@ -6,12 +6,12 @@
       "kind": "app",
       "title": "MGU 商店",
       "description": "管理软件源、应用与车机组件，支持安装、更新和卸载。",
-      "version": "0.9.40",
+      "version": "0.9.41",
       "artifact": {
-        "name": "robertn_store@0.9.40.tgz",
-        "size": 4339265,
-        "sha256": "a4e19ccd04cd11cd5b833f5d1da9a256d084f7de92759e12172a6d45adcd2153",
-        "url": "https://github.com/robertnisipeanu/mgu-store/releases/download/robertn_store%400.9.40/robertn_store%400.9.40.tgz"
+        "name": "robertn_store@0.9.41.tgz",
+        "size": 4340030,
+        "sha256": "d2ae95ab835792b566830326c72923483cd199bb9f590d15e0e7fe5f45fdac8e",
+        "url": "https://github.com/robertnisipeanu/mgu-store/releases/download/robertn_store%400.9.41/robertn_store%400.9.41.tgz"
       },
       "build": "unit",
       "requires": {
